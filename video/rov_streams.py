@@ -39,8 +39,22 @@ rov = ROVStreams()
 
 # populate GUI
 for dev in rov.list_devices():
-    print(dev["device"], dev.get("label", ""), dev["caps_flags"])
-# when user clicks on /dev/video1:
+    print(dev["device"], dev.get("label", ""))
+    print("  caps:", dev.get("caps_flags", {}))
+
+    # 👇 NEW: detailed modes
+    for fmt in dev.get("modes", []):
+        fmt_name = fmt.get("format", "?")
+        desc = fmt.get("description") or ""
+        print(f"  format: {fmt_name} {f'({desc})' if desc else ''}")
+        for sz in fmt.get("sizes", []):
+            w = sz.get("width")
+            h = sz.get("height")
+            fps_list = sz.get("fps", [])
+            # turn [30.0, 15.0] into "30, 15"
+            fps_str = ", ".join(str(int(f)) if f.is_integer() else str(f) for f in fps_list)
+            print(f"    {w}x{h} @ {fps_str} fps")
+
 caps = rov.get_device_caps("/dev/video0")
 if caps["caps_flags"]["supports_h264"]:
     # tell Pi to start H.264 stream from that camera
