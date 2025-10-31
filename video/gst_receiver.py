@@ -376,7 +376,7 @@ if __name__ == "__main__":
     ap = argparse.ArgumentParser(description="Windows GStreamer receiver (subprocess, window/raw)")
     ap.add_argument("--name", default="cam0")
     ap.add_argument("--codec", choices=["jpeg", "h264"], default="jpeg")
-    ap.add_argument("--port", type=int, default=5000)
+    ap.add_argument("--port", type=int, default=5002)
     ap.add_argument("--latency-ms", type=int, default=60)
     ap.add_argument("--sink", default="autovideosink")
     ap.add_argument("--sync", action="store_true")

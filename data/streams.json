@@ -1,0 +1,15 @@
+{
+  "pi_endpoint": "tcp://192.168.1.2:5555",
+  "windows_host": "192.168.1.1",
+  "streams": [
+    {
+      "name": "main_camera",
+      "device": "/dev/video0",
+      "width": 1920,
+      "height": 1080,
+      "fps": 30,
+      "video_format": "mjpeg",
+      "port": 5002
+    }
+  ]
+}
