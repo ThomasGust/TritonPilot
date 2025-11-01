@@ -8,7 +8,7 @@ from typing import Optional, Callable, Dict
 import zmq
 import pygame
 
-from pilot_common import PilotFrame, PilotAxes, PilotButtons
+from schema import PilotFrame, PilotAxes, PilotButtons
 
 
 class XboxController:
