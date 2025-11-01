@@ -119,9 +119,96 @@ def list_real_cameras(rov: "ROVStreams") -> list[dict]:
     devices = rov.list_devices()
     return [d for d in devices if is_probably_camera(d)]
 
+def normalize_device(dev: dict) -> dict:
+    """
+    Turn the verbose v4l2-derived structure from the Pi into a GUI-friendly one.
+
+    Input (dev):
+      {
+        "device": "/dev/video0",
+        "exists": True,
+        "label": "C922 ...",
+        "modes": [
+          {
+            "format": "MJPG",
+            "description": "...",
+            "sizes": [
+              {"width": 1280, "height": 720, "fps": [60.0, 30.0, ...]},
+              ...
+            ]
+          },
+          ...
+        ]
+      }
+
+    Output:
+      {
+        "device": "/dev/video0",
+        "exists": True,
+        "label": "C922 ...",
+        "resolutions": {
+          "1280x720": {
+            "width": 1280,
+            "height": 720,
+            "formats": {
+              "MJPG": [60, 30, 24, 20, 15, 10, 7.5, 5],
+              "YUYV": [10, 7.5, 5]
+            }
+          },
+          ...
+        }
+      }
+    """
+    out = {
+        "device": dev.get("device"),
+        "exists": dev.get("exists", False),
+        "label": dev.get("label"),
+        "resolutions": {}
+    }
+
+    modes = dev.get("modes") or []
+
+    for fmt in modes:
+        fmt_name = (fmt.get("format") or "").upper()
+        for sz in fmt.get("sizes", []):
+            w = sz.get("width")
+            h = sz.get("height")
+            if not w or not h:
+                continue
+            key = f"{w}x{h}"
+
+            # make sure this resolution exists in output
+            res_entry = out["resolutions"].setdefault(key, {
+                "width": w,
+                "height": h,
+                "formats": {}
+            })
+
+            # normalize fps: dedupe, sort desc, cast to int when whole number
+            fps_list = sz.get("fps", [])
+            clean_fps = []
+            seen = set()
+            for f in fps_list:
+                # turn 30.0 -> 30
+                f_clean = int(f) if float(f).is_integer() else float(f)
+                if f_clean not in seen:
+                    seen.add(f_clean)
+                    clean_fps.append(f_clean)
+            # sort highest first
+            clean_fps.sort(reverse=True)
+
+            res_entry["formats"][fmt_name] = clean_fps
+
+    return out
+
 rov = ROVStreams()
 real_devices = list_real_cameras(rov)
-print(real_devices)
+device = real_devices[0]
+
+normalized = normalize_device(device)
+print("Normalized device info:")
+print(json.dumps(normalized, indent=2))
+
 """
 # populate GUI
 for dev in rov.list_devices():

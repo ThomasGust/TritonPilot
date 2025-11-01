@@ -9,7 +9,7 @@
       "height": 1080,
       "fps": 30,
       "video_format": "mjpeg",
-      "port": 5002
+      "port": 5000
     }
   ]
 }

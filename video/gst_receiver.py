@@ -17,7 +17,8 @@ import logging
 from dataclasses import dataclass, asdict, field
 from shutil import which
 from typing import Dict, Optional, Any, List
-
+import sys
+import re
 
 logger = logging.getLogger("gst_receiver_subproc")
 if not logger.handlers:
@@ -51,6 +52,89 @@ def _find_gst_launch() -> str:
         "Install GStreamer (Complete) and either add its /bin to PATH or set GST_LAUNCH to the full exe path."
     )
 
+
+def _win_list_udp_port_pids(port: int) -> list[tuple[int, str]]:
+    """
+    Returns [(pid, image_name), ...] for processes bound to UDP :port on Windows.
+    We use `netstat -ano -p udp` + `tasklist /FI "PID eq ..."`.
+    """
+    results: list[tuple[int, str]] = []
+    if os.name != "nt":
+        return results
+
+    try:
+        # netstat -ano -p udp
+        out = subprocess.check_output(
+            ["netstat", "-ano", "-p", "udp"],
+            text=True,
+            stderr=subprocess.DEVNULL,
+            creationflags=subprocess.CREATE_NO_WINDOW if hasattr(subprocess, "CREATE_NO_WINDOW") else 0,
+        )
+    except Exception:
+        return results
+
+    # lines look like:
+    #  UDP    0.0.0.0:5000           *:*                                    1234
+    #  UDP    [::]:5000              *:*                                    1234
+    port_pat = f":{port} "
+    pids: set[int] = set()
+
+    for line in out.splitlines():
+        if port_pat in line:
+            parts = line.split()
+            if parts:
+                # PID is usually the last column
+                try:
+                    pid = int(parts[-1])
+                    pids.add(pid)
+                except ValueError:
+                    pass
+
+    # now resolve image name via tasklist
+    for pid in pids:
+        name = ""
+        try:
+            t_out = subprocess.check_output(
+                ["tasklist", "/FI", f"PID eq {pid}", "/FO", "CSV", "/NH"],
+                text=True,
+                stderr=subprocess.DEVNULL,
+                creationflags=subprocess.CREATE_NO_WINDOW if hasattr(subprocess, "CREATE_NO_WINDOW") else 0,
+            ).strip()
+            # e.g. "gst-launch-1.0.exe","1234","Console","1","10,416 K"
+            if t_out and not t_out.lower().startswith("info:"):
+                name = t_out.split(",", 1)[0].strip().strip('"')
+        except Exception:
+            pass
+
+        results.append((pid, name))
+    return results
+
+
+def _win_kill_udp_port_users(
+    port: int,
+    allowed_names: tuple[str, ...] = ("gst-launch-1.0.exe", "gst-launch-1.0", "python.exe", "python3.exe"),
+):
+    """
+    Best-effort: kill any *likely* old receiver holding this UDP port.
+    We only kill processes whose image name matches allowed_names.
+    """
+    if os.name != "nt":
+        return
+
+    conflicts = _win_list_udp_port_pids(port)
+    for pid, name in conflicts:
+        if name.lower() not in {n.lower() for n in allowed_names}:
+            # don't kill random stuff
+            continue
+        try:
+            subprocess.run(
+                ["taskkill", "/PID", str(pid), "/F"],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                creationflags=subprocess.CREATE_NO_WINDOW if hasattr(subprocess, "CREATE_NO_WINDOW") else 0,
+            )
+        except Exception:
+            pass
 
 @dataclass
 class RxConfig:
@@ -91,7 +175,15 @@ class ReceiverProcess:
             if self.proc and self.proc.poll() is None:
                 logger.warning("Receiver '%s' already running", self.cfg.name)
                 return
+
+            # 👇 NEW: make sure no old receiver is sitting on this UDP port
+            _win_kill_udp_port_users(self.cfg.port)
+
             cmd = self._build_cmd(self.cfg)
+            logger.info("Starting receiver '%s': %s", self.cfg.name, " ".join(cmd))
+            creationflags = 0
+            if os.name == "nt":
+                creationflags = subprocess.CREATE_NEW_PROCESS_GROUP
             logger.info("Starting receiver '%s': %s", self.cfg.name, " ".join(cmd))
             creationflags = 0
             if os.name == "nt":
@@ -278,7 +370,7 @@ class ReceiverProcess:
             if cfg.codec.lower() == "jpeg":
                 caps = "application/x-rtp,media=video,encoding-name=JPEG,payload=26,clock-rate=90000"
                 pipeline = [
-                    "udpsrc", "address=0.0.0.0", f"port={cfg.port}", f"caps={caps}",
+                    "udpsrc", "address=0.0.0.0", "reuse=true", f"port={cfg.port}", f"caps={caps}",
                     "!", "rtpjitterbuffer", f"latency={cfg.latency_ms}",
                     "!", "rtpjpegdepay",
                     "!", "jpegdec",
@@ -292,7 +384,7 @@ class ReceiverProcess:
             else:
                 caps = "application/x-rtp,media=video,encoding-name=H264,payload=96,clock-rate=90000"
                 pipeline = [
-                    "udpsrc", "address=0.0.0.0", f"port={cfg.port}", f"caps={caps}",
+                    "udpsrc", "address=0.0.0.0", "reuse=true", f"port={cfg.port}", f"caps={caps}",
                     "!", "rtpjitterbuffer", f"latency={cfg.latency_ms}",
                     "!", "rtph264depay",
                     "!", "avdec_h264",
@@ -312,7 +404,7 @@ class ReceiverProcess:
         if cfg.codec.lower() == "jpeg":
             caps = "application/x-rtp,media=video,encoding-name=JPEG,payload=26,clock-rate=90000"
             pipeline = [
-                "udpsrc", "address=0.0.0.0", f"port={cfg.port}", f"caps={caps}",
+                "udpsrc", "address=0.0.0.0", "reuse=true", f"port={cfg.port}", f"caps={caps}",
                 "!", "rtpjitterbuffer", f"latency={cfg.latency_ms}",
                 "!", "rtpjpegdepay",
                 "!", "jpegdec",
@@ -323,7 +415,7 @@ class ReceiverProcess:
         else:
             caps = "application/x-rtp,media=video,encoding-name=H264,payload=96,clock-rate=90000"
             pipeline = [
-                "udpsrc", "address=0.0.0.0", f"port={cfg.port}", f"caps={caps}",
+                "udpsrc", "address=0.0.0.0", "reuse=true", f"port={cfg.port}", f"caps={caps}",
                 "!", "rtpjitterbuffer", f"latency={cfg.latency_ms}",
                 "!", "rtph264depay",
                 "!", "avdec_h264",

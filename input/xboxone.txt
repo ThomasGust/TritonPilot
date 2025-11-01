@@ -1,0 +1,25 @@
+Axes:
+Axis 0: Thumbstick left, x axis, left is negative, right is positive
+Axis 1: Thumbstick left, y axis, up is negative, down is positive
+Axis 2: Thumbstick right, x axis, left is negative, right is positive
+Axis 3: Thumbstick right, y axis, up is negative, down is positive
+Axis 4: Left trigger, pulling down makes it go positive
+Axis 5: Right trigger, pulling down makes it go positive
+
+Hats:
+(0, 1) is the up arrow
+(0, -1) is the down arrow
+(-1, 0) is the left arrow
+(1, 0) is the right arrow
+
+Buttons:
+0 is the A Button
+1 is the B Button
+2 is the X Button
+3 is the Y Button
+4 is the left bumper
+5 is the right bumper
+6 is the window Button
+7 is the burger Button
+8 is the left thumbstick pressdown
+9 is the right thumbstick presssdown
