@@ -54,6 +54,15 @@ class SensorPanel(QWidget):
             val = ", ".join(f"{c:.2f}" for c in chans)
         elif typ == "external_depth":
             val = f"{msg.get('depth_m', 0):.2f} m, {msg.get('temperature_c', 0):.1f} C"
+        elif typ == "att":
+            quat = msg.get('quat', {})
+
+            keys = list(quat.keys())
+
+            new_quat = {}
+            for key in keys:
+                new_quat[key] = f"{quat[key]:.3f}"
+            val = f"{new_quat}"
         else:
             val = str(msg)
 
