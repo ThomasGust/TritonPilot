@@ -1,8 +1,9 @@
 import json
 import zmq
 
+print("DEPS IMPORTED")
 class ROVStreams:
-    def __init__(self, endpoint="tcp://192.168.1.2:5555"):
+    def __init__(self, endpoint="tcp://192.168.1.1:5555"):
         self.ctx = zmq.Context.instance()
         self.sock = self.ctx.socket(zmq.REQ)
         self.sock.connect(endpoint)
@@ -201,13 +202,13 @@ def normalize_device(dev: dict) -> dict:
 
     return out
 
-rov = ROVStreams()
-real_devices = list_real_cameras(rov)
-device = real_devices[0]
+#rov = ROVStreams()
+#real_devices = list_real_cameras(rov)
+#device = real_devices[0]
 
-normalized = normalize_device(device)
-print("Normalized device info:")
-print(json.dumps(normalized, indent=2))
+#normalized = normalize_device(device)
+#print("Normalized device info:")
+#print(json.dumps(normalized, indent=2))
 
 """
 # populate GUI

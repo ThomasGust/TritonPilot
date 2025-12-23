@@ -5,7 +5,6 @@ import numpy as np
 from video.gst_receiver import ReceiverProcess, RxConfig
 from video.rov_streams import ROVStreams  # your class above
 
-
 class RemoteCv2Camera:
     """
     cv2-ish wrapper for: Pi camera -> RTP -> Windows GStreamer -> numpy frame

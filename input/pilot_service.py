@@ -1,102 +1,189 @@
 # input/pilot_service.py
 from __future__ import annotations
-import time
+
 import json
+import time
 import threading
+import traceback
 from typing import Optional
 
 import zmq
 
 from schema.pilot_common import PilotFrame, PilotAxes, PilotButtons
-from input.controller import GamepadSource, ControllerSnapshot
+from input.controller import GamepadSource, ControllerSnapshot, list_controllers
 
 
 class PilotPublisherService:
     """
     Background service:
+      - opens controller in the SAME thread that reads it (important for pygame reliability)
       - pulls controller snapshots
       - builds PilotFrame
       - PUB to ROV
 
-    Usage:
-        svc = PilotPublisherService(endpoint="tcp://192.168.1.2:6000")
-        svc.start()
-        ...
-        svc.stop()
+    Debug features:
+      - prints detected controllers at start
+      - prints controller identity + axis/button/hat counts
+      - optional raw dumps (axes/buttons/hats)
+      - exception handling with traceback + auto-retry open
     """
-    def __init__(self,
-                 endpoint: str,
-                 rate_hz: float = 30.0,
-                 deadzone: float = 0.1,
-                 debug: bool = False):
-        self.endpoint = endpoint
-        self.period = 1.0 / rate_hz
-        self.debug = debug
 
-        self.controller = GamepadSource(deadzone=deadzone)
+    def __init__(
+        self,
+        endpoint: str,
+        rate_hz: float = 30.0,
+        deadzone: float = 0.1,
+        debug: bool = False,
+        index: int = 0,
+        dump_raw_every_s: float = 0.0,  # 0 = off
+        reopen_on_error_s: float = 1.0,
+    ):
+        self.endpoint = endpoint
+        self.period = 1.0 / float(rate_hz)
+        self.deadzone = float(deadzone)
+        self.debug = bool(debug)
+        self.index = int(index)
+
+        self.dump_raw_every_s = float(dump_raw_every_s)
+        self.reopen_on_error_s = float(reopen_on_error_s)
 
         ctx = zmq.Context.instance()
         self.sock = ctx.socket(zmq.PUB)
+        # Helpful defaults for shutdown + backpressure
+        try:
+            self.sock.setsockopt(zmq.LINGER, 0)
+            self.sock.setsockopt(zmq.SNDHWM, 1)
+        except Exception:
+            pass
         self.sock.connect(self.endpoint)
 
-        # slow joiner fix — same as your working pub_debug.py
+        # Slow joiner fix
         time.sleep(1.0)
 
         self.seq = 0
         self._stop = threading.Event()
         self._thread: Optional[threading.Thread] = None
-        self._last_debug = 0.0
 
-    def start(self):
-        if self._thread and self._thread.is_alive():
-            return
-        self._stop.clear()
-        self._thread = threading.Thread(target=self._run, daemon=True)
-        self._thread.start()
+        self._last_debug = 0.0
+        self._last_raw_dump = 0.0
+
+        # Controller is created inside the run loop thread
+        self._controller: Optional[GamepadSource] = None
+
+    def start(self, threaded: bool = True):
+        if threaded:
+            if self._thread and self._thread.is_alive():
+                return
+            self._stop.clear()
+            self._thread = threading.Thread(target=self._run_loop, daemon=True)
+            self._thread.start()
+        else:
+            # Foreground mode (useful for debugging)
+            self._stop.clear()
+            self._run_loop()
 
     def stop(self):
         self._stop.set()
         if self._thread:
             self._thread.join(timeout=1.0)
 
-    def _run(self):
+    def _open_controller(self) -> GamepadSource:
+        # Print devices each time we try to open
+        if self.debug:
+            devices = list_controllers()
+            print("[pilot] detected controllers:")
+            for d in devices:
+                print(
+                    f"   index={d['index']} name='{d['name']}' guid='{d['guid']}' "
+                    f"axes={d['axes']} buttons={d['buttons']} hats={d['hats']}"
+                )
+
+        ctrl = GamepadSource(deadzone=self.deadzone, index=self.index, debug=self.debug)
+        return ctrl
+
+    def _build_frame(self, t0: float, snap: ControllerSnapshot) -> PilotFrame:
+        return PilotFrame(
+            seq=self.seq,
+            ts=t0,
+            axes=PilotAxes(
+                lx=snap.lx,
+                ly=snap.ly,
+                rx=snap.rx,
+                ry=snap.ry,
+                lt=snap.lt,
+                rt=snap.rt,
+            ),
+            buttons=PilotButtons(
+                a=snap.a,
+                b=snap.b,
+                x=snap.x,
+                y=snap.y,
+                lb=snap.lb,
+                rb=snap.rb,
+                win=snap.win,
+                menu=snap.menu,
+                lstick=snap.lstick,
+                rstick=snap.rstick,
+            ),
+            dpad=snap.dpad,
+        )
+
+    def _run_loop(self):
+        # Create controller *inside* this thread for pygame stability
+        while not self._stop.is_set() and self._controller is None:
+            try:
+                self._controller = self._open_controller()
+            except Exception as e:
+                print(f"[pilot] ERROR opening controller index={self.index}: {e}")
+                if self.debug:
+                    traceback.print_exc()
+                time.sleep(max(0.1, self.reopen_on_error_s))
+                continue
+
         while not self._stop.is_set():
             t0 = time.time()
+            try:
+                assert self._controller is not None
 
-            snap: ControllerSnapshot = self.controller.read_once()
+                snap: ControllerSnapshot = self._controller.read_once()
+                frame = self._build_frame(t0, snap)
+                self.seq += 1
 
-            frame = PilotFrame(
-                seq=self.seq,
-                ts=t0,
-                axes=PilotAxes(
-                    lx=snap.lx,
-                    ly=snap.ly,
-                    rx=snap.rx,
-                    ry=snap.ry,
-                    lt=snap.lt,
-                    rt=snap.rt,
-                ),
-                buttons=PilotButtons(
-                    a=snap.a,
-                    b=snap.b,
-                    x=snap.x,
-                    y=snap.y,
-                    lb=snap.lb,
-                    rb=snap.rb,
-                    win=snap.win,
-                    menu=snap.menu,
-                    lstick=snap.lstick,
-                    rstick=snap.rstick,
-                ),
-                dpad=snap.dpad,
-            )
-            self.seq += 1
+                self.sock.send_string(json.dumps(frame.to_dict()))
 
-            self.sock.send_string(json.dumps(frame.to_dict()))
+                # periodic debug
+                if self.debug and (t0 - self._last_debug) > 1.0:
+                    print(
+                        f"[pilot] sent seq={frame.seq} "
+                        f"axes={frame.axes} dpad={frame.dpad} "
+                        f"buttons(a,b,x,y,lb,rb,win,menu,ls,rs)="
+                        f"({snap.a},{snap.b},{snap.x},{snap.y},{snap.lb},{snap.rb},{snap.win},{snap.menu},{snap.lstick},{snap.rstick})"
+                    )
+                    self._last_debug = t0
 
-            if self.debug and (t0 - self._last_debug) > 1.0:
-                print(f"[pilot] sent seq={frame.seq} axes={frame.axes} dpad={frame.dpad}")
-                self._last_debug = t0
+                # raw dump (very useful when “sticks/buttons dead”)
+                if self.dump_raw_every_s > 0 and (t0 - self._last_raw_dump) > self.dump_raw_every_s:
+                    raw = self._controller.read_raw_state()
+                    axes = [f"{v:+.3f}" for v in raw["axes"]]
+                    print(f"[pilot] RAW axes={axes} buttons={raw['buttons']} hats={raw['hats']}")
+                    self._last_raw_dump = t0
+
+            except Exception as e:
+                print(f"[pilot] ERROR in publish loop: {e}")
+                if self.debug:
+                    traceback.print_exc()
+
+                # Try to recover by reopening controller (hotplug / SDL weirdness)
+                self._controller = None
+                time.sleep(max(0.1, self.reopen_on_error_s))
+                while not self._stop.is_set() and self._controller is None:
+                    try:
+                        self._controller = self._open_controller()
+                    except Exception as e2:
+                        print(f"[pilot] ERROR reopening controller: {e2}")
+                        if self.debug:
+                            traceback.print_exc()
+                        time.sleep(max(0.1, self.reopen_on_error_s))
 
             # pacing
             elapsed = time.time() - t0

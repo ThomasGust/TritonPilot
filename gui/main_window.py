@@ -12,7 +12,6 @@ from PyQt6.QtWidgets import (
     QHBoxLayout,
     QMessageBox,
 )
-
 from config import (
     PILOT_PUB_ENDPOINT,
     SENSOR_SUB_ENDPOINT,
@@ -20,10 +19,8 @@ from config import (
 from input.pilot_service import PilotPublisherService
 from telemetry.sensor_service import SensorSubscriberService
 from video.cam import RemoteCameraManager
-
 from gui.video_widget import VideoWidget
 from gui.sensor_panel import SensorPanel
-
 
 class MainWindow(QMainWindow):
     # we'll receive sensor messages from a background thread → emit to UI thread
