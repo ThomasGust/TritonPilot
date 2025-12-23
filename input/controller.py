@@ -259,3 +259,7 @@ class GamepadSource:
             lstick=lstick,
             rstick=rstick,
         )
+
+if __name__ == "__main__":
+    contrs = list_controllers()
+    print(contrs)
