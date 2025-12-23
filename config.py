@@ -10,7 +10,7 @@ import os
 from pathlib import Path
 
 # ROV IP (can be overridden via env)
-ROV_HOST = os.environ.get("ROV_HOST", "192.168.1.1")
+ROV_HOST = os.environ.get("ROV_HOST", "192.168.1.2")
 
 # ZMQ endpoints
 PILOT_PUB_ENDPOINT = os.environ.get("ROV_PILOT_EP", f"tcp://{ROV_HOST}:6000")
