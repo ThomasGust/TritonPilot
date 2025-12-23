@@ -10,7 +10,59 @@ from PyQt6.QtWidgets import (
     QHeaderView,
 )
 from PyQt6.QtCore import Qt
+import math
 
+def quaternion_to_euler(q, degrees=False):
+    """
+    Convert a quaternion dict {x, y, z, w} to Euler angles dict
+    {roll, pitch, yaw} using the XYZ (roll-pitch-yaw) convention.
+
+    :param q: dict with keys 'x', 'y', 'z', 'w'
+    :param degrees: if True, return angles in degrees; otherwise radians
+    :return: dict { 'roll': ..., 'pitch': ..., 'yaw': ... }
+    """
+    x = float(q["x"])
+    y = float(q["y"])
+    z = float(q["z"])
+    w = float(q["w"])
+
+    # (optional) normalize to be safe
+    norm = math.sqrt(x*x + y*y + z*z + w*w)
+    if norm == 0:
+        raise ValueError("Quaternion has zero length")
+    x /= norm
+    y /= norm
+    z /= norm
+    w /= norm
+
+    # roll (x-axis rotation)
+    sinr_cosp = 2 * (w * x + y * z)
+    cosr_cosp = 1 - 2 * (x * x + y * y)
+    roll = math.atan2(sinr_cosp, cosr_cosp)
+
+    # pitch (y-axis rotation)
+    sinp = 2 * (w * y - z * x)
+    if abs(sinp) >= 1:
+        # use 90 degrees if out of range
+        pitch = math.copysign(math.pi / 2, sinp)
+    else:
+        pitch = math.asin(sinp)
+
+    # yaw (z-axis rotation)
+    siny_cosp = 2 * (w * z + x * y)
+    cosy_cosp = 1 - 2 * (y * y + z * z)
+    yaw = math.atan2(siny_cosp, cosy_cosp)
+
+    if degrees:
+        roll = math.degrees(roll)
+        pitch = math.degrees(pitch)
+        yaw = math.degrees(yaw)
+
+    return {
+        "roll": f"{roll:.1f}",
+        "pitch": f"{pitch:.1f}",
+        "yaw": f"{yaw:.1f}",
+    }
 
 class SensorPanel(QWidget):
     """
@@ -62,7 +114,9 @@ class SensorPanel(QWidget):
             new_quat = {}
             for key in keys:
                 new_quat[key] = f"{quat[key]:.3f}"
-            val = f"{new_quat}"
+            
+            new_eul = quaternion_to_euler(new_quat, degrees=True)
+            val = f"{new_eul}"
         else:
             val = str(msg)
 
