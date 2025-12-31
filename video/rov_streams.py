@@ -1,7 +1,6 @@
 import json
 import zmq
 
-print("DEPS IMPORTED")
 class ROVStreams:
     def __init__(self, endpoint="tcp://192.168.1.1:5555"):
         self.ctx = zmq.Context.instance()
