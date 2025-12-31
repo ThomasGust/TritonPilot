@@ -69,7 +69,7 @@ class StreamRecorder:
 
     def _run(self) -> None:
         assert self._fh is not None
-        while not self._stop.is_set():
+        while True:
             ev = self._q.get()
             if ev is None:
                 break

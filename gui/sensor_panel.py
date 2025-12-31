@@ -107,16 +107,29 @@ class SensorPanel(QWidget):
         elif typ == "external_depth":
             val = f"{msg.get('depth_m', 0):.2f} m, {msg.get('temperature_c', 0):.1f} C"
         elif typ == "att":
-            quat = msg.get('quat', {})
+            quat = msg.get("quat") or {}
+            try:
+                eul = quaternion_to_euler(quat, degrees=True)
+                val = f"roll={eul['roll']:.1f} pitch={eul['pitch']:.1f} yaw={eul['yaw']:.1f} deg"
+            except Exception:
+                val = f"quat={quat}"
 
-            keys = list(quat.keys())
+            mag_used = msg.get("mag_used")
+            if mag_used:
+                val += f" | mag={mag_used}"
 
-            new_quat = {}
-            for key in keys:
-                new_quat[key] = f"{quat[key]:.3f}"
-            
-            new_eul = quaternion_to_euler(new_quat, degrees=True)
-            val = f"{new_eul}"
+            # optional: show field magnitudes if present
+            try:
+                m1 = msg.get("mag_ak09915")
+                if isinstance(m1, dict) and all(k in m1 for k in ("x","y","z")):
+                    n1 = math.sqrt(float(m1["x"])**2 + float(m1["y"])**2 + float(m1["z"])**2)
+                    val += f" | |ak|={n1:.1f}"
+                m2 = msg.get("mag_mmc5983")
+                if isinstance(m2, dict) and all(k in m2 for k in ("x","y","z")):
+                    n2 = math.sqrt(float(m2["x"])**2 + float(m2["y"])**2 + float(m2["z"])**2)
+                    val += f" | |mmc|={n2:.1f}"
+            except Exception:
+                pass
         elif typ == "heartbeat":
             armed = msg.get("armed")
             pa = msg.get("pilot_age")

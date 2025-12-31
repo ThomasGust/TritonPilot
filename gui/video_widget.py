@@ -118,10 +118,25 @@ class VideoWidget(QWidget):
         save_snapshot(self.last_frame, out_path)
         return out_path
 
-    def closeEvent(self, event):
+    def shutdown(self):
+        """Stop decode/recording and release the underlying stream resources."""
         if self.worker:
-            self.worker.stop()
-        self.stop_recording()
+            try:
+                self.worker.stop()
+            except Exception:
+                pass
+            self.worker = None
+        try:
+            self.stop_recording()
+        except Exception:
+            pass
         if self.camera:
-            self.camera.release()
+            try:
+                self.camera.release()
+            except Exception:
+                pass
+            self.camera = None
+
+    def closeEvent(self, event):
+        self.shutdown()
         super().closeEvent(event)

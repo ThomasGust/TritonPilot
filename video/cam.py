@@ -108,25 +108,35 @@ class RemoteCameraManager:
         self.windows_host = cfg.get("windows_host")
 
         self.stream_defs = {s["name"]: s for s in cfg.get("streams", [])}
+        # If a stream def omits "enabled", assume True.
         self._opened: dict[str, RemoteCv2Camera] = {}
 
     def list_available(self):
-        return list(self.stream_defs.keys())
+        names = []
+        for name, s in self.stream_defs.items():
+            if s.get('enabled', True):
+                names.append(name)
+        return names
 
     def open(self, name: str) -> RemoteCv2Camera:
         if name in self._opened:
             return self._opened[name]
 
+        if name not in self.stream_defs:
+            raise KeyError(f"Unknown stream '{name}'")
         s = self.stream_defs[name]
+        if not s.get('enabled', True):
+            raise ValueError(f"Stream '{name}' is disabled in config")
+
         cam = RemoteCv2Camera(
             rov=self.rov,
-            name=s["name"],
-            device=s["device"],
-            width=s["width"],
-            height=s["height"],
-            fps=s["fps"],
-            video_format=s.get("video_format", "mjpeg"),
-            port=s.get("port", 5000),
+            name=s['name'],
+            device=s['device'],
+            width=s['width'],
+            height=s['height'],
+            fps=s['fps'],
+            video_format=s.get('video_format', 'mjpeg'),
+            port=s.get('port', 5000),
             windows_host=self.windows_host,
         )
         self._opened[name] = cam

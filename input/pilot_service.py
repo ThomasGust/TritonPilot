@@ -49,15 +49,8 @@ class PilotPublisherService:
         self.dump_raw_every_s = float(dump_raw_every_s)
         self.reopen_on_error_s = float(reopen_on_error_s)
 
-        ctx = zmq.Context.instance()
-        self.sock = ctx.socket(zmq.PUB)
-        # Helpful defaults for shutdown + backpressure
-        try:
-            self.sock.setsockopt(zmq.LINGER, 0)
-            self.sock.setsockopt(zmq.SNDHWM, 1)
-        except Exception:
-            pass
-        self.sock.connect(self.endpoint)
+        # ZMQ sockets are NOT thread-safe; create/connect in the thread that uses them.
+        self.sock = None
 
         # Slow joiner fix
         time.sleep(1.0)
@@ -87,7 +80,13 @@ class PilotPublisherService:
     def stop(self):
         self._stop.set()
         if self._thread:
-            self._thread.join(timeout=1.0)
+            self._thread.join(timeout=1.0)        # Close PUB socket if it was created
+        if self.sock is not None:
+            try:
+                self.sock.close(0)
+            finally:
+                self.sock = None
+
 
     def _open_controller(self) -> GamepadSource:
         # Print devices each time we try to open
@@ -131,6 +130,16 @@ class PilotPublisherService:
         )
 
     def _run_loop(self):
+        # Create/connect PUB socket in this thread (ZMQ sockets are thread-affine)
+        ctx = zmq.Context.instance()
+        self.sock = ctx.socket(zmq.PUB)
+        try:
+            self.sock.setsockopt(zmq.LINGER, 0)
+            self.sock.setsockopt(zmq.SNDHWM, 1)
+        except Exception:
+            pass
+        self.sock.connect(self.endpoint)
+
         # Create controller *inside* this thread for pygame stability
         while not self._stop.is_set() and self._controller is None:
             try:

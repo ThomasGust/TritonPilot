@@ -5,7 +5,10 @@ from dataclasses import dataclass
 from typing import Tuple, List, Optional, Dict, Any
 import time
 
-import pygame
+try:
+    import pygame  # type: ignore
+except Exception:  # pragma: no cover
+    pygame = None  # type: ignore
 
 
 @dataclass

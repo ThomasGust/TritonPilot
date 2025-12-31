@@ -21,7 +21,7 @@ from input.pilot_service import PilotPublisherService
 from telemetry.sensor_service import SensorSubscriberService
 from video.cam import RemoteCameraManager
 from recording.stream_recorder import StreamRecorder
-from gui.video_widget import VideoWidget
+from gui.video_tabs import VideoTabs
 from gui.sensor_panel import SensorPanel
 
 class MainWindow(QMainWindow):
@@ -39,6 +39,9 @@ class MainWindow(QMainWindow):
 
         self._link_lbl = QLabel("Link: (no data)")
         self.statusBar().addPermanentWidget(self._link_lbl)
+
+        self._video_lbl = QLabel("Video: -")
+        self.statusBar().addPermanentWidget(self._video_lbl)
 
         self._link_timer = QTimer(self)
         self._link_timer.timeout.connect(self._update_link_status)
@@ -77,15 +80,15 @@ class MainWindow(QMainWindow):
         self.cam_mgr = RemoteCameraManager(streams_path)
         stream_names = self.cam_mgr.list_available()
         if stream_names:
-            self.video_widget = VideoWidget(self.cam_mgr, stream_name=stream_names[0])
+            self.video_panel = VideoTabs(self.cam_mgr, stream_names=stream_names)
         else:
-            self.video_widget = None
+            self.video_panel = None
 
         # layout
         central = QWidget()
         outer = QHBoxLayout(central)
-        if self.video_widget is not None:
-            outer.addWidget(self.video_widget, 2)
+        if self.video_panel is not None:
+            outer.addWidget(self.video_panel, 2)
         outer.addWidget(self.sensor_panel, 1)
         self.setCentralWidget(central)
 
@@ -109,6 +112,54 @@ class MainWindow(QMainWindow):
             self._last_sensor_ts = time.time()
 
         self.sensor_panel.upsert_sensor(msg)
+
+    def _update_link_status(self):
+        import time
+        now = time.time()
+
+        # Prefer heartbeat if present, fall back to any sensor traffic.
+        hb_age = None
+        if self._last_hb_ts > 0:
+            hb_age = now - self._last_hb_ts
+        sensor_age = None
+        if self._last_sensor_ts > 0:
+            sensor_age = now - self._last_sensor_ts
+
+        # Determine link state from heartbeat when available.
+        age = hb_age if hb_age is not None else sensor_age
+        if age is None:
+            status = "NO DATA"
+        elif age < 0.5:
+            status = "OK"
+        elif age < 2.0:
+            status = "WARN"
+        else:
+            status = "LOST"
+
+        parts = [f"Link: {status}"]
+        if hb_age is not None:
+            armed = bool(self._last_hb.get("armed", False))
+            pilot_age = self._last_hb.get("pilot_age", None)
+            if pilot_age is not None:
+                parts.append(f"pilot_age={pilot_age:.2f}s")
+            parts.append("ARMED" if armed else "disarmed")
+        elif sensor_age is not None:
+            parts.append(f"sensor_age={sensor_age:.2f}s")
+
+        self._link_lbl.setText(" | ".join(parts))
+
+        # Video indicator
+        try:
+            if self.video_panel is None:
+                self._video_lbl.setText("Video: -")
+            else:
+                name = self.video_panel.current_stream_name()
+                if name is None:
+                    self._video_lbl.setText("Video: -")
+                else:
+                    self._video_lbl.setText(f"Video: {name}")
+        except Exception:
+            self._video_lbl.setText("Video: -")
 
     def _make_menu(self):
         bar = self.menuBar()
@@ -143,6 +194,11 @@ class MainWindow(QMainWindow):
         file_menu.addAction(quit_act)
 
     def closeEvent(self, event):
+        try:
+            if self.video_panel is not None:
+                self.video_panel.stop_all()
+        except Exception:
+            pass
         # stop recorders
         try:
             self._stop_stream_log()
@@ -158,8 +214,8 @@ class MainWindow(QMainWindow):
             self.pilot_svc.stop()
         except Exception:
             pass
-        if self.video_widget is not None:
-            self.video_widget.close()
+        if self.video_panel is not None:
+            self.video_panel.close()
         super().closeEvent(event)
     def _start_stream_log(self):
         if self._stream_recorder is not None:
@@ -187,28 +243,37 @@ class MainWindow(QMainWindow):
         self._stream_recorder.stop()
         self._stream_recorder = None
         self.statusBar().showMessage("Stream recording stopped", 3000)
+    def _current_video_widget(self):
+        if self.video_panel is None:
+            return None
+        try:
+            return self.video_panel.current_video_widget()
+        except Exception:
+            return None
 
     def _save_snapshot(self):
-        if self.video_widget is None:
+        if self.video_panel is None:
             return
         out_dir = self._record_dir or str(StreamRecorder.make_session_dir("recordings"))
-        path = self.video_widget.save_snapshot(out_dir=out_dir)
+        path = self.video_panel.save_snapshot(out_dir=out_dir)
         if path:
             self.statusBar().showMessage(f"Saved snapshot: {path}", 5000)
         else:
             self.statusBar().showMessage("No frame yet (snapshot not saved)", 3000)
 
     def _start_video_recording(self):
-        if self.video_widget is None:
+        vw = self._current_video_widget()
+        if vw is None:
             return
         out_dir = self._record_dir or str(StreamRecorder.make_session_dir("recordings"))
-        self.video_widget.start_recording(out_dir=out_dir, basename=self.video_widget.stream_name, fps=30.0)
+        vw.start_recording(out_dir=out_dir, basename=vw.stream_name, fps=30.0)
         self.statusBar().showMessage(f"Video recording started → {out_dir}", 5000)
 
     def _stop_video_recording(self):
-        if self.video_widget is None:
+        vw = self._current_video_widget()
+        if vw is None:
             return
-        self.video_widget.stop_recording()
+        vw.stop_recording()
         self.statusBar().showMessage("Video recording stopped", 3000)
 
 
