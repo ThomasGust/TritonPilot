@@ -13,7 +13,7 @@ Examples
   python3 tests/sensor_stream_sub_test.py
 
   # Explicit endpoint
-  python3 tests/sensor_stream_sub_test.py --endpoint tcp://192.168.1.3:6001
+  python3 tests/sensor_stream_sub_test.py --endpoint tcp://{ROV_HOST}:6001
 
   # Dashboard off; print each message as JSON
   python3 tests/sensor_stream_sub_test.py --raw
@@ -264,7 +264,7 @@ def run_qt(endpoint: str) -> None:
 
 def main() -> int:
     ap = argparse.ArgumentParser(description="Topside sensor streaming subscriber test")
-    ap.add_argument("--endpoint", default=_default_endpoint(), help="ZMQ endpoint to connect, e.g. tcp://192.168.1.3:6001")
+    ap.add_argument("--endpoint", default=_default_endpoint(), help="ZMQ endpoint to connect, e.g. tcp://{ROV_HOST}:6001")
     ap.add_argument("--rov-host", default=None, help="Shortcut: set host/IP and use tcp://<host>:6001")
     ap.add_argument("--raw", action="store_true", help="Print each message (no dashboard)")
     ap.add_argument("--no-ui", action="store_true", help="Alias for --raw")

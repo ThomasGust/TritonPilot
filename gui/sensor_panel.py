@@ -117,6 +117,15 @@ class SensorPanel(QWidget):
             
             new_eul = quaternion_to_euler(new_quat, degrees=True)
             val = f"{new_eul}"
+        elif typ == "heartbeat":
+            armed = msg.get("armed")
+            pa = msg.get("pilot_age")
+            seq = msg.get("pilot_seq")
+            try:
+                pa_s = f"{float(pa):.2f}s" if pa is not None else "-"
+            except Exception:
+                pa_s = str(pa)
+            val = f"armed={armed} pilot_age={pa_s} seq={seq}"
         else:
             val = str(msg)
 

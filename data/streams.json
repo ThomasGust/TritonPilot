@@ -1,6 +1,4 @@
 {
-  "pi_endpoint": "tcp://192.168.1.2:5555",
-  "windows_host": "192.168.1.1",
   "streams": [
     {
       "name": "main_camera",

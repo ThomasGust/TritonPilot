@@ -5,7 +5,7 @@ import json
 import time
 import threading
 import traceback
-from typing import Optional
+from typing import Optional, Callable
 
 import zmq
 
@@ -37,11 +37,13 @@ class PilotPublisherService:
         index: int = 0,
         dump_raw_every_s: float = 0.0,  # 0 = off
         reopen_on_error_s: float = 1.0,
+        on_send: Optional[Callable[[dict], None]] = None,
     ):
         self.endpoint = endpoint
         self.period = 1.0 / float(rate_hz)
         self.deadzone = float(deadzone)
         self.debug = bool(debug)
+        self.on_send = on_send
         self.index = int(index)
 
         self.dump_raw_every_s = float(dump_raw_every_s)
@@ -149,7 +151,13 @@ class PilotPublisherService:
                 frame = self._build_frame(t0, snap)
                 self.seq += 1
 
-                self.sock.send_string(json.dumps(frame.to_dict()))
+                frame_dict = frame.to_dict()
+                self.sock.send_string(json.dumps(frame_dict))
+                if self.on_send:
+                    try:
+                        self.on_send(frame_dict)
+                    except Exception:
+                        pass
 
                 # periodic debug
                 if self.debug and (t0 - self._last_debug) > 1.0:

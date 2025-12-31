@@ -1,6 +1,7 @@
 import json
 import socket
 import numpy as np
+from config import VIDEO_RPC_ENDPOINT
 
 from video.gst_receiver import ReceiverProcess, RxConfig
 from video.rov_streams import ROVStreams  # your class above
@@ -99,9 +100,13 @@ class RemoteCameraManager:
         with open(config_path, "r") as f:
             cfg = json.load(f)
 
-        self.pi_endpoint = cfg.get("pi_endpoint", "tcp://192.168.1.2:5555")
-        self.windows_host = cfg.get("windows_host")  # may be None -> auto-detect
-        self.rov = ROVStreams(endpoint=self.pi_endpoint)
+        # ROV RPC endpoint comes from config (single source of truth).
+        self.rov = ROVStreams(endpoint=VIDEO_RPC_ENDPOINT)
+
+        # Optional override for the topside host IP to receive UDP video.
+        # If None, RemoteCv2Camera auto-detects the local IP.
+        self.windows_host = cfg.get("windows_host")
+
         self.stream_defs = {s["name"]: s for s in cfg.get("streams", [])}
         self._opened: dict[str, RemoteCv2Camera] = {}
 

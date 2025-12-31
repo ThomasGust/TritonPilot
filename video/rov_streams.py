@@ -1,8 +1,9 @@
+from config import VIDEO_RPC_ENDPOINT
 import json
 import zmq
 
 class ROVStreams:
-    def __init__(self, endpoint="tcp://192.168.1.1:5555"):
+    def __init__(self, endpoint: str = VIDEO_RPC_ENDPOINT):
         self.ctx = zmq.Context.instance()
         self.sock = self.ctx.socket(zmq.REQ)
         self.sock.connect(endpoint)
@@ -235,7 +236,7 @@ if caps["caps_flags"]["supports_h264"]:
         name="cam1",
         device="/dev/video0",
         video_format="h264",   # camera already outputs h264
-        host="192.168.1.1",
+        host=None,
         port=5002,
     )
 elif caps["caps_flags"]["supports_mjpeg"]:
@@ -245,7 +246,7 @@ elif caps["caps_flags"]["supports_mjpeg"]:
         device="/dev/video0",
         video_format="mjpeg",
         transport="udp",
-        host="192.168.1.1",
+        host=None,
         port=5002,
     )
 """

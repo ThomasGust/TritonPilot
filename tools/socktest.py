@@ -5,7 +5,7 @@ import argparse
 
 def main():
     ap = argparse.ArgumentParser(description="TCP client stream test")
-    ap.add_argument("--host", required=True, help="ROV IP address, e.g. 192.168.1.2")
+    ap.add_argument("--host", required=True, help="ROV IP address, e.g. {ROV_HOST}")
     ap.add_argument("--port", type=int, default=6000)
     ap.add_argument("--rate", type=float, default=20.0, help="messages per second")
     args = ap.parse_args()
