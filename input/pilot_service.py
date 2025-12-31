@@ -38,12 +38,15 @@ class PilotPublisherService:
         dump_raw_every_s: float = 0.0,  # 0 = off
         reopen_on_error_s: float = 1.0,
         on_send: Optional[Callable[[dict], None]] = None,
+        on_status: Optional[Callable[[dict], None]] = None,
     ):
         self.endpoint = endpoint
         self.period = 1.0 / float(rate_hz)
         self.deadzone = float(deadzone)
         self.debug = bool(debug)
         self.on_send = on_send
+        self.on_status = on_status
+        self._last_status: Optional[dict] = None
         self.index = int(index)
 
         self.dump_raw_every_s = float(dump_raw_every_s)
@@ -79,6 +82,7 @@ class PilotPublisherService:
 
     def stop(self):
         self._stop.set()
+        self._emit_status({'controller': 'stopped', 'index': self.index})
         if self._thread:
             self._thread.join(timeout=1.0)        # Close PUB socket if it was created
         if self.sock is not None:
@@ -87,6 +91,17 @@ class PilotPublisherService:
             finally:
                 self.sock = None
 
+
+    def _emit_status(self, status: dict):
+        """Emit status updates (controller connected/disconnected/etc.)."""
+        try:
+            if self._last_status == status:
+                return
+            self._last_status = dict(status)
+            if self.on_status:
+                self.on_status(status)
+        except Exception:
+            pass
 
     def _open_controller(self) -> GamepadSource:
         # Print devices each time we try to open
@@ -144,8 +159,11 @@ class PilotPublisherService:
         while not self._stop.is_set() and self._controller is None:
             try:
                 self._controller = self._open_controller()
+                self._emit_status({'controller': 'connected', 'index': self.index, 'name': getattr(self._controller, 'name', None)})
             except Exception as e:
-                print(f"[pilot] ERROR opening controller index={self.index}: {e}")
+                self._emit_status({'controller': 'disconnected', 'index': self.index, 'error': str(e)})
+                if self.debug:
+                    print(f"[pilot] ERROR opening controller index={self.index}: {e}")
                 if self.debug:
                     traceback.print_exc()
                 time.sleep(max(0.1, self.reopen_on_error_s))
@@ -191,13 +209,17 @@ class PilotPublisherService:
                     traceback.print_exc()
 
                 # Try to recover by reopening controller (hotplug / SDL weirdness)
+                self._emit_status({'controller': 'disconnected', 'index': self.index, 'error': str(e)})
                 self._controller = None
                 time.sleep(max(0.1, self.reopen_on_error_s))
                 while not self._stop.is_set() and self._controller is None:
                     try:
                         self._controller = self._open_controller()
+                        self._emit_status({'controller': 'connected', 'index': self.index, 'name': getattr(self._controller, 'name', None)})
                     except Exception as e2:
-                        print(f"[pilot] ERROR reopening controller: {e2}")
+                        self._emit_status({'controller': 'disconnected', 'index': self.index, 'error': str(e2)})
+                        if self.debug:
+                            print(f"[pilot] ERROR reopening controller: {e2}")
                         if self.debug:
                             traceback.print_exc()
                         time.sleep(max(0.1, self.reopen_on_error_s))

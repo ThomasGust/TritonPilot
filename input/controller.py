@@ -46,6 +46,12 @@ def _safe_get_guid(js: pygame.joystick.Joystick) -> str:
 
 
 def ensure_pygame_joystick() -> None:
+    """Initialize pygame joystick subsystem.
+
+    Raises a clear error if pygame isn't installed so the GUI can still run.
+    """
+    if pygame is None:
+        raise RuntimeError("pygame is not installed; controller support unavailable")
     # These are idempotent in pygame
     pygame.init()
     pygame.joystick.init()
@@ -56,6 +62,8 @@ def list_controllers() -> List[Dict[str, Any]]:
     Returns a list of dicts describing currently detected controllers.
     Safe to call even if no controllers exist.
     """
+    if pygame is None:
+        return []
     ensure_pygame_joystick()
     out: List[Dict[str, Any]] = []
     count = pygame.joystick.get_count()

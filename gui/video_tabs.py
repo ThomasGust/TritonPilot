@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 from PyQt6.QtCore import Qt
-from PyQt6.QtWidgets import QWidget, QTabWidget, QVBoxLayout, QLabel, QMessageBox
+from PyQt6.QtWidgets import QWidget, QTabWidget, QVBoxLayout, QLabel
 
 from gui.video_widget import VideoWidget
 from video.cam import RemoteCameraManager
@@ -81,7 +81,6 @@ class VideoTabs(QWidget):
                 lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
                 lbl.setWordWrap(True)
                 lay.addWidget(lbl)
-            QMessageBox.critical(self, "Video Error", f"Failed to start stream '{name}':\n{e}")
             return
 
         lay = cont.layout()

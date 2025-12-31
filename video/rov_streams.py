@@ -1,252 +1,96 @@
+from __future__ import annotations
+
 from config import VIDEO_RPC_ENDPOINT
-import json
 import zmq
 
-class ROVStreams:
-    def __init__(self, endpoint: str = VIDEO_RPC_ENDPOINT):
-        self.ctx = zmq.Context.instance()
-        self.sock = self.ctx.socket(zmq.REQ)
-        self.sock.connect(endpoint)
 
-    def _call(self, cmd, **args):
-        self.sock.send_json({"cmd": cmd, "args": args})
-        reply = self.sock.recv_json()
+class ROVStreams:
+    """Small RPC client for the ROV-side video control service.
+
+    Failsafe behavior:
+      - uses send/recv timeouts so the GUI never hangs if the ROV isn't up yet
+      - resets the REQ socket on timeout/state errors
+    """
+
+    def __init__(self, endpoint: str = VIDEO_RPC_ENDPOINT, timeout_ms: int = 500):
+        self.ctx = zmq.Context.instance()
+        self.endpoint = endpoint
+        self.timeout_ms = int(timeout_ms)
+        self.sock = self._make_sock()
+
+    def _make_sock(self):
+        sock = self.ctx.socket(zmq.REQ)
+        # Avoid hanging close() on shutdown
+        sock.setsockopt(zmq.LINGER, 0)
+        # Ensure calls return quickly when ROV isn't up
+        sock.setsockopt(zmq.RCVTIMEO, self.timeout_ms)
+        sock.setsockopt(zmq.SNDTIMEO, self.timeout_ms)
+        # Allow send even if a previous recv timed out (best effort; not all libzmq expose these)
+        try:
+            sock.setsockopt(zmq.REQ_RELAXED, 1)  # type: ignore[attr-defined]
+            sock.setsockopt(zmq.REQ_CORRELATE, 1)  # type: ignore[attr-defined]
+        except Exception:
+            pass
+        sock.connect(self.endpoint)
+        return sock
+
+    def _reset_sock(self):
+        try:
+            self.sock.close(0)
+        except Exception:
+            pass
+        self.sock = self._make_sock()
+
+    def _call(self, cmd: str, **args):
+        try:
+            self.sock.send_json({"cmd": cmd, "args": args})
+            reply = self.sock.recv_json()
+        except zmq.Again as e:
+            # Timeout (ROV down / not responding)
+            self._reset_sock()
+            raise TimeoutError(f"ROV video RPC timed out calling '{cmd}' (is TritonOS running?)") from e
+        except zmq.ZMQError as e:
+            # REQ state errors or disconnects
+            self._reset_sock()
+            raise ConnectionError(f"ROV video RPC error calling '{cmd}': {e}") from e
+
         if not reply.get("ok"):
             raise RuntimeError(f"ROV error: {reply.get('error')}")
         return reply.get("data")
 
-    def ping(self):
-        return self._call("ping")
+    def start_stream(self, **kwargs):
+        return self._call("start_stream", **kwargs)
 
-    def start_stream(self, **cfg):
-        name = cfg.get("name")
-        try:
-            return self._call("start_stream", **cfg)
-        except RuntimeError as e:
-            # fall back to "restart" behavior if the Pi hasn't been updated yet
-            if "already exists" in str(e).lower():
-                # try stop + start
-                if name:
-                    self.stop_stream(name)
-                return self._call("start_stream", **cfg)
-            raise
-
-    def stop_stream(self, name):
-        return self._call("stop_stream", name=name)
-
-    def update_stream(self, name, **updates):
-        return self._call("update_stream", name=name, **updates)
-
-    def list_streams(self):
-        return self._call("list_streams")
-
-    def ensure_stream(self, **cfg):
-        return self._call("ensure_stream", **cfg)
+    def stop_stream(self, **kwargs):
+        return self._call("stop_stream", **kwargs)
 
     def list_devices(self):
         return self._call("list_devices")
 
-    def get_device_caps(self, device="/dev/video0"):
-        return self._call("get_device_caps", device=device)
-
-import re
-
-# labels we know are *not* user cameras
-_NON_CAMERA_LABEL_SNIPPETS = [
-    "bcm2835-codec",
-    "bcm2835-isp",
-    "rpi-hevc",
-    "image_fx",
-    "isp-output",
-    "isp-capture",
-    "codec-encode",
-    "codec-decode",
-]
-
-def is_probably_camera(dev: dict) -> bool:
-    """
-    Heuristic: true cameras usually
-      - exist
-      - have a friendly label (Logitech, C920, C922, USB Camera, etc.)
-      - expose at least one mode with a sane resolution (>= 320x240)
-      - are *not* bcm/ISP helper devices
-    """
-    if not dev.get("exists", False):
-        return False
-
-    label = (dev.get("label") or "").lower()
-
-    # 1) blacklist labels
-    for bad in _NON_CAMERA_LABEL_SNIPPETS:
-        if bad in label:
-            return False
-
-    # 2) many helper nodes live at /dev/video1x or /dev/video2x
-    #    we can be stricter here: if it's >= /dev/video10 and
-    #    has no MJPG *and* no H.264, it's very likely not a camera
-    path = dev.get("device", "")
-    m = re.match(r"^/dev/video(\d+)$", path)
-    if m:
-        idx = int(m.group(1))
-        caps = dev.get("caps_flags", {})
-        if idx >= 10 and not (
-            caps.get("supports_mjpeg")
-            or caps.get("supports_h264")
-        ):
-            return False
-
-    # 3) must have at least one usable mode
-    modes = dev.get("modes") or dev.get("formats") or []
-    if not modes:
-        return False
-
-    # check that at least one size is "camera-y"
-    has_sane_size = False
-    for fmt in modes:
-        for sz in fmt.get("sizes", []):
-            if sz.get("width", 0) >= 320 and sz.get("height", 0) >= 240:
-                has_sane_size = True
-                break
-        if has_sane_size:
-            break
-
-    if not has_sane_size:
-        return False
-
-    return True
+    def list_status(self):
+        return self._call("status")
 
 
-def list_real_cameras(rov: "ROVStreams") -> list[dict]:
-    devices = rov.list_devices()
-    return [d for d in devices if is_probably_camera(d)]
+# --- compatibility helpers (used by some tooling / older code) ---
 
 def normalize_device(dev: dict) -> dict:
-    """
-    Turn the verbose v4l2-derived structure from the Pi into a GUI-friendly one.
-
-    Input (dev):
-      {
-        "device": "/dev/video0",
-        "exists": True,
-        "label": "C922 ...",
-        "modes": [
-          {
-            "format": "MJPG",
-            "description": "...",
-            "sizes": [
-              {"width": 1280, "height": 720, "fps": [60.0, 30.0, ...]},
-              ...
-            ]
-          },
-          ...
-        ]
-      }
-
-    Output:
-      {
-        "device": "/dev/video0",
-        "exists": True,
-        "label": "C922 ...",
-        "resolutions": {
-          "1280x720": {
-            "width": 1280,
-            "height": 720,
-            "formats": {
-              "MJPG": [60, 30, 24, 20, 15, 10, 7.5, 5],
-              "YUYV": [10, 7.5, 5]
-            }
-          },
-          ...
-        }
-      }
-    """
-    out = {
-        "device": dev.get("device"),
-        "exists": dev.get("exists", False),
-        "label": dev.get("label"),
-        "resolutions": {}
-    }
-
-    modes = dev.get("modes") or []
-
-    for fmt in modes:
-        fmt_name = (fmt.get("format") or "").upper()
-        for sz in fmt.get("sizes", []):
-            w = sz.get("width")
-            h = sz.get("height")
-            if not w or not h:
-                continue
-            key = f"{w}x{h}"
-
-            # make sure this resolution exists in output
-            res_entry = out["resolutions"].setdefault(key, {
-                "width": w,
-                "height": h,
-                "formats": {}
-            })
-
-            # normalize fps: dedupe, sort desc, cast to int when whole number
-            fps_list = sz.get("fps", [])
-            clean_fps = []
-            seen = set()
-            for f in fps_list:
-                # turn 30.0 -> 30
-                f_clean = int(f) if float(f).is_integer() else float(f)
-                if f_clean not in seen:
-                    seen.add(f_clean)
-                    clean_fps.append(f_clean)
-            # sort highest first
-            clean_fps.sort(reverse=True)
-
-            res_entry["formats"][fmt_name] = clean_fps
-
+    """Best-effort normalization of a device dict returned by the ROV video service."""
+    if dev is None:
+        return {}
+    out = dict(dev)
+    # common aliases
+    if "device" in out and "path" not in out:
+        out["path"] = out["device"]
     return out
 
-#rov = ROVStreams()
-#real_devices = list_real_cameras(rov)
-#device = real_devices[0]
+def is_probably_camera(dev: dict) -> bool:
+    """Heuristic: treat /dev/video* devices as cameras by default."""
+    d = normalize_device(dev)
+    path = str(d.get("path") or d.get("device") or "")
+    return path.startswith("/dev/video")
 
-#normalized = normalize_device(device)
-#print("Normalized device info:")
-#print(json.dumps(normalized, indent=2))
-
-"""
-# populate GUI
-for dev in rov.list_devices():
-    print(dev["device"], dev.get("label", ""))
-    print("  caps:", dev.get("caps_flags", {}))
-
-    # 👇 NEW: detailed modes
-    for fmt in dev.get("modes", []):
-        fmt_name = fmt.get("format", "?")
-        desc = fmt.get("description") or ""
-        print(f"  format: {fmt_name} {f'({desc})' if desc else ''}")
-        for sz in fmt.get("sizes", []):
-            w = sz.get("width")
-            h = sz.get("height")
-            fps_list = sz.get("fps", [])
-            # turn [30.0, 15.0] into "30, 15"
-            fps_str = ", ".join(str(int(f)) if f.is_integer() else str(f) for f in fps_list)
-            print(f"    {w}x{h} @ {fps_str} fps")
-
-caps = rov.get_device_caps("/dev/video0")
-if caps["caps_flags"]["supports_h264"]:
-    # tell Pi to start H.264 stream from that camera
-    rov.start_stream(
-        name="cam1",
-        device="/dev/video0",
-        video_format="h264",   # camera already outputs h264
-        host=None,
-        port=5002,
-    )
-elif caps["caps_flags"]["supports_mjpeg"]:
-    # fallback
-    rov.start_stream(
-        name="cam1",
-        device="/dev/video0",
-        video_format="mjpeg",
-        transport="udp",
-        host=None,
-        port=5002,
-    )
-"""
+def list_real_cameras(devs: list[dict] | None) -> list[dict]:
+    """Filter device list to likely cameras."""
+    if not devs:
+        return []
+    return [normalize_device(d) for d in devs if is_probably_camera(d)]

@@ -10,7 +10,6 @@ from PyQt6.QtWidgets import (
     QMainWindow,
     QWidget,
     QHBoxLayout,
-    QMessageBox,
     QLabel,
 )
 from config import (
@@ -27,6 +26,7 @@ from gui.sensor_panel import SensorPanel
 class MainWindow(QMainWindow):
     # we'll receive sensor messages from a background thread → emit to UI thread
     sensor_msg_sig = pyqtSignal(dict)
+    pilot_status_sig = pyqtSignal(dict)
 
     def __init__(self, streams_path: str, parent=None):
         super().__init__(parent)
@@ -40,6 +40,9 @@ class MainWindow(QMainWindow):
         self._link_lbl = QLabel("Link: (no data)")
         self.statusBar().addPermanentWidget(self._link_lbl)
 
+        self._ctrl_lbl = QLabel("Controller: (starting)")
+        self.statusBar().addPermanentWidget(self._ctrl_lbl)
+
         self._video_lbl = QLabel("Video: -")
         self.statusBar().addPermanentWidget(self._video_lbl)
 
@@ -48,8 +51,10 @@ class MainWindow(QMainWindow):
         self._link_timer.start(200)
 
 
-        # connect signal to slot
+        # connect signals to slots
         self.sensor_msg_sig.connect(self._handle_sensor_msg_on_ui)
+        self.pilot_status_sig.connect(self._handle_pilot_status_on_ui)
+        self._last_ctrl_status: dict = {'controller': 'unknown'}
 
         # 1) pilot publisher (xbox -> ROV)
         self.pilot_svc = PilotPublisherService(
@@ -57,6 +62,7 @@ class MainWindow(QMainWindow):
             rate_hz=30.0,
             deadzone=0.1,
             debug=False,
+            on_status=self._on_pilot_status_from_thread,
         )
         self.pilot_svc.start()
 
@@ -73,16 +79,24 @@ class MainWindow(QMainWindow):
         )
         self.sensor_svc.start()
 
-        # 3) video
-        if not os.path.exists(streams_path):
-            QMessageBox.critical(self, "Error", f"Streams config not found:\n{streams_path}")
-            streams_path = str(Path("data") / "streams.json")
-        self.cam_mgr = RemoteCameraManager(streams_path)
-        stream_names = self.cam_mgr.list_available()
-        if stream_names:
-            self.video_panel = VideoTabs(self.cam_mgr, stream_names=stream_names)
-        else:
+        # 3) video (failsafe: GUI should boot even if ROV/video isn't available yet)
+        self.cam_mgr = None
+        self.video_panel = None
+        try:
+            if not os.path.exists(streams_path):
+                # Don't block startup; just disable video.
+                self.statusBar().showMessage(f"Streams config not found: {streams_path}", 10000)
+            else:
+                self.cam_mgr = RemoteCameraManager(streams_path)
+                stream_names = self.cam_mgr.list_available()
+                if stream_names:
+                    self.video_panel = VideoTabs(self.cam_mgr, stream_names=stream_names)
+                else:
+                    self.statusBar().showMessage("No enabled video streams in streams.json", 8000)
+        except Exception as e:
+            self.cam_mgr = None
             self.video_panel = None
+            self.statusBar().showMessage(f"Video init failed (continuing without video): {e}", 12000)
 
         # layout
         central = QWidget()
@@ -102,6 +116,25 @@ class MainWindow(QMainWindow):
         if self._stream_recorder is not None:
             self._stream_recorder.record("sensors", msg)
         self.sensor_msg_sig.emit(msg)
+
+
+    def _on_pilot_status_from_thread(self, status: dict):
+        # Called from the pilot publisher thread; marshal to UI thread.
+        self.pilot_status_sig.emit(status)
+
+    def _handle_pilot_status_on_ui(self, status: dict):
+        self._last_ctrl_status = status or {'controller': 'unknown'}
+        state = (status or {}).get('controller', 'unknown')
+        if state == 'connected':
+            name = (status or {}).get('name') or 'controller'
+            self._ctrl_lbl.setText(f"Controller: OK ({name})")
+        elif state == 'disconnected':
+            err = (status or {}).get('error') or 'not connected'
+            self._ctrl_lbl.setText(f"Controller: - ({err})")
+        elif state == 'stopped':
+            self._ctrl_lbl.setText("Controller: stopped")
+        else:
+            self._ctrl_lbl.setText(f"Controller: {state}")
 
     def _handle_sensor_msg_on_ui(self, msg: dict):
         import time
@@ -148,16 +181,27 @@ class MainWindow(QMainWindow):
 
         self._link_lbl.setText(" | ".join(parts))
 
-        # Video indicator
+        # Video indicator (show per-stream state; do not throw on missing video)
         try:
             if self.video_panel is None:
                 self._video_lbl.setText("Video: -")
             else:
                 name = self.video_panel.current_stream_name()
-                if name is None:
+                vw = self.video_panel.current_video_widget()
+                if name is None or vw is None:
                     self._video_lbl.setText("Video: -")
                 else:
-                    self._video_lbl.setText(f"Video: {name}")
+                    st = vw.status()
+                    if st.get("state") == "playing":
+                        age = st.get("age_s")
+                        if age is not None:
+                            self._video_lbl.setText(f"Video: {name} (OK, age={age:.1f}s)")
+                        else:
+                            self._video_lbl.setText(f"Video: {name} (OK)")
+                    elif st.get("state") == "waiting":
+                        self._video_lbl.setText(f"Video: {name} (waiting)")
+                    else:
+                        self._video_lbl.setText(f"Video: {name} ({st.get('state')})")
         except Exception:
             self._video_lbl.setText("Video: -")
 
