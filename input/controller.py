@@ -240,16 +240,37 @@ class GamepadSource:
 
         dpad = self._hat_raw(0)
 
-        a = bool(self._button_raw(0))
-        b = bool(self._button_raw(1))
-        x = bool(self._button_raw(2))
-        y = bool(self._button_raw(3))
-        lb = bool(self._button_raw(4))
-        rb = bool(self._button_raw(5))
-        win = bool(self._button_raw(6))
-        menu = bool(self._button_raw(7))
-        lstick = bool(self._button_raw(8))
-        rstick = bool(self._button_raw(9))
+        # Button indices vary slightly across drivers (SDL/evdev) and OS
+        # versions. For the Xbox One S controller on Linux, Start is commonly
+        # 7 and Back is 6, but we've seen other layouts.
+        def _b(*idxs: int) -> bool:
+            for i in idxs:
+                if bool(self._button_raw(i)):
+                    return True
+            return False
+
+        a = _b(0)
+        b = _b(1)
+        x = _b(2)
+        y = _b(3)
+        lb = _b(4)
+        rb = _b(5)
+
+        is_xbox = "xbox" in (self.name or "").lower()
+
+        # "menu" = Start; "win" = Back / Guide.
+        # For Xbox on Linux the common layout is Back=6, Start=7, L3=8, R3=9.
+        # Some drivers shift Start/Back by +2; we include conservative fallbacks.
+        if is_xbox:
+            menu = _b(7, 9)
+            win = _b(6, 8, 10)
+            lstick = _b(8)
+            rstick = _b(9)
+        else:
+            menu = _b(7, 9, 11)
+            win = _b(6, 8, 10)
+            lstick = _b(8, 10)
+            rstick = _b(9, 11)
 
         return ControllerSnapshot(
             lx=lx,
