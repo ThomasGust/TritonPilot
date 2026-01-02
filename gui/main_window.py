@@ -15,6 +15,7 @@ from PyQt6.QtWidgets import (
 from config import (
     PILOT_PUB_ENDPOINT,
     SENSOR_SUB_ENDPOINT,
+    CONTROLLER_DEADZONE,
 )
 from input.pilot_service import PilotPublisherService
 from telemetry.sensor_service import SensorSubscriberService
@@ -60,7 +61,7 @@ class MainWindow(QMainWindow):
         self.pilot_svc = PilotPublisherService(
             endpoint=PILOT_PUB_ENDPOINT,
             rate_hz=30.0,
-            deadzone=0.1,
+            deadzone=CONTROLLER_DEADZONE,
             debug=False,
             on_status=self._on_pilot_status_from_thread,
         )

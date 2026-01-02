@@ -19,3 +19,13 @@ VIDEO_RPC_ENDPOINT = os.environ.get("ROV_VIDEO_RPC", f"tcp://{ROV_HOST}:5555")
 
 # Where your JSON with stream definitions lives
 STREAMS_FILE = Path(__file__).parent / "data" / "streams.json"
+
+# Controller shaping
+#
+# Stick drift is common on Xbox controllers, and even small drift can cause
+# noticeable thruster creep. We apply a deadzone on the pilot side and ALSO
+# apply additional deadbands on the ROV side for safety.
+#
+# You can override at runtime:
+#   TRITON_CONTROLLER_DEADZONE=0.15 python -m main
+CONTROLLER_DEADZONE = float(os.environ.get("TRITON_CONTROLLER_DEADZONE", "0.15"))

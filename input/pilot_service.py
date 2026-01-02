@@ -32,7 +32,7 @@ class PilotPublisherService:
         self,
         endpoint: str,
         rate_hz: float = 30.0,
-        deadzone: float = 0.1,
+        deadzone: float | None = None,
         debug: bool = False,
         index: int = 0,
         dump_raw_every_s: float = 0.0,  # 0 = off
@@ -42,6 +42,10 @@ class PilotPublisherService:
     ):
         self.endpoint = endpoint
         self.period = 1.0 / float(rate_hz)
+        # Default deadzone comes from config/env, but can be overridden here.
+        if deadzone is None:
+            from config import CONTROLLER_DEADZONE
+            deadzone = CONTROLLER_DEADZONE
         self.deadzone = float(deadzone)
         self.debug = bool(debug)
         self.on_send = on_send

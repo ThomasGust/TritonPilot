@@ -17,7 +17,9 @@ def main():
         help="ZMQ PUB endpoint of ROV pilot SUB",
     )
     ap.add_argument("--rate", type=float, default=30.0, help="Publish rate (Hz)")
-    ap.add_argument("--deadzone", type=float, default=0.1, help="Stick deadzone (abs)")
+    # Default deadzone comes from config (and can be overridden by env).
+    from config import CONTROLLER_DEADZONE
+    ap.add_argument("--deadzone", type=float, default=CONTROLLER_DEADZONE, help="Stick deadzone (abs)")
     ap.add_argument("--index", type=int, default=0, help="pygame joystick index")
     ap.add_argument("--debug", action="store_true", help="Enable debug logs")
     ap.add_argument("--list", action="store_true", help="List detected controllers and exit")
