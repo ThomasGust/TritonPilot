@@ -3,9 +3,9 @@
     {
       "name": "main_camera",
       "device": "/dev/video0",
-      "width": 1920,
-      "height": 1080,
-      "fps": 30,
+      "width": 800,
+      "height": 600,
+      "fps": 20,
       "video_format": "mjpeg",
       "port": 5000,
       "enabled": true

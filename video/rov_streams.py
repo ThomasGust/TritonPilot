@@ -12,7 +12,7 @@ class ROVStreams:
       - resets the REQ socket on timeout/state errors
     """
 
-    def __init__(self, endpoint: str = VIDEO_RPC_ENDPOINT, timeout_ms: int = 500):
+    def __init__(self, endpoint: str = VIDEO_RPC_ENDPOINT, timeout_ms: int = 3000):
         self.ctx = zmq.Context.instance()
         self.endpoint = endpoint
         self.timeout_ms = int(timeout_ms)
