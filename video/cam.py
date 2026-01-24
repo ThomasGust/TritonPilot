@@ -1,6 +1,7 @@
 import json
 import socket
 import numpy as np
+
 from config import VIDEO_RPC_ENDPOINT
 
 from video.gst_receiver import ReceiverProcess, RxConfig
@@ -8,28 +9,26 @@ from video.rov_streams import ROVStreams
 
 
 def _infer_wire_codec(video_format: str, encode: str | None) -> str:
-    """
-    Determine what arrives on the wire, so the receiver picks the right depay/decoder.
-    """
+    """Determine what arrives on the wire (RTP payload), for receiver selection."""
     vf = (video_format or "").lower()
     enc = (encode or "").lower() if encode else None
 
     if vf == "h264" or enc == "h264":
         return "h264"
-    # everything else is treated as JPEG-on-the-wire
     return "jpeg"
 
 
 class RemoteCv2Camera:
-    """
-    cv2-ish wrapper for:
+    """cv2-ish wrapper:
         ROV-side camera -> RTP over UDP -> topside GStreamer -> numpy frame
 
-    This patched version supports requesting H.264 from the ROV even if the camera
-    doesn't natively output H.264 by setting:
-        video_format="raw", encode="h264"
-    or (for cameras that only do MJPEG at your desired mode):
-        video_format="mjpeg", encode="h264"   # MJPEG->H264 transcode on ROV
+    Notes:
+      - video_format describes the camera's output format on the ROV (mjpeg/raw/h264)
+      - encode describes what the ROV should send on the wire (None/h264/mjpeg)
+
+    The ROV video service may auto-adjust width/height/fps and/or switch camera
+    input format (e.g. raw -> mjpeg) to avoid negotiation failures. When it does,
+    we adopt the effective settings so frame reshaping stays correct.
     """
 
     def __init__(
@@ -61,16 +60,16 @@ class RemoteCv2Camera:
         self.rov = rov
         self.name = name
         self.device = device
-        self.width = width
-        self.height = height
-        self.fps = fps
+        self.width = int(width)
+        self.height = int(height)
+        self.fps = int(fps)
         self.video_format = video_format
         self.encode = encode
-        self.port = port
-        self.latency_ms = latency_ms
+        self.port = int(port)
+        self.latency_ms = int(latency_ms)
         self.channel_order = channel_order
 
-        # detect our own IP on topside if not provided
+        # Detect our own IP on topside if not provided
         if windows_host is None:
             s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
             try:
@@ -80,11 +79,8 @@ class RemoteCv2Camera:
                 s.close()
         self.windows_host = windows_host
 
-        wire_codec = _infer_wire_codec(self.video_format, self.encode)
-
-        # 1) tell ROV to start sending
-        # Pass through H.264-related knobs (ROV will ignore if not applicable).
-        self.rov.start_stream(
+        # 1) Tell ROV to start sending. Pass through H.264 knobs (ROV ignores if not applicable).
+        reply = self.rov.start_stream(
             name=self.name,
             device=self.device,
             width=self.width,
@@ -106,7 +102,22 @@ class RemoteCv2Camera:
             sync=sync,
         )
 
-        # 2) start local receiver in RAW mode so we can get numpy frames
+        # 1b) If the ROV adjusted to a supported mode, adopt it (critical for correct reshaping).
+        if isinstance(reply, dict):
+            eff = reply.get("effective")
+            if isinstance(eff, dict):
+                self.video_format = eff.get("video_format", self.video_format)
+                self.encode = eff.get("encode", self.encode)
+                try:
+                    self.width = int(eff.get("width", self.width))
+                    self.height = int(eff.get("height", self.height))
+                    self.fps = int(eff.get("fps", self.fps))
+                except Exception:
+                    pass
+
+        wire_codec = _infer_wire_codec(self.video_format, self.encode)
+
+        # 2) Start local receiver in RAW mode so we can get numpy frames
         rx_cfg = RxConfig(
             name=self.name,
             codec=wire_codec,
@@ -121,7 +132,7 @@ class RemoteCv2Camera:
         self.rx.start()
 
     def read(self):
-        """cv2.VideoCapture-like: returns (ok, frame)"""
+        """cv2.VideoCapture-like: returns (ok, frame)."""
         fr = self.rx.read_frame()
         if fr is None:
             return False, None
