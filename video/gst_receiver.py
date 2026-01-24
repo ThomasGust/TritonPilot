@@ -360,18 +360,27 @@ class ReceiverProcess:
     def _build_cmd(self, cfg: RxConfig) -> List[str]:
         gst = self._gst
 
-        # >>> CHANGE 2: raw = quiet, window = verbose
+        # raw mode: quiet so stdout is clean (frames only)
+        base: List[str]
         if cfg.mode == "raw":
-            base: List[str] = [gst, "-q"]   # quiet so stdout is clean
+            base = [gst, "-q"]
         else:
             base = [gst, "-v"]
+
+        # If recording in window mode, we need -e for clean EOS handling
+        if cfg.mode != "raw" and cfg.record_path:
+            base.insert(1, "-e")
+
+        # Tiny leaky queue prevents downstream hiccups from turning into latency/buffering
+        q = ["queue", "leaky=downstream", "max-size-buffers=1", "max-size-time=0", "max-size-bytes=0"]
 
         if cfg.mode == "raw":
             if cfg.codec.lower() == "jpeg":
                 caps = "application/x-rtp,media=video,encoding-name=JPEG,payload=26,clock-rate=90000"
-                pipeline = [
+                pipeline: List[str] = [
                     "udpsrc", "address=0.0.0.0", "reuse=true", f"port={cfg.port}", f"caps={caps}",
                     "!", "rtpjitterbuffer", f"latency={cfg.latency_ms}",
+                    "!", *q,
                     "!", "rtpjpegdepay",
                     "!", "jpegdec",
                     "!", "videoconvert",
@@ -386,7 +395,9 @@ class ReceiverProcess:
                 pipeline = [
                     "udpsrc", "address=0.0.0.0", "reuse=true", f"port={cfg.port}", f"caps={caps}",
                     "!", "rtpjitterbuffer", f"latency={cfg.latency_ms}",
+                    "!", *q,
                     "!", "rtph264depay",
+                    "!", "h264parse",
                     "!", "avdec_h264",
                     "!", "videoconvert",
                     "!", (
@@ -398,14 +409,12 @@ class ReceiverProcess:
             return base + pipeline
 
         # window mode
-        if cfg.record_path:
-            base.insert(1, "-e")
-
         if cfg.codec.lower() == "jpeg":
             caps = "application/x-rtp,media=video,encoding-name=JPEG,payload=26,clock-rate=90000"
             pipeline = [
                 "udpsrc", "address=0.0.0.0", "reuse=true", f"port={cfg.port}", f"caps={caps}",
                 "!", "rtpjitterbuffer", f"latency={cfg.latency_ms}",
+                "!", *q,
                 "!", "rtpjpegdepay",
                 "!", "jpegdec",
                 "!", "videoconvert",
@@ -417,7 +426,9 @@ class ReceiverProcess:
             pipeline = [
                 "udpsrc", "address=0.0.0.0", "reuse=true", f"port={cfg.port}", f"caps={caps}",
                 "!", "rtpjitterbuffer", f"latency={cfg.latency_ms}",
+                "!", *q,
                 "!", "rtph264depay",
+                "!", "h264parse",
                 "!", "avdec_h264",
                 "!", "videoconvert",
                 "!", "video/x-raw,format=BGR,colorimetry=1:4:0:0,range=full",
