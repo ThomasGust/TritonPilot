@@ -58,11 +58,7 @@ def quaternion_to_euler(q, degrees=False):
         pitch = math.degrees(pitch)
         yaw = math.degrees(yaw)
 
-    return {
-        "roll": f"{roll:.1f}",
-        "pitch": f"{pitch:.1f}",
-        "yaw": f"{yaw:.1f}",
-    }
+    return {"roll": float(roll), "pitch": float(pitch), "yaw": float(yaw)}
 
 class SensorPanel(QWidget):
     """
