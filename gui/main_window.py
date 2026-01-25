@@ -23,6 +23,7 @@ from video.cam import RemoteCameraManager
 from recording.stream_recorder import StreamRecorder
 from gui.video_tabs import VideoTabs
 from gui.sensor_panel import SensorPanel
+from gui.attitude_plot import AttitudePlotWidget
 
 class MainWindow(QMainWindow):
     # we'll receive sensor messages from a background thread → emit to UI thread
@@ -73,6 +74,7 @@ class MainWindow(QMainWindow):
 
         # 2) sensor subscriber (ROV -> topside)
         self.sensor_panel = SensorPanel()
+        self.att_plot = AttitudePlotWidget(window_s=20.0)
         self.sensor_svc = SensorSubscriberService(
             endpoint=SENSOR_SUB_ENDPOINT,
             on_message=self._on_sensor_msg_from_thread,
@@ -104,7 +106,15 @@ class MainWindow(QMainWindow):
         outer = QHBoxLayout(central)
         if self.video_panel is not None:
             outer.addWidget(self.video_panel, 2)
-        outer.addWidget(self.sensor_panel, 1)
+
+        # Right column: sensor table + live attitude plot
+        right_col = QWidget()
+        right_lay = QVBoxLayout(right_col)
+        right_lay.setContentsMargins(0, 0, 0, 0)
+        right_lay.addWidget(self.sensor_panel, 3)
+        right_lay.addWidget(self.att_plot, 2)
+        outer.addWidget(right_col, 1)
+
         self.setCentralWidget(central)
 
         self._make_menu()
@@ -146,6 +156,10 @@ class MainWindow(QMainWindow):
             self._last_sensor_ts = time.time()
 
         self.sensor_panel.upsert_sensor(msg)
+        try:
+            self.att_plot.ingest(msg)
+        except Exception:
+            pass
 
     def _update_link_status(self):
         import time

@@ -114,6 +114,19 @@ class SensorPanel(QWidget):
             if mag_used:
                 val += f" | mag={mag_used}"
 
+            # EKF debug (if published)
+            dbg = msg.get("att_debug") or {}
+            if isinstance(dbg, dict):
+                try:
+                    ai = dbg.get("accel_innov_norm")
+                    mi = dbg.get("mag_innov_norm")
+                    if ai is not None:
+                        val += f" | acc_innov={float(ai):.3f}"
+                    if mi is not None:
+                        val += f" | mag_innov={float(mi):.3f}"
+                except Exception:
+                    pass
+
             # optional: show field magnitudes if present
             try:
                 m1 = msg.get("mag_ak09915")
