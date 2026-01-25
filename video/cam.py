@@ -25,6 +25,7 @@ class RemoteCv2Camera:
         latency_ms: int = 60,
         channel_order: str = "BGR",
         windows_host: str | None = None,
+        stream_opts: dict | None = None,
     ):
         self.rov = rov
         self.name = name
@@ -49,22 +50,98 @@ class RemoteCv2Camera:
                 s.close()
         self.windows_host = windows_host
 
+        stream_opts = stream_opts or {}
+        # Allow config to override receiver-side jitter buffer setting
+        self.latency_ms = int(stream_opts.get('latency_ms', self.latency_ms))
+
+
         # 1) tell Pi to start sending
-        self.rov.start_stream(
+
+
+        start_kwargs = dict(
+
+
             name=self.name,
+
+
             device=self.device,
+
+
             width=self.width,
+
+
             height=self.height,
+
+
             fps=self.fps,
+
+
             video_format=self.video_format,
+
+
             host=self.windows_host,
+
+
             port=self.port,
+
+
         )
+
+
+
+        # Pass-through optional transcoding / transport knobs from config
+
+
+        for k in (
+
+
+            "encode",
+
+
+            "h264_bitrate",
+
+
+            "h264_gop",
+
+
+            "transport",
+
+
+            "rtp_pt_jpeg",
+
+
+            "rtp_pt_h264",
+
+
+            "latency_ms",
+
+
+            "sync",
+
+
+            "extra",
+
+
+        ):
+
+
+            if k in stream_opts and stream_opts[k] is not None:
+
+
+                start_kwargs[k] = stream_opts[k]
+
+
+
+        self.rov.start_stream(**start_kwargs)
+
+
+
+        tx_is_h264 = (start_kwargs.get("video_format") == "h264") or (str(start_kwargs.get("encode", "")).lower() == "h264")
 
         # 2) start local receiver in RAW mode so we can get numpy
         rx_cfg = RxConfig(
             name=self.name,
-            codec="jpeg" if self.video_format == "mjpeg" else "h264",
+            codec="h264" if tx_is_h264 else "jpeg",
             port=self.port,
             latency_ms=self.latency_ms,
             mode="raw",
@@ -138,6 +215,7 @@ class RemoteCameraManager:
             video_format=s.get('video_format', 'mjpeg'),
             port=s.get('port', 5000),
             windows_host=self.windows_host,
+            stream_opts=s,
         )
         self._opened[name] = cam
         return cam

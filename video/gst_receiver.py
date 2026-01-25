@@ -387,6 +387,7 @@ class ReceiverProcess:
                     "udpsrc", "address=0.0.0.0", "reuse=true", f"port={cfg.port}", f"caps={caps}",
                     "!", "rtpjitterbuffer", f"latency={cfg.latency_ms}",
                     "!", "rtph264depay",
+                    "!", "h264parse",
                     "!", "avdec_h264",
                     "!", "videoconvert",
                     "!", (
@@ -418,6 +419,7 @@ class ReceiverProcess:
                 "udpsrc", "address=0.0.0.0", "reuse=true", f"port={cfg.port}", f"caps={caps}",
                 "!", "rtpjitterbuffer", f"latency={cfg.latency_ms}",
                 "!", "rtph264depay",
+                "!", "h264parse",
                 "!", "avdec_h264",
                 "!", "videoconvert",
                 "!", "video/x-raw,format=BGR,colorimetry=1:4:0:0,range=full",
