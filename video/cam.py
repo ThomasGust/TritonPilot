@@ -3,6 +3,8 @@ import socket
 import numpy as np
 from config import VIDEO_RPC_ENDPOINT
 
+from network.net_select import parse_zmq_endpoint, choose_video_receive_ip
+
 from video.gst_receiver import ReceiverProcess, RxConfig
 from video.rov_streams import ROVStreams  # your class above
 
@@ -39,15 +41,29 @@ class RemoteCv2Camera:
         self.latency_ms = latency_ms
         self.channel_order = channel_order
 
-        # detect our own IP on Windows if not provided
+        # Detect the best local IP to receive video if not provided.
+        # IMPORTANT: the previous approach used 8.8.8.8 which tends to pick Wi‑Fi.
+        # Here we select the local IP that can reach the ROV video RPC host,
+        # preferring wired/tether when possible.
         if windows_host is None:
-            # cheap local-ip trick
-            s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
             try:
-                s.connect(("8.8.8.8", 80))
-                windows_host = s.getsockname()[0]
-            finally:
-                s.close()
+                rov_host, rov_port = parse_zmq_endpoint(VIDEO_RPC_ENDPOINT)
+                prefer_wired = bool(stream_opts.get("tether_prefer_wired", True)) if stream_opts else True
+                windows_host = choose_video_receive_ip(
+                    remote_host=rov_host,
+                    remote_port=int(rov_port),
+                    prefer_wired=prefer_wired,
+                    require_private=True,
+                )
+            except Exception:
+                # fallback to the OS-chosen route (still better than 8.8.8.8)
+                s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+                try:
+                    rov_host, _rov_port = parse_zmq_endpoint(VIDEO_RPC_ENDPOINT)
+                    s.connect((rov_host, 9))
+                    windows_host = s.getsockname()[0]
+                finally:
+                    s.close()
         self.windows_host = windows_host
 
         stream_opts = stream_opts or {}
@@ -139,10 +155,16 @@ class RemoteCv2Camera:
         tx_is_h264 = (start_kwargs.get("video_format") == "h264") or (str(start_kwargs.get("encode", "")).lower() == "h264")
 
         # 2) start local receiver in RAW mode so we can get numpy
+        # Bind receiver to the chosen host so we *only* accept video arriving on that interface.
+        bind_rx = True
+        if stream_opts and ("bind_receiver_to_host" in stream_opts):
+            bind_rx = bool(stream_opts.get("bind_receiver_to_host"))
+
         rx_cfg = RxConfig(
             name=self.name,
             codec="h264" if tx_is_h264 else "jpeg",
             port=self.port,
+            bind_address=self.windows_host if bind_rx else "0.0.0.0",
             latency_ms=self.latency_ms,
             mode="raw",
             width=self.width,
@@ -184,6 +206,13 @@ class RemoteCameraManager:
         # If None, RemoteCv2Camera auto-detects the local IP.
         self.windows_host = cfg.get("windows_host")
 
+        # Optional defaults that can be set at the top-level of streams.json.
+        # Per-stream values can override these.
+        self._defaults = {
+            "tether_prefer_wired": bool(cfg.get("tether_prefer_wired", True)),
+            "bind_receiver_to_host": bool(cfg.get("bind_receiver_to_host", True)),
+        }
+
         self.stream_defs = {s["name"]: s for s in cfg.get("streams", [])}
         # If a stream def omits "enabled", assume True.
         self._opened: dict[str, RemoteCv2Camera] = {}
@@ -205,6 +234,10 @@ class RemoteCameraManager:
         if not s.get('enabled', True):
             raise ValueError(f"Stream '{name}' is disabled in config")
 
+        # Merge stream options with top-level defaults
+        stream_opts = dict(self._defaults)
+        stream_opts.update(s)
+
         cam = RemoteCv2Camera(
             rov=self.rov,
             name=s['name'],
@@ -215,7 +248,7 @@ class RemoteCameraManager:
             video_format=s.get('video_format', 'mjpeg'),
             port=s.get('port', 5000),
             windows_host=self.windows_host,
-            stream_opts=s,
+            stream_opts=stream_opts,
         )
         self._opened[name] = cam
         return cam

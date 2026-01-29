@@ -141,6 +141,9 @@ class RxConfig:
     name: str
     codec: str = "jpeg"       # 'jpeg' or 'h264'
     port: int = 5000
+    # Bind the UDP receiver to a specific local interface address.
+    # Default "0.0.0.0" listens on all interfaces.
+    bind_address: str = "0.0.0.0"
     latency_ms: int = 60
     sink: str = "autovideosink"
     sync: bool = False
@@ -370,7 +373,7 @@ class ReceiverProcess:
             if cfg.codec.lower() == "jpeg":
                 caps = "application/x-rtp,media=video,encoding-name=JPEG,payload=26,clock-rate=90000"
                 pipeline = [
-                    "udpsrc", "address=0.0.0.0", "reuse=true", f"port={cfg.port}", f"caps={caps}",
+                    "udpsrc", f"address={cfg.bind_address}", "reuse=true", f"port={cfg.port}", f"caps={caps}",
                     "!", "rtpjitterbuffer", f"latency={cfg.latency_ms}",
                     "!", "rtpjpegdepay",
                     "!", "jpegdec",
@@ -384,7 +387,7 @@ class ReceiverProcess:
             else:
                 caps = "application/x-rtp,media=video,encoding-name=H264,payload=96,clock-rate=90000"
                 pipeline = [
-                    "udpsrc", "address=0.0.0.0", "reuse=true", f"port={cfg.port}", f"caps={caps}",
+                    "udpsrc", f"address={cfg.bind_address}", "reuse=true", f"port={cfg.port}", f"caps={caps}",
                     "!", "rtpjitterbuffer", f"latency={cfg.latency_ms}",
                     "!", "rtph264depay",
                     "!", "h264parse",
@@ -405,7 +408,7 @@ class ReceiverProcess:
         if cfg.codec.lower() == "jpeg":
             caps = "application/x-rtp,media=video,encoding-name=JPEG,payload=26,clock-rate=90000"
             pipeline = [
-                "udpsrc", "address=0.0.0.0", "reuse=true", f"port={cfg.port}", f"caps={caps}",
+                "udpsrc", f"address={cfg.bind_address}", "reuse=true", f"port={cfg.port}", f"caps={caps}",
                 "!", "rtpjitterbuffer", f"latency={cfg.latency_ms}",
                 "!", "rtpjpegdepay",
                 "!", "jpegdec",
@@ -416,7 +419,7 @@ class ReceiverProcess:
         else:
             caps = "application/x-rtp,media=video,encoding-name=H264,payload=96,clock-rate=90000"
             pipeline = [
-                "udpsrc", "address=0.0.0.0", "reuse=true", f"port={cfg.port}", f"caps={caps}",
+                "udpsrc", f"address={cfg.bind_address}", "reuse=true", f"port={cfg.port}", f"caps={caps}",
                 "!", "rtpjitterbuffer", f"latency={cfg.latency_ms}",
                 "!", "rtph264depay",
                 "!", "h264parse",

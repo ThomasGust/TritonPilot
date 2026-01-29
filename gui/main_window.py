@@ -10,13 +10,17 @@ from PyQt6.QtWidgets import (
     QMainWindow,
     QWidget,
     QHBoxLayout,
+    QVBoxLayout,
     QLabel,
 )
 from config import (
     PILOT_PUB_ENDPOINT,
     SENSOR_SUB_ENDPOINT,
     CONTROLLER_DEADZONE,
+    ROV_HOST,
 )
+
+from network.net_select import list_local_ipv4_addrs
 from input.pilot_service import PilotPublisherService
 from telemetry.sensor_service import SensorSubscriberService
 from video.cam import RemoteCameraManager
@@ -47,6 +51,14 @@ class MainWindow(QMainWindow):
 
         self._video_lbl = QLabel("Video: -")
         self.statusBar().addPermanentWidget(self._video_lbl)
+
+        # network status (tether vs wifi, local route to ROV, remote link state)
+        self._net_lbl = QLabel("Net: -")
+        self.statusBar().addPermanentWidget(self._net_lbl)
+        self._last_net_ts = 0.0
+        self._last_net: dict = {}
+        self._route_cache = {"ts": 0.0, "iface": None, "src_ip": None, "is_wifi": None, "err": None}
+        self._rov_host = str(ROV_HOST)
 
         self._link_timer = QTimer(self)
         self._link_timer.timeout.connect(self._update_link_status)
@@ -149,9 +161,13 @@ class MainWindow(QMainWindow):
 
     def _handle_sensor_msg_on_ui(self, msg: dict):
         import time
-        if msg.get("sensor") == "heartbeat" or msg.get("type") == "heartbeat":
+        typ = msg.get("type")
+        if msg.get("sensor") == "heartbeat" or typ == "heartbeat":
             self._last_hb_ts = time.time()
             self._last_hb = msg
+        elif typ == "net" or msg.get("sensor") == "network":
+            self._last_net_ts = time.time()
+            self._last_net = msg
         else:
             self._last_sensor_ts = time.time()
 
@@ -219,6 +235,149 @@ class MainWindow(QMainWindow):
                         self._video_lbl.setText(f"Video: {name} ({st.get('state')})")
         except Exception:
             self._video_lbl.setText("Video: -")
+
+        # Network indicator (lightweight; throttled internally)
+        try:
+            self._update_network_status()
+        except Exception:
+            pass
+
+    def _iface_is_wifi_linux(self, iface: str) -> bool:
+        try:
+            import os
+
+            return os.path.isdir(f"/sys/class/net/{iface}/wireless")
+        except Exception:
+            # name heuristic fallback
+            return iface.startswith("wl") or iface.startswith("wlan")
+
+    def _refresh_route_cache(self):
+        """Determine which local interface is used to reach the ROV host."""
+        import time
+        now = time.time()
+        self._route_cache = {"ts": now, "iface": None, "src_ip": None, "is_wifi": None, "err": None}
+
+        # Prefer Linux 'ip route get' for accurate dev+src.
+        try:
+            import subprocess
+
+            out = subprocess.check_output(
+                ["ip", "route", "get", self._rov_host],
+                timeout=0.75,
+                stderr=subprocess.DEVNULL,
+                text=True,
+            ).strip()
+            # Example: "192.168.1.4 dev eth0 src 192.168.1.2 uid 1000"
+            parts = out.split()
+            if "dev" in parts:
+                i = parts.index("dev")
+                if i + 1 < len(parts):
+                    self._route_cache["iface"] = parts[i + 1]
+            if "src" in parts:
+                i = parts.index("src")
+                if i + 1 < len(parts):
+                    self._route_cache["src_ip"] = parts[i + 1]
+            iface = self._route_cache.get("iface")
+            if iface:
+                self._route_cache["is_wifi"] = bool(self._iface_is_wifi_linux(str(iface)))
+            return
+        except Exception as e:
+            self._route_cache["err"] = str(e)
+
+        # Fallback: UDP connect trick to get the chosen source IP (iface unknown).
+        try:
+            import socket
+
+            s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            s.connect((self._rov_host, 9))
+            self._route_cache["src_ip"] = s.getsockname()[0]
+            s.close()
+
+            # Best-effort: map src_ip -> interface name + wifi classification (works on Windows too).
+            src_ip = self._route_cache.get("src_ip")
+            if src_ip:
+                for a in list_local_ipv4_addrs():
+                    if a.ip == src_ip:
+                        self._route_cache["iface"] = a.iface
+                        self._route_cache["is_wifi"] = a.is_wifi
+                        break
+        except Exception as e:
+            self._route_cache["err"] = str(e)
+
+    def _fmt_bps(self, bps: float | None) -> str:
+        if bps is None:
+            return "-"
+        try:
+            b = float(bps) * 8.0
+        except Exception:
+            return "-"
+        if b < 0:
+            return "-"
+        if b >= 1e9:
+            return f"{b/1e9:.2f}Gb/s"
+        if b >= 1e6:
+            return f"{b/1e6:.2f}Mb/s"
+        if b >= 1e3:
+            return f"{b/1e3:.1f}Kb/s"
+        return f"{b:.0f}b/s"
+
+    def _update_network_status(self):
+        import time
+
+        now = time.time()
+        # Refresh local route info at most every 2 seconds to avoid frequent subprocess calls.
+        if now - float(self._route_cache.get("ts", 0.0)) > 2.0:
+            self._refresh_route_cache()
+
+        local_iface = self._route_cache.get("iface")
+        local_ip = self._route_cache.get("src_ip")
+        local_wifi = self._route_cache.get("is_wifi")
+
+        # Remote (ROV) network telemetry
+        remote = self._last_net if (now - self._last_net_ts) < 3.0 else None
+        if remote and isinstance(remote, dict):
+            rif = remote.get("iface") or "-"
+            rlink = remote.get("link") or {}
+            rkind = rlink.get("kind") or "-"
+            rstate = rlink.get("state") or "-"
+            rsp = rlink.get("speed_mbps")
+            rsp_s = f"{int(rsp)}Mbps" if isinstance(rsp, (int, float)) and rsp and rsp > 0 else "-"
+            rtether = bool(remote.get("is_tether"))
+            rx_s = self._fmt_bps(remote.get("rx_bps"))
+            tx_s = self._fmt_bps(remote.get("tx_bps"))
+        else:
+            rif = rkind = rstate = rsp_s = rx_s = tx_s = "-"
+            rtether = False
+
+        # Compose status
+        local_part = "local="
+        if local_iface:
+            local_part += str(local_iface)
+            if local_wifi is True:
+                local_part += "(wifi)"
+        elif local_ip:
+            local_part += str(local_ip)
+        else:
+            local_part += "-"
+
+        remote_part = f"rov={rif} {rkind} {rstate} {rsp_s}"
+        if remote and (remote.get("ip") or None):
+            remote_part += f" ip={remote.get('ip')}"
+
+        # Warnings
+        warn = None
+        if local_wifi is True:
+            warn = "LOCAL WIFI"
+        if remote and (not rtether):
+            warn = "ROV NOT TETHER"
+
+        parts = ["Net:", local_part, "|", remote_part]
+        if remote:
+            parts += ["|", f"rx={rx_s}", f"tx={tx_s}"]
+        if warn:
+            parts += ["|", f"⚠ {warn}"]
+
+        self._net_lbl.setText(" ".join(parts))
 
     def _make_menu(self):
         bar = self.menuBar()

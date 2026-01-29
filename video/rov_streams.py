@@ -70,6 +70,10 @@ class ROVStreams:
     def list_status(self):
         return self._call("status")
 
+    def net_info(self):
+        """Return ROV-side interface/IP info (best-effort)."""
+        return self._call("net_info")
+
 
 # --- compatibility helpers (used by some tooling / older code) ---
 
