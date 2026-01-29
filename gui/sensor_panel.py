@@ -148,6 +148,40 @@ class SensorPanel(QWidget):
             except Exception:
                 pa_s = str(pa)
             val = f"armed={armed} pilot_age={pa_s} seq={seq}"
+        elif typ == "net":
+            iface = msg.get("iface") or "-"
+            ip = msg.get("ip") or "-"
+            link = msg.get("link") or {}
+            kind = link.get("kind") or "-"
+            state = link.get("state") or "-"
+            sp = link.get("speed_mbps")
+            sp_s = f"{int(sp)}Mbps" if isinstance(sp, (int, float)) and sp and sp > 0 else "-"
+
+            def _bps_to_str(bps):
+                try:
+                    bps = float(bps)
+                except Exception:
+                    return "-"
+                if bps < 0:
+                    return "-"
+                # show in bits/s
+                b = bps * 8.0
+                if b >= 1e9:
+                    return f"{b/1e9:.2f}Gb/s"
+                if b >= 1e6:
+                    return f"{b/1e6:.2f}Mb/s"
+                if b >= 1e3:
+                    return f"{b/1e3:.1f}Kb/s"
+                return f"{b:.0f}b/s"
+
+            rx_s = _bps_to_str(msg.get("rx_bps"))
+            tx_s = _bps_to_str(msg.get("tx_bps"))
+            c = msg.get("counters") or {}
+            drop = f"{c.get('rx_drop','-')}/{c.get('tx_drop','-')}"
+            errs = f"{c.get('rx_errs','-')}/{c.get('tx_errs','-')}"
+            tether = msg.get("is_tether")
+            tether_s = "tether" if tether else "wifi/other"
+            val = f"{iface} {kind} {state} {sp_s} ip={ip} rx={rx_s} tx={tx_s} drop={drop} err={errs} ({tether_s})"
         else:
             val = str(msg)
 
