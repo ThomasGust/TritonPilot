@@ -15,7 +15,7 @@
     },
     {
       "name": "camera_2",
-      "device": "/dev/video4",
+      "device": "/dev/video2",
       "width": 1280,
       "height": 720,
       "fps": 30,
