@@ -292,15 +292,6 @@ class MainWindow(QMainWindow):
             s.connect((self._rov_host, 9))
             self._route_cache["src_ip"] = s.getsockname()[0]
             s.close()
-
-            # Best-effort: map src_ip -> interface name + wifi classification (works on Windows too).
-            src_ip = self._route_cache.get("src_ip")
-            if src_ip:
-                for a in list_local_ipv4_addrs():
-                    if a.ip == src_ip:
-                        self._route_cache["iface"] = a.iface
-                        self._route_cache["is_wifi"] = a.is_wifi
-                        break
         except Exception as e:
             self._route_cache["err"] = str(e)
 
