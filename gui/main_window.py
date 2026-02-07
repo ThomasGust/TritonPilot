@@ -17,6 +17,9 @@ from config import (
     PILOT_PUB_ENDPOINT,
     SENSOR_SUB_ENDPOINT,
     CONTROLLER_DEADZONE,
+    CONTROLLER_INDEX,
+    CONTROLLER_DEBUG,
+    CONTROLLER_DUMP_RAW_EVERY_S,
     ROV_HOST,
 )
 
@@ -75,7 +78,9 @@ class MainWindow(QMainWindow):
             endpoint=PILOT_PUB_ENDPOINT,
             rate_hz=30.0,
             deadzone=CONTROLLER_DEADZONE,
-            debug=False,
+            debug=CONTROLLER_DEBUG,
+            index=CONTROLLER_INDEX,
+            dump_raw_every_s=CONTROLLER_DUMP_RAW_EVERY_S,
             on_status=self._on_pilot_status_from_thread,
         )
         self.pilot_svc.start()

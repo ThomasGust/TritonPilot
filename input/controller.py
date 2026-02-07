@@ -99,6 +99,10 @@ class GamepadSource:
         index: int = 0,
         invert_ly: bool = True,
         invert_ry: bool = True,
+        axis_map: Optional[List[int]] = None,
+        hat_index: int = 0,
+        menu_buttons: Optional[List[int]] = None,
+        win_buttons: Optional[List[int]] = None,
         debug: bool = False,
     ):
         ensure_pygame_joystick()
@@ -113,6 +117,28 @@ class GamepadSource:
         self.deadzone = float(deadzone)
         self.invert_ly = bool(invert_ly)
         self.invert_ry = bool(invert_ry)
+        # Axis map can be forced from config/env, or auto-detected.
+        #
+        # Two common Xbox layouts under SDL/pygame:
+        #   A) 0=lx, 1=ly, 2=rx, 3=ry, 4=lt, 5=rt  -> schema map [0,1,2,3,4,5]
+        #   B) 0=lx, 1=ly, 2=lt, 3=rx, 4=ry, 5=rt  -> schema map [0,1,3,4,2,5]
+        #
+        # Auto-detect is best-effort using the controller's "rest" axis values
+        # (triggers often rest near -1.0 or +1.0, while sticks rest near 0.0).
+        self._axis_map_auto = axis_map is None
+        self.axis_map = list(axis_map) if axis_map is not None else [0, 1, 2, 3, 4, 5]
+        # Ensure we always have 6 entries (lx,ly,rx,ry,lt,rt)
+        if len(self.axis_map) < 6:
+            self.axis_map = (self.axis_map + [0, 1, 2, 3, 4, 5])[:6]
+        else:
+            self.axis_map = self.axis_map[:6]
+
+        self.hat_index = int(hat_index)
+
+        # Optional button overrides (indices). If provided, these take precedence
+        # over the built-in heuristics later.
+        self._menu_buttons_override = list(menu_buttons) if menu_buttons else []
+        self._win_buttons_override = list(win_buttons) if win_buttons else []
         self.debug = bool(debug)
 
         self.js = pygame.joystick.Joystick(index)
@@ -132,8 +158,58 @@ class GamepadSource:
         pygame.event.pump()
         self._rest_axes = [self._axis_raw(i) for i in range(self.js.get_numaxes())]
 
+        # If axis_map was not forced, choose a best-effort mapping based on the
+        # rest values we just sampled.
+        if self._axis_map_auto:
+            inferred = self._infer_axis_map(self._rest_axes)
+            if inferred is not None:
+                self.axis_map = inferred
+                # keep 6 entries
+                self.axis_map = (self.axis_map + [0, 1, 2, 3, 4, 5])[:6]
+                if self.debug:
+                    print(f"[controller] auto axis_map -> {self.axis_map} (rest={['%+.2f'%v for v in self._rest_axes]})")
+            elif self.debug:
+                print(f"[controller] auto axis_map: could not infer, using default {self.axis_map} (rest={['%+.2f'%v for v in self._rest_axes]})")
+
         if self.debug:
             self.print_device_summary(prefix="[controller] ")
+
+    @staticmethod
+    def _infer_axis_map(rest_axes: List[float]) -> Optional[List[int]]:
+        """Infer the axis_map (lx,ly,rx,ry,lt,rt) -> pygame indices.
+
+        We try to distinguish between the two common layouts:
+          A) [0,1,2,3,4,5]  where axes 4/5 are triggers
+          B) [0,1,3,4,2,5]  where axes 2/5 are triggers
+
+        Heuristic:
+          - Trigger axes often rest far from 0 (e.g. -1.0 or +1.0)
+          - Stick axes rest near 0.0
+
+        If we can't tell, we fall back to layout A.
+        """
+        if not rest_axes:
+            return None
+
+        # Consider only the first 6 axes; extra axes (if any) are ignored.
+        ra = [float(v) for v in rest_axes[:6]]
+        if len(ra) < 6:
+            # Not enough axes to safely infer.
+            return None
+
+        # Axes whose rest value is far from 0 are likely triggers.
+        far = {i for i, v in enumerate(ra) if abs(v) > 0.35}
+
+        # If axis 2 rests far from 0 but axis 4 does not, it's probably layout B.
+        if (2 in far) and (4 not in far):
+            return [0, 1, 3, 4, 2, 5]
+
+        # If axis 4 rests far from 0 but axis 2 does not, it's probably layout A.
+        if (4 in far) and (2 not in far):
+            return [0, 1, 2, 3, 4, 5]
+
+        # Ambiguous: pick the more common "A" layout (matches many Xbox One mappings).
+        return [0, 1, 2, 3, 4, 5]
 
     def print_device_summary(self, prefix: str = "") -> None:
         print(
@@ -197,6 +273,10 @@ class GamepadSource:
         if rest < -0.5:
             return self._clamp01((raw + 1.0) * 0.5)
 
+        # Some drivers use [-1..1] with rest near +1.0 (pressed moves toward -1.0).
+        if rest > 0.5:
+            return self._clamp01((1.0 - raw) * 0.5)
+
         # Otherwise treat as [0..1] (or best-effort clamp)
         return self._clamp01(raw)
 
@@ -226,19 +306,21 @@ class GamepadSource:
         """
         pygame.event.pump()
 
-        # Axes mapping (your existing schema)
-        lx = self._dz(self._axis_raw(0))
-        ly_raw = self._axis_raw(1)
+        # Axes mapping (schema: lx,ly,rx,ry,lt,rt)
+        ax_lx, ax_ly, ax_rx, ax_ry, ax_lt, ax_rt = self.axis_map
+
+        lx = self._dz(self._axis_raw(ax_lx))
+        ly_raw = self._axis_raw(ax_ly)
         ly = self._dz(-ly_raw if self.invert_ly else ly_raw)
 
-        rx = self._dz(self._axis_raw(2))
-        ry_raw = self._axis_raw(3)
+        rx = self._dz(self._axis_raw(ax_rx))
+        ry_raw = self._axis_raw(ax_ry)
         ry = self._dz(-ry_raw if self.invert_ry else ry_raw)
 
-        lt = self._normalize_trigger(4)
-        rt = self._normalize_trigger(5)
+        lt = self._normalize_trigger(ax_lt)
+        rt = self._normalize_trigger(ax_rt)
 
-        dpad = self._hat_raw(0)
+        dpad = self._hat_raw(self.hat_index)
 
         # Button indices vary slightly across drivers (SDL/evdev) and OS
         # versions. For the Xbox One S controller on Linux, Start is commonly
@@ -259,18 +341,23 @@ class GamepadSource:
         is_xbox = "xbox" in (self.name or "").lower()
 
         # "menu" = Start; "win" = Back / Guide.
-        # For Xbox on Linux the common layout is Back=6, Start=7, L3=8, R3=9.
-        # Some drivers shift Start/Back by +2; we include conservative fallbacks.
+        # Button indices vary by controller model and OS/driver.
+        # We provide conservative defaults + allow overrides via config/env.
         if is_xbox:
-            menu = _b(7, 9)
-            win = _b(6, 8, 10)
+            default_menu = [7, 9]
+            default_win = [6, 8, 10]
             lstick = _b(8)
             rstick = _b(9)
         else:
-            menu = _b(7, 9, 11)
-            win = _b(6, 8, 10)
+            default_menu = [7, 9, 11]
+            default_win = [6, 8, 10]
             lstick = _b(8, 10)
             rstick = _b(9, 11)
+
+        menu_idxs = self._menu_buttons_override or default_menu
+        win_idxs = self._win_buttons_override or default_win
+        menu = _b(*menu_idxs)
+        win = _b(*win_idxs)
 
         return ControllerSnapshot(
             lx=lx,

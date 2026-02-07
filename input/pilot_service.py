@@ -35,6 +35,10 @@ class PilotPublisherService:
         deadzone: float | None = None,
         debug: bool = False,
         index: int = 0,
+        axis_map: list[int] | None = None,
+        hat_index: int | None = None,
+        menu_buttons: list[int] | None = None,
+        win_buttons: list[int] | None = None,
         dump_raw_every_s: float = 0.0,  # 0 = off
         reopen_on_error_s: float = 1.0,
         on_send: Optional[Callable[[dict], None]] = None,
@@ -52,6 +56,13 @@ class PilotPublisherService:
         self.on_status = on_status
         self._last_status: Optional[dict] = None
         self.index = int(index)
+
+        # Optional mapping overrides (useful for CLI debugging). When None, we
+        # pull values from config/env in _open_controller().
+        self._axis_map_override = list(axis_map) if axis_map is not None else None
+        self._hat_index_override = int(hat_index) if hat_index is not None else None
+        self._menu_buttons_override = list(menu_buttons) if menu_buttons is not None else None
+        self._win_buttons_override = list(win_buttons) if win_buttons is not None else None
 
         self.dump_raw_every_s = float(dump_raw_every_s)
         self.reopen_on_error_s = float(reopen_on_error_s)
@@ -118,7 +129,29 @@ class PilotPublisherService:
                     f"axes={d['axes']} buttons={d['buttons']} hats={d['hats']}"
                 )
 
-        ctrl = GamepadSource(deadzone=self.deadzone, index=self.index, debug=self.debug)
+        # Controller mapping overrides come from config/env so the GUI can be
+        # fixed without code edits when SDL axis numbering differs.
+        from config import (
+            CONTROLLER_AXIS_MAP,
+            CONTROLLER_HAT_INDEX,
+            CONTROLLER_MENU_BUTTONS,
+            CONTROLLER_WIN_BUTTONS,
+        )
+
+        axis_map = self._axis_map_override if self._axis_map_override is not None else CONTROLLER_AXIS_MAP
+        hat_index = self._hat_index_override if self._hat_index_override is not None else CONTROLLER_HAT_INDEX
+        menu_buttons = self._menu_buttons_override if self._menu_buttons_override is not None else CONTROLLER_MENU_BUTTONS
+        win_buttons = self._win_buttons_override if self._win_buttons_override is not None else CONTROLLER_WIN_BUTTONS
+
+        ctrl = GamepadSource(
+            deadzone=self.deadzone,
+            index=self.index,
+            debug=self.debug,
+            axis_map=axis_map,
+            hat_index=hat_index,
+            menu_buttons=menu_buttons,
+            win_buttons=win_buttons,
+        )
         return ctrl
 
     def _build_frame(self, t0: float, snap: ControllerSnapshot) -> PilotFrame:
