@@ -10,55 +10,6 @@ from PyQt6.QtWidgets import (
     QHeaderView,
 )
 from PyQt6.QtCore import Qt
-import math
-
-def quaternion_to_euler(q, degrees=False):
-    """
-    Convert a quaternion dict {x, y, z, w} to Euler angles dict
-    {roll, pitch, yaw} using the XYZ (roll-pitch-yaw) convention.
-
-    :param q: dict with keys 'x', 'y', 'z', 'w'
-    :param degrees: if True, return angles in degrees; otherwise radians
-    :return: dict { 'roll': ..., 'pitch': ..., 'yaw': ... }
-    """
-    x = float(q["x"])
-    y = float(q["y"])
-    z = float(q["z"])
-    w = float(q["w"])
-
-    # (optional) normalize to be safe
-    norm = math.sqrt(x*x + y*y + z*z + w*w)
-    if norm == 0:
-        raise ValueError("Quaternion has zero length")
-    x /= norm
-    y /= norm
-    z /= norm
-    w /= norm
-
-    # roll (x-axis rotation)
-    sinr_cosp = 2 * (w * x + y * z)
-    cosr_cosp = 1 - 2 * (x * x + y * y)
-    roll = math.atan2(sinr_cosp, cosr_cosp)
-
-    # pitch (y-axis rotation)
-    sinp = 2 * (w * y - z * x)
-    if abs(sinp) >= 1:
-        # use 90 degrees if out of range
-        pitch = math.copysign(math.pi / 2, sinp)
-    else:
-        pitch = math.asin(sinp)
-
-    # yaw (z-axis rotation)
-    siny_cosp = 2 * (w * z + x * y)
-    cosy_cosp = 1 - 2 * (y * y + z * z)
-    yaw = math.atan2(siny_cosp, cosy_cosp)
-
-    if degrees:
-        roll = math.degrees(roll)
-        pitch = math.degrees(pitch)
-        yaw = math.degrees(yaw)
-
-    return {"roll": float(roll), "pitch": float(pitch), "yaw": float(yaw)}
 
 class SensorPanel(QWidget):
     """
@@ -101,44 +52,9 @@ class SensorPanel(QWidget):
             chans = msg.get("channels", [])
             val = ", ".join(f"{c:.2f}" for c in chans)
         elif typ == "external_depth":
-            val = f"{msg.get('depth_m', 0):.2f} m, {msg.get('temperature_c', 0):.1f} C"
-        elif typ == "att":
-            quat = msg.get("quat") or {}
-            try:
-                eul = quaternion_to_euler(quat, degrees=True)
-                val = f"roll={eul['roll']:.1f} pitch={eul['pitch']:.1f} yaw={eul['yaw']:.1f} deg"
-            except Exception:
-                val = f"quat={quat}"
-
-            mag_used = msg.get("mag_used")
-            if mag_used:
-                val += f" | mag={mag_used}"
-
-            # EKF debug (if published)
-            dbg = msg.get("att_debug") or {}
-            if isinstance(dbg, dict):
-                try:
-                    ai = dbg.get("accel_innov_norm")
-                    mi = dbg.get("mag_innov_norm")
-                    if ai is not None:
-                        val += f" | acc_innov={float(ai):.3f}"
-                    if mi is not None:
-                        val += f" | mag_innov={float(mi):.3f}"
-                except Exception:
-                    pass
-
-            # optional: show field magnitudes if present
-            try:
-                m1 = msg.get("mag_ak09915")
-                if isinstance(m1, dict) and all(k in m1 for k in ("x","y","z")):
-                    n1 = math.sqrt(float(m1["x"])**2 + float(m1["y"])**2 + float(m1["z"])**2)
-                    val += f" | |ak|={n1:.1f}"
-                m2 = msg.get("mag_mmc5983")
-                if isinstance(m2, dict) and all(k in m2 for k in ("x","y","z")):
-                    n2 = math.sqrt(float(m2["x"])**2 + float(m2["y"])**2 + float(m2["z"])**2)
-                    val += f" | |mmc|={n2:.1f}"
-            except Exception:
-                pass
+            p = msg.get("pressure_mbar")
+            p_s = f", {float(p):.1f} mbar" if p is not None else ""
+            val = f"{msg.get('depth_m', 0):.2f} m, {msg.get('temperature_c', 0):.1f} C{p_s}"
         elif typ == "heartbeat":
             armed = msg.get("armed")
             pa = msg.get("pilot_age")
