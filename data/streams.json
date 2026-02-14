@@ -1,0 +1,56 @@
+{
+  "streams": [
+    {
+      "name": "camera_1",
+      "device": "/dev/video0",
+      "width": 1280,
+      "height": 720,
+      "fps": 30,
+      "video_format": "mjpeg",
+      "encode": "h264",
+      "h264_bitrate": 6000000,
+      "h264_gop": 30,
+      "port": 5000,
+      "enabled": true
+    },
+    {
+      "name": "camera_2",
+      "device": "/dev/video4",
+      "width": 1280,
+      "height": 720,
+      "fps": 30,
+      "video_format": "mjpeg",
+      "encode": "h264",
+      "h264_bitrate": 6000000,
+      "h264_gop": 30,
+      "port": 5001,
+      "enabled": true
+    },
+    {
+      "name": "camera_3",
+      "device": "/dev/video8",
+      "width": 1280,
+      "height": 720,
+      "fps": 30,
+      "video_format": "mjpeg",
+      "encode": "h264",
+      "h264_bitrate": 6000000,
+      "h264_gop": 30,
+      "port": 5002,
+      "enabled": true
+    },
+    {
+      "name": "camera_4",
+      "device": "/dev/video25",
+      "width": 1280,
+      "height": 720,
+      "fps": 30,
+      "video_format": "mjpeg",
+      "encode": "h264",
+      "h264_bitrate": 6000000,
+      "h264_gop": 30,
+      "port": 5003,
+      "enabled": true
+    }
+  ]
+}

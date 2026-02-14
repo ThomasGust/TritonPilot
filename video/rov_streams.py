@@ -1,0 +1,100 @@
+from __future__ import annotations
+
+from config import VIDEO_RPC_ENDPOINT
+import zmq
+
+
+class ROVStreams:
+    """Small RPC client for the ROV-side video control service.
+
+    Failsafe behavior:
+      - uses send/recv timeouts so the GUI never hangs if the ROV isn't up yet
+      - resets the REQ socket on timeout/state errors
+    """
+
+    def __init__(self, endpoint: str = VIDEO_RPC_ENDPOINT, timeout_ms: int = 3000):
+        self.ctx = zmq.Context.instance()
+        self.endpoint = endpoint
+        self.timeout_ms = int(timeout_ms)
+        self.sock = self._make_sock()
+
+    def _make_sock(self):
+        sock = self.ctx.socket(zmq.REQ)
+        # Avoid hanging close() on shutdown
+        sock.setsockopt(zmq.LINGER, 0)
+        # Ensure calls return quickly when ROV isn't up
+        sock.setsockopt(zmq.RCVTIMEO, self.timeout_ms)
+        sock.setsockopt(zmq.SNDTIMEO, self.timeout_ms)
+        # Allow send even if a previous recv timed out (best effort; not all libzmq expose these)
+        try:
+            sock.setsockopt(zmq.REQ_RELAXED, 1)  # type: ignore[attr-defined]
+            sock.setsockopt(zmq.REQ_CORRELATE, 1)  # type: ignore[attr-defined]
+        except Exception:
+            pass
+        sock.connect(self.endpoint)
+        return sock
+
+    def _reset_sock(self):
+        try:
+            self.sock.close(0)
+        except Exception:
+            pass
+        self.sock = self._make_sock()
+
+    def _call(self, cmd: str, **args):
+        try:
+            self.sock.send_json({"cmd": cmd, "args": args})
+            reply = self.sock.recv_json()
+        except zmq.Again as e:
+            # Timeout (ROV down / not responding)
+            self._reset_sock()
+            raise TimeoutError(f"ROV video RPC timed out calling '{cmd}' (is TritonOS running?)") from e
+        except zmq.ZMQError as e:
+            # REQ state errors or disconnects
+            self._reset_sock()
+            raise ConnectionError(f"ROV video RPC error calling '{cmd}': {e}") from e
+
+        if not reply.get("ok"):
+            raise RuntimeError(f"ROV error: {reply.get('error')}")
+        return reply.get("data")
+
+    def start_stream(self, **kwargs):
+        return self._call("start_stream", **kwargs)
+
+    def stop_stream(self, **kwargs):
+        return self._call("stop_stream", **kwargs)
+
+    def list_devices(self):
+        return self._call("list_devices")
+
+    def list_status(self):
+        return self._call("status")
+
+    def net_info(self):
+        """Return ROV-side interface/IP info (best-effort)."""
+        return self._call("net_info")
+
+
+# --- compatibility helpers (used by some tooling / older code) ---
+
+def normalize_device(dev: dict) -> dict:
+    """Best-effort normalization of a device dict returned by the ROV video service."""
+    if dev is None:
+        return {}
+    out = dict(dev)
+    # common aliases
+    if "device" in out and "path" not in out:
+        out["path"] = out["device"]
+    return out
+
+def is_probably_camera(dev: dict) -> bool:
+    """Heuristic: treat /dev/video* devices as cameras by default."""
+    d = normalize_device(dev)
+    path = str(d.get("path") or d.get("device") or "")
+    return path.startswith("/dev/video")
+
+def list_real_cameras(devs: list[dict] | None) -> list[dict]:
+    """Filter device list to likely cameras."""
+    if not devs:
+        return []
+    return [normalize_device(d) for d in devs if is_probably_camera(d)]
