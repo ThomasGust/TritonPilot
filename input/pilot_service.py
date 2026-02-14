@@ -10,7 +10,7 @@ from typing import Optional, Callable
 import zmq
 
 from schema.pilot_common import PilotFrame, PilotAxes, PilotButtons
-from input.controller import GamepadSource, ControllerSnapshot, list_controllers
+from input.controller import GamepadSource, ControllerSnapshot, list_controllers, refresh_joysticks
 
 
 class PilotPublisherService:
@@ -119,6 +119,13 @@ class PilotPublisherService:
             pass
 
     def _open_controller(self) -> GamepadSource:
+        # Support hotplug: if the app started with no controller connected,
+        # force a rescan each time we attempt to open.
+        try:
+            refresh_joysticks()
+        except Exception:
+            pass
+
         # Print devices each time we try to open
         if self.debug:
             devices = list_controllers()

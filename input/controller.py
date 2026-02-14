@@ -57,6 +57,33 @@ def ensure_pygame_joystick() -> None:
     pygame.joystick.init()
 
 
+def refresh_joysticks() -> None:
+    """Force SDL/pygame to rescan joystick devices.
+
+    This is mainly to support *hotplug* when the pilot app starts with no
+    controller connected and the controller is plugged in later.
+
+    We only call this when no controller object is active (during open/reopen).
+    """
+    if pygame is None:
+        return
+    try:
+        ensure_pygame_joystick()
+    except Exception:
+        return
+    try:
+        # Pump events so SDL processes device-add/remove notifications.
+        pygame.event.pump()
+    except Exception:
+        pass
+    try:
+        # Re-init joystick subsystem to trigger a device rescan.
+        pygame.joystick.quit()
+        pygame.joystick.init()
+    except Exception:
+        pass
+
+
 def list_controllers() -> List[Dict[str, Any]]:
     """
     Returns a list of dicts describing currently detected controllers.
@@ -65,6 +92,10 @@ def list_controllers() -> List[Dict[str, Any]]:
     if pygame is None:
         return []
     ensure_pygame_joystick()
+    try:
+        pygame.event.pump()
+    except Exception:
+        pass
     out: List[Dict[str, Any]] = []
     count = pygame.joystick.get_count()
     for i in range(count):
