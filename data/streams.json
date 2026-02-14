@@ -2,7 +2,7 @@
   "streams": [
     {
       "name": "camera_1",
-      "device": "/dev/video0",
+      "device": "/dev/v4l/by-path/*1.3.4*video-index0",
       "width": 1280,
       "height": 720,
       "fps": 30,
@@ -15,7 +15,7 @@
     },
     {
       "name": "camera_2",
-      "device": "/dev/video4",
+      "device": "/dev/v4l/by-path/*1.3.5*video-index0",
       "width": 1280,
       "height": 720,
       "fps": 30,
@@ -28,7 +28,7 @@
     },
     {
       "name": "camera_3",
-      "device": "/dev/video8",
+      "device": "/dev/v4l/by-path/*1.3.6*video-index0",
       "width": 1280,
       "height": 720,
       "fps": 30,
@@ -41,7 +41,7 @@
     },
     {
       "name": "camera_4",
-      "device": "/dev/video25",
+      "device": "/dev/v4l/by-path/*1.3.7*video-index0",
       "width": 1280,
       "height": 720,
       "fps": 30,

@@ -88,10 +88,10 @@ def normalize_device(dev: dict) -> dict:
     return out
 
 def is_probably_camera(dev: dict) -> bool:
-    """Heuristic: treat /dev/video* devices as cameras by default."""
+    """Heuristic: treat V4L2 devices (by-path/by-id or /dev/video*) as cameras by default."""
     d = normalize_device(dev)
     path = str(d.get("path") or d.get("device") or "")
-    return path.startswith("/dev/video")
+    return path.startswith("/dev/v4l/by-path/") or path.startswith("/dev/v4l/by-id/") or path.startswith("/dev/video")
 
 def list_real_cameras(devs: list[dict] | None) -> list[dict]:
     """Filter device list to likely cameras."""
