@@ -44,6 +44,9 @@ class RemoteCv2Camera:
         self.latency_ms = latency_ms
         self.channel_order = channel_order
 
+        # Populated if the ROV had to perform recovery actions (e.g., USB rebind)
+        self.start_messages: list[str] = []
+
         # Detect the best local IP to receive video if not provided.
         # IMPORTANT: the previous approach used 8.8.8.8 which tends to pick Wi‑Fi.
         # Here we select the local IP that can reach the ROV video RPC host,
@@ -151,7 +154,14 @@ class RemoteCv2Camera:
 
 
 
-        self.rov.start_stream(**start_kwargs)
+        resp = self.rov.start_stream(**start_kwargs)
+        if isinstance(resp, dict) and resp.get("messages"):
+            try:
+                self.start_messages = [str(m) for m in (resp.get("messages") or [])]
+                for m in self.start_messages:
+                    logger.warning("ROV video start notice (%s): %s", self.name, m)
+            except Exception:
+                self.start_messages = []
 
 
 

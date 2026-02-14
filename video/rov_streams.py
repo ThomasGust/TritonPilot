@@ -2,6 +2,10 @@ from __future__ import annotations
 
 from config import VIDEO_RPC_ENDPOINT
 import zmq
+import logging
+
+
+logger = logging.getLogger(__name__)
 
 
 class ROVStreams:
@@ -54,9 +58,29 @@ class ROVStreams:
             self._reset_sock()
             raise ConnectionError(f"ROV video RPC error calling '{cmd}': {e}") from e
 
+        data = reply.get("data")
+        # Messages may appear either top-level (error path) or inside data (success path)
+        msgs = reply.get("messages")
+        if (not msgs) and isinstance(data, dict):
+            msgs = data.get("messages")
+
         if not reply.get("ok"):
-            raise RuntimeError(f"ROV error: {reply.get('error')}")
-        return reply.get("data")
+            err = str(reply.get("error") or "unknown error")
+            if msgs:
+                try:
+                    err = err + "\n" + "\n".join([str(m) for m in msgs])
+                except Exception:
+                    pass
+            raise RuntimeError(f"ROV error: {err}")
+
+        if msgs:
+            try:
+                for m in msgs:
+                    logger.warning("ROV video: %s", m)
+            except Exception:
+                pass
+
+        return data
 
     def start_stream(self, **kwargs):
         return self._call("start_stream", **kwargs)

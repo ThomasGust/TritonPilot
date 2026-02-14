@@ -138,7 +138,22 @@ class VideoWidget(QWidget):
         self._last_error = None
         self._retry_backoff_s = 0.5
         self._state = "playing"
-        self.label.setText(f"{self.stream_name}\nWaiting for frames…")
+
+        # If the ROV reported recovery actions (e.g., USB rebind), surface them briefly.
+        notices = []
+        try:
+            notices = list(getattr(self.camera, "start_messages", []) or [])
+        except Exception:
+            notices = []
+
+        if notices:
+            # Keep it short so it fits in the widget before the first frame arrives.
+            tail = notices[-3:]
+            self.label.setText(
+                f"{self.stream_name}\nConnected (ROV recovery):\n" + "\n".join(tail) + "\n\nWaiting for frames…"
+            )
+        else:
+            self.label.setText(f"{self.stream_name}\nWaiting for frames…")
 
         self.worker = _VideoWorker(self.camera, fps=30.0)
         self.worker.frame_ready.connect(self._on_frame)
