@@ -23,6 +23,12 @@ class VideoTabs(QWidget):
         self.stream_names = stream_names
 
         self.tabs = QTabWidget()
+        # Keep tab titles readable when space is tight.
+        try:
+            self.tabs.setElideMode(Qt.TextElideMode.ElideRight)
+            self.tabs.setUsesScrollButtons(True)
+        except Exception:
+            pass
         self.tabs.currentChanged.connect(self._on_tab_changed)
 
         self._containers: dict[str, QWidget] = {}

@@ -12,6 +12,7 @@ from PyQt6.QtWidgets import (
     QHBoxLayout,
     QVBoxLayout,
     QLabel,
+    QSizePolicy,
 )
 from config import (
     PILOT_PUB_ENDPOINT,
@@ -35,6 +36,14 @@ class MainWindow(QMainWindow):
     # we'll receive sensor messages from a background thread → emit to UI thread
     sensor_msg_sig = pyqtSignal(dict)
     pilot_status_sig = pyqtSignal(dict)
+
+    def _set_status(self, lbl: QLabel, text: str) -> None:
+        """Set status text + tooltip (so truncated UI still preserves full info)."""
+        try:
+            lbl.setText(text)
+            lbl.setToolTip(text)
+        except Exception:
+            pass
 
     def __init__(self, streams_path: str, parent=None):
         super().__init__(parent)
@@ -67,6 +76,22 @@ class MainWindow(QMainWindow):
         self._last_net: dict = {}
         self._route_cache = {"ts": 0.0, "iface": None, "src_ip": None, "is_wifi": None, "err": None}
         self._rov_host = str(ROV_HOST)
+
+        # Make status widgets readable and avoid losing info when space is tight.
+        for _lbl, _w in [
+            (self._link_lbl, 260),
+            (self._ctrl_lbl, 220),
+            (self._video_lbl, 220),
+            (self._depth_lbl, 220),
+            (self._net_lbl, 300),
+        ]:
+            try:
+                _lbl.setMinimumWidth(int(_w))
+                _lbl.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
+                _lbl.setToolTip(_lbl.text())
+                _lbl.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+            except Exception:
+                pass
 
         self._link_timer = QTimer(self)
         self._link_timer.timeout.connect(self._update_link_status)
@@ -158,14 +183,14 @@ class MainWindow(QMainWindow):
         state = (status or {}).get('controller', 'unknown')
         if state == 'connected':
             name = (status or {}).get('name') or 'controller'
-            self._ctrl_lbl.setText(f"Controller: OK ({name})")
+            self._set_status(self._ctrl_lbl, f"Controller: OK ({name})")
         elif state == 'disconnected':
             err = (status or {}).get('error') or 'not connected'
-            self._ctrl_lbl.setText(f"Controller: - ({err})")
+            self._set_status(self._ctrl_lbl, f"Controller: - ({err})")
         elif state == 'stopped':
-            self._ctrl_lbl.setText("Controller: stopped")
+            self._set_status(self._ctrl_lbl, "Controller: stopped")
         else:
-            self._ctrl_lbl.setText(f"Controller: {state}")
+            self._set_status(self._ctrl_lbl, f"Controller: {state}")
 
     def _handle_sensor_msg_on_ui(self, msg: dict):
         import time
@@ -185,23 +210,23 @@ class MainWindow(QMainWindow):
                 self._last_depth = msg or {}
                 sensor = (msg or {}).get("sensor", "depth")
                 if (msg or {}).get("error"):
-                    self._depth_lbl.setText(f"Depth: {sensor} (ERR)")
+                    self._set_status(self._depth_lbl, f"Depth: {sensor} (ERR)")
                 else:
                     try:
                         d = (msg or {}).get("depth_m", None)
                         p = (msg or {}).get("pressure_mbar", None)
                         t = (msg or {}).get("temperature_c", None)
                         if d is None:
-                            self._depth_lbl.setText(f"Depth: {sensor} -")
+                            self._set_status(self._depth_lbl, f"Depth: {sensor} -")
                         else:
                             s = f"Depth: {sensor} {float(d):.2f}m"
                             if p is not None:
                                 s += f" {float(p):.0f}mbar"
                             if t is not None:
                                 s += f" {float(t):.1f}C"
-                            self._depth_lbl.setText(s)
+                            self._set_status(self._depth_lbl, s)
                     except Exception:
-                        self._depth_lbl.setText(f"Depth: {sensor} -")
+                        self._set_status(self._depth_lbl, f"Depth: {sensor} -")
 
         self.sensor_panel.upsert_sensor(msg)
 
@@ -238,31 +263,31 @@ class MainWindow(QMainWindow):
         elif sensor_age is not None:
             parts.append(f"sensor_age={sensor_age:.2f}s")
 
-        self._link_lbl.setText(" | ".join(parts))
+        self._set_status(self._link_lbl, " | ".join(parts))
 
         # Video indicator (show per-stream state; do not throw on missing video)
         try:
             if self.video_panel is None:
-                self._video_lbl.setText("Video: -")
+                self._set_status(self._video_lbl, "Video: -")
             else:
                 name = self.video_panel.current_stream_name()
                 vw = self.video_panel.current_video_widget()
                 if name is None or vw is None:
-                    self._video_lbl.setText("Video: -")
+                    self._set_status(self._video_lbl, "Video: -")
                 else:
                     st = vw.status()
                     if st.get("state") == "playing":
                         age = st.get("age_s")
                         if age is not None:
-                            self._video_lbl.setText(f"Video: {name} (OK, age={age:.1f}s)")
+                            self._set_status(self._video_lbl, f"Video: {name} (OK, age={age:.1f}s)")
                         else:
-                            self._video_lbl.setText(f"Video: {name} (OK)")
+                            self._set_status(self._video_lbl, f"Video: {name} (OK)")
                     elif st.get("state") == "waiting":
-                        self._video_lbl.setText(f"Video: {name} (waiting)")
+                        self._set_status(self._video_lbl, f"Video: {name} (waiting)")
                     else:
-                        self._video_lbl.setText(f"Video: {name} ({st.get('state')})")
+                        self._set_status(self._video_lbl, f"Video: {name} ({st.get('state')})")
         except Exception:
-            self._video_lbl.setText("Video: -")
+            self._set_status(self._video_lbl, "Video: -")
 
         # Network indicator (lightweight; throttled internally)
         try:
@@ -396,7 +421,7 @@ class MainWindow(QMainWindow):
         if warn:
             parts += ["|", f"⚠ {warn}"]
 
-        self._net_lbl.setText(" ".join(parts))
+        self._set_status(self._net_lbl, " ".join(parts))
 
     def _make_menu(self):
         bar = self.menuBar()

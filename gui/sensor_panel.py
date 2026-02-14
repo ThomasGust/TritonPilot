@@ -30,6 +30,14 @@ class SensorPanel(QWidget):
         self.table.verticalHeader().setVisible(False)
         self.table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
         self.table.setSelectionMode(QTableWidget.SelectionMode.NoSelection)
+        self.table.setWordWrap(True)
+        # Avoid silent truncation: wrap in-cell and keep full text in tooltips.
+        try:
+            self.table.setTextElideMode(Qt.TextElideMode.ElideNone)
+        except Exception:
+            pass
+        self.table.setAlternatingRowColors(True)
+        self.table.setShowGrid(False)
 
         lay = QVBoxLayout(self)
         lay.addWidget(self.title)
@@ -42,8 +50,30 @@ class SensorPanel(QWidget):
         typ = msg.get("type", "-")
 
         if typ == "imu":
-            ax, ay, az = msg["accel"]["x"], msg["accel"]["y"], msg["accel"]["z"]
-            val = f"acc=({ax:.2f},{ay:.2f},{az:.2f})"
+            # Display accel + (if present) gyro + mag. Many IMUs publish all three.
+            def _vec(d: dict | None):
+                d = d or {}
+                try:
+                    x = float(d.get("x", 0.0))
+                    y = float(d.get("y", 0.0))
+                    z = float(d.get("z", 0.0))
+                except Exception:
+                    x = y = z = 0.0
+                return x, y, z
+
+            lines: list[str] = []
+            if "accel" in msg:
+                ax, ay, az = _vec(msg.get("accel"))
+                lines.append(f"acc=({ax:.2f},{ay:.2f},{az:.2f})")
+            if "gyro" in msg:
+                gx, gy, gz = _vec(msg.get("gyro"))
+                lines.append(f"gyro=({gx:.2f},{gy:.2f},{gz:.2f})")
+            # Some stacks use 'mag', others 'magnetometer'
+            if "mag" in msg or "magnetometer" in msg:
+                mx, my, mz = _vec(msg.get("mag") or msg.get("magnetometer"))
+                lines.append(f"mag=({mx:.2f},{my:.2f},{mz:.2f})")
+
+            val = "\n".join(lines) if lines else str(msg)
         elif typ == "env":
             val = f"{msg.get('temperature_c', 0):.1f} C, {msg.get('pressure_kpa', 0):.1f} kPa"
         elif typ == "leak":
@@ -124,3 +154,13 @@ class SensorPanel(QWidget):
             else:
                 align |= Qt.AlignmentFlag.AlignLeft
             item.setTextAlignment(align)
+            try:
+                item.setToolTip(item.text())
+            except Exception:
+                pass
+
+        # Keep rows tall enough for wrapped text in the Value column.
+        try:
+            self.table.resizeRowToContents(row)
+        except Exception:
+            pass
