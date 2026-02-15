@@ -7,6 +7,8 @@ import threading
 import traceback
 from typing import Optional, Callable
 
+from dataclasses import fields
+
 import zmq
 
 from schema.pilot_common import PilotFrame, PilotAxes, PilotButtons
@@ -79,6 +81,34 @@ class PilotPublisherService:
 
         self._last_debug = 0.0
         self._last_raw_dump = 0.0
+
+        # --- modes / toggles ----------------------------------------------
+        from config import DEPTH_HOLD_TOGGLE_BUTTON, DEPTH_HOLD_DEFAULT
+
+        self._depth_hold_toggle_button = str(DEPTH_HOLD_TOGGLE_BUTTON or "rstick").strip().lower()
+        self._modes = {
+            "depth_hold": bool(DEPTH_HOLD_DEFAULT),
+        }
+        self._prev_buttons: Optional[PilotButtons] = None
+
+    @staticmethod
+    def _buttons_to_dict(b: PilotButtons) -> dict:
+        return {f.name: bool(getattr(b, f.name, False)) for f in fields(PilotButtons)}
+
+    @classmethod
+    def _compute_edges(cls, prev: Optional[PilotButtons], cur: PilotButtons) -> dict:
+        if prev is None:
+            return {}
+        p = cls._buttons_to_dict(prev)
+        c = cls._buttons_to_dict(cur)
+        edges = {}
+        for k, cv in c.items():
+            pv = bool(p.get(k, False))
+            if (not pv) and cv:
+                edges[k] = "down"
+            elif pv and (not cv):
+                edges[k] = "up"
+        return edges
 
         # Controller is created inside the run loop thread
         self._controller: Optional[GamepadSource] = None
@@ -220,6 +250,18 @@ class PilotPublisherService:
 
                 snap: ControllerSnapshot = self._controller.read_once()
                 frame = self._build_frame(t0, snap)
+
+                # Compute edges + handle local mode toggles.
+                edges = self._compute_edges(self._prev_buttons, frame.buttons)
+                if edges:
+                    frame.edges = dict(edges)
+
+                if edges.get(self._depth_hold_toggle_button) == "down":
+                    self._modes["depth_hold"] = not bool(self._modes.get("depth_hold", False))
+
+                frame.modes = dict(self._modes)
+                self._prev_buttons = frame.buttons
+
                 self.seq += 1
 
                 frame_dict = frame.to_dict()

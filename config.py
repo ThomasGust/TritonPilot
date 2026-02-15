@@ -86,3 +86,12 @@ CONTROLLER_HAT_INDEX = int(os.environ.get("TRITON_CONTROLLER_HAT_INDEX", "0"))
 # precedence over the built-in heuristics.
 CONTROLLER_MENU_BUTTONS = _parse_int_list_env("TRITON_CONTROLLER_MENU_BUTTONS", [])
 CONTROLLER_WIN_BUTTONS = _parse_int_list_env("TRITON_CONTROLLER_WIN_BUTTONS", [])
+
+# ---------------------------------------------------------------------------
+# Control modes
+# ---------------------------------------------------------------------------
+# Depth hold is toggled topside and transmitted in PilotFrame.modes.
+# Default button: press down the RIGHT stick (rstick).
+
+DEPTH_HOLD_TOGGLE_BUTTON = os.environ.get("TRITON_DEPTH_HOLD_TOGGLE", "rstick").strip().lower()
+DEPTH_HOLD_DEFAULT = os.environ.get("TRITON_DEPTH_HOLD_DEFAULT", "0").strip().lower() in ("1", "true", "yes")

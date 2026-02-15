@@ -36,6 +36,7 @@ class MainWindow(QMainWindow):
     # we'll receive sensor messages from a background thread → emit to UI thread
     sensor_msg_sig = pyqtSignal(dict)
     pilot_status_sig = pyqtSignal(dict)
+    pilot_msg_sig = pyqtSignal(dict)
 
     def _set_status(self, lbl: QLabel, text: str) -> None:
         """Set status text + tooltip (so truncated UI still preserves full info)."""
@@ -72,6 +73,10 @@ class MainWindow(QMainWindow):
         # network status (tether vs wifi, local route to ROV, remote link state)
         self._net_lbl = QLabel("Net: -")
         self.statusBar().addPermanentWidget(self._net_lbl)
+
+        # pilot mode indicator (local modes we transmit to the ROV)
+        self._mode_lbl = QLabel("Mode: MANUAL")
+        self.statusBar().addPermanentWidget(self._mode_lbl)
         self._last_net_ts = 0.0
         self._last_net: dict = {}
         self._route_cache = {"ts": 0.0, "iface": None, "src_ip": None, "is_wifi": None, "err": None}
@@ -84,6 +89,7 @@ class MainWindow(QMainWindow):
             (self._video_lbl, 220),
             (self._depth_lbl, 220),
             (self._net_lbl, 300),
+            (self._mode_lbl, 200),
         ]:
             try:
                 _lbl.setMinimumWidth(int(_w))
@@ -101,6 +107,7 @@ class MainWindow(QMainWindow):
         # connect signals to slots
         self.sensor_msg_sig.connect(self._handle_sensor_msg_on_ui)
         self.pilot_status_sig.connect(self._handle_pilot_status_on_ui)
+        self.pilot_msg_sig.connect(self._handle_pilot_msg_on_ui)
         self._last_ctrl_status: dict = {'controller': 'unknown'}
 
         # 1) pilot publisher (xbox -> ROV)
@@ -112,6 +119,7 @@ class MainWindow(QMainWindow):
             index=CONTROLLER_INDEX,
             dump_raw_every_s=CONTROLLER_DUMP_RAW_EVERY_S,
             on_status=self._on_pilot_status_from_thread,
+            on_send=self._on_pilot_msg_from_thread,
         )
         self.pilot_svc.start()
 
@@ -177,6 +185,24 @@ class MainWindow(QMainWindow):
     def _on_pilot_status_from_thread(self, status: dict):
         # Called from the pilot publisher thread; marshal to UI thread.
         self.pilot_status_sig.emit(status)
+
+    def _on_pilot_msg_from_thread(self, msg: dict):
+        # Called from the pilot publisher thread; marshal to UI thread.
+        if self._stream_recorder is not None:
+            self._stream_recorder.record("pilot", msg)
+        self.pilot_msg_sig.emit(msg)
+
+    def _handle_pilot_msg_on_ui(self, msg: dict):
+        # Update mode indicator from locally-transmitted modes.
+        try:
+            modes = (msg or {}).get("modes", {}) or {}
+            dh = bool(modes.get("depth_hold", False))
+            if dh:
+                self._set_status(self._mode_lbl, "Mode: DEPTH HOLD")
+            else:
+                self._set_status(self._mode_lbl, "Mode: MANUAL")
+        except Exception:
+            self._set_status(self._mode_lbl, "Mode: -")
 
     def _handle_pilot_status_on_ui(self, status: dict):
         self._last_ctrl_status = status or {'controller': 'unknown'}
