@@ -215,20 +215,26 @@ class VideoWidget(QWidget):
             Qt.TransformationMode.SmoothTransformation,
         )
         self.label.setPixmap(pix)
-
     # --- recording / snapshot ---
     def start_recording(self, out_dir: str | None = None, basename: str | None = None, fps: float = 30.0) -> str:
-        """Start recording the currently displayed stream."""
+        """Start recording the currently displayed stream.
+
+        Returns the output path (mp4 file when available; otherwise a frames directory).
+        """
         if out_dir is None:
             out_dir = str(Path("recordings"))
         Path(out_dir).mkdir(parents=True, exist_ok=True)
-        if basename is None:
-            basename = f"{self.stream_name}_{time.strftime('%Y%m%d-%H%M%S')}.mp4"
-        out_path = str(Path(out_dir) / basename)
 
-        self._rec = VideoRecorder(out_path, fps=fps)
-        self._rec.start()
-        return out_path
+        if basename is None:
+            base = f"{self.stream_name}_{time.strftime('%Y%m%d-%H%M%S')}"
+        else:
+            base = Path(basename).stem or self.stream_name
+
+        out_file = Path(out_dir) / f"{base}.mp4"
+
+        self._rec = VideoRecorder(out_file, fps=fps)
+        target = self._rec.start()
+        return str(target)
 
     def stop_recording(self) -> None:
         if self._rec is not None:
@@ -244,11 +250,20 @@ class VideoWidget(QWidget):
         if out_dir is None:
             out_dir = str(Path("recordings"))
         Path(out_dir).mkdir(parents=True, exist_ok=True)
+
         if basename is None:
-            basename = f"{self.stream_name}_{time.strftime('%Y%m%d-%H%M%S')}.png"
-        out_path = str(Path(out_dir) / basename)
-        save_snapshot(self.last_frame, out_path)
-        return out_path
+            base = f"{self.stream_name}_{time.strftime('%Y%m%d-%H%M%S')}"
+        else:
+            base = Path(basename).stem or self.stream_name
+
+        out_path = Path(out_dir) / f"{base}.png"
+        try:
+            save_snapshot(self.last_frame, out_path)
+        except Exception:
+            return None
+
+        return str(out_path) if out_path.exists() else None
+
 
     # --- lifecycle ---
     def shutdown(self, release_only: bool = True):

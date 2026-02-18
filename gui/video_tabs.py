@@ -60,6 +60,25 @@ class VideoTabs(QWidget):
     def current_stream_name(self) -> str | None:
         return self._active_name
 
+    # --- convenience proxies used by MainWindow ---
+    def save_snapshot(self, out_dir: str | None = None, basename: str | None = None) -> str | None:
+        vw = self.current_video_widget()
+        if vw is None:
+            return None
+        return vw.save_snapshot(out_dir=out_dir, basename=basename)
+
+    def start_recording(self, out_dir: str | None = None, basename: str | None = None, fps: float = 30.0) -> str | None:
+        vw = self.current_video_widget()
+        if vw is None:
+            return None
+        return vw.start_recording(out_dir=out_dir, basename=basename, fps=fps)
+
+    def stop_recording(self) -> None:
+        vw = self.current_video_widget()
+        if vw is None:
+            return
+        vw.stop_recording()
+
     def _clear_container(self, cont: QWidget):
         lay = cont.layout()
         if lay is None:

@@ -91,6 +91,9 @@ class PilotPublisherService:
         }
         self._prev_buttons: Optional[PilotButtons] = None
 
+        # Controller is created inside the run loop thread
+        self._controller: Optional[GamepadSource] = None
+
     @staticmethod
     def _buttons_to_dict(b: PilotButtons) -> dict:
         return {f.name: bool(getattr(b, f.name, False)) for f in fields(PilotButtons)}
@@ -110,9 +113,6 @@ class PilotPublisherService:
                 edges[k] = "up"
         return edges
 
-        # Controller is created inside the run loop thread
-        self._controller: Optional[GamepadSource] = None
-
     def start(self, threaded: bool = True):
         if threaded:
             if self._thread and self._thread.is_alive():
@@ -129,7 +129,8 @@ class PilotPublisherService:
         self._stop.set()
         self._emit_status({'controller': 'stopped', 'index': self.index})
         if self._thread:
-            self._thread.join(timeout=1.0)        # Close PUB socket if it was created
+            # Wait briefly for the publisher thread to exit
+            self._thread.join(timeout=1.0)
         if self.sock is not None:
             try:
                 self.sock.close(0)
