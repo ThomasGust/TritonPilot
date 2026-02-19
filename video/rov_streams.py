@@ -4,6 +4,8 @@ from config import VIDEO_RPC_ENDPOINT
 import zmq
 import logging
 
+from network.zmq_hotplug import apply_hotplug_opts
+
 
 logger = logging.getLogger(__name__)
 
@@ -24,11 +26,25 @@ class ROVStreams:
 
     def _make_sock(self):
         sock = self.ctx.socket(zmq.REQ)
-        # Avoid hanging close() on shutdown
-        sock.setsockopt(zmq.LINGER, 0)
-        # Ensure calls return quickly when ROV isn't up
-        sock.setsockopt(zmq.RCVTIMEO, self.timeout_ms)
-        sock.setsockopt(zmq.SNDTIMEO, self.timeout_ms)
+        # Hotplug-friendly options:
+        #  - no hang on close
+        #  - timeouts so UI never blocks
+        #  - keepalive/heartbeats so power-cycles are detected promptly
+        apply_hotplug_opts(
+            sock,
+            linger_ms=0,
+            rcv_timeout_ms=self.timeout_ms,
+            snd_timeout_ms=self.timeout_ms,
+            reconnect_ivl_ms=250,
+            reconnect_ivl_max_ms=2000,
+            heartbeat_ivl_ms=1000,
+            heartbeat_timeout_ms=3000,
+            heartbeat_ttl_ms=6000,
+            tcp_keepalive=True,
+            tcp_keepalive_idle_s=10,
+            tcp_keepalive_intvl_s=5,
+            tcp_keepalive_cnt=3,
+        )
         # Allow send even if a previous recv timed out (best effort; not all libzmq expose these)
         try:
             sock.setsockopt(zmq.REQ_RELAXED, 1)  # type: ignore[attr-defined]

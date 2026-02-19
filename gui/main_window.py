@@ -22,6 +22,9 @@ from config import (
     CONTROLLER_DEBUG,
     CONTROLLER_DUMP_RAW_EVERY_S,
     ROV_HOST,
+    DEPTH_HOLD_WALK_DEADBAND,
+    DEPTH_HOLD_WALK_RATE_MPS,
+    DEPTH_HOLD_SENSOR_STALE_S,
 )
 
 from network.net_select import list_local_ipv4_addrs
@@ -69,6 +72,12 @@ class MainWindow(QMainWindow):
         self.statusBar().addPermanentWidget(self._depth_lbl)
         self._last_depth_ts = 0.0
         self._last_depth: dict = {}
+
+        # Depth-hold setpoint tracking (topside estimate).
+        # This is purely for UI visibility; the real controller runs on the ROV.
+        self._dh_enabled: bool = False
+        self._dh_target_m: float | None = None
+        self._dh_prev_pilot_ts: float | None = None
 
         # network status (tether vs wifi, local route to ROV, remote link state)
         self._net_lbl = QLabel("Net: -")
@@ -194,11 +203,69 @@ class MainWindow(QMainWindow):
 
     def _handle_pilot_msg_on_ui(self, msg: dict):
         # Update mode indicator from locally-transmitted modes.
+        # Also maintain a simple "walk target" estimate so the pilot can see the
+        # *intended* setpoint even if the onboard controller temporarily pauses.
         try:
             modes = (msg or {}).get("modes", {}) or {}
             dh = bool(modes.get("depth_hold", False))
+
+            # Compute dt from pilot timestamps.
+            ts = float((msg or {}).get("ts", 0.0) or 0.0)
+            dt = None
+            if self._dh_prev_pilot_ts is not None and ts > 0:
+                dt = max(0.0, min(0.25, ts - float(self._dh_prev_pilot_ts)))
+            self._dh_prev_pilot_ts = ts if ts > 0 else self._dh_prev_pilot_ts
+
+            # Rising edge: capture current depth as the initial setpoint.
+            if dh and (not self._dh_enabled):
+                try:
+                    if (self._last_depth or {}).get("error"):
+                        self._dh_target_m = None
+                    else:
+                        d = (self._last_depth or {}).get("depth_m", None)
+                        self._dh_target_m = float(d) if d is not None else None
+                except Exception:
+                    self._dh_target_m = None
+
+            # Falling edge: clear setpoint.
+            if (not dh) and self._dh_enabled:
+                self._dh_target_m = None
+
+            self._dh_enabled = dh
+
+            # Walk target while enabled.
+            if dh and self._dh_target_m is not None and dt is not None and dt > 0:
+                axes = (msg or {}).get("axes", {}) or {}
+                heave = float(axes.get("ry", 0.0) or 0.0)
+                if abs(heave) > float(DEPTH_HOLD_WALK_DEADBAND):
+                    # heave > 0 means "UP" => setpoint depth decreases
+                    self._dh_target_m += (-heave) * float(DEPTH_HOLD_WALK_RATE_MPS) * float(dt)
+
+            # Compose status text.
             if dh:
-                self._set_status(self._mode_lbl, "Mode: DEPTH HOLD")
+                # Depth freshness (UI only)
+                import time
+                depth_stale = (time.time() - float(self._last_depth_ts)) > float(DEPTH_HOLD_SENSOR_STALE_S)
+
+                z_txt = "-"
+                try:
+                    if (self._last_depth or {}).get("error"):
+                        z_txt = "ERR"
+                    else:
+                        d = (self._last_depth or {}).get("depth_m", None)
+                        if d is not None:
+                            z_txt = f"{float(d):.2f}m"
+                except Exception:
+                    pass
+
+                t_txt = "-"
+                if self._dh_target_m is not None:
+                    t_txt = f"{float(self._dh_target_m):.2f}m"
+
+                s = f"Mode: DEPTH HOLD (z {z_txt} → set {t_txt})"
+                if depth_stale:
+                    s += " [DEPTH STALE]"
+                self._set_status(self._mode_lbl, s)
             else:
                 self._set_status(self._mode_lbl, "Mode: MANUAL")
         except Exception:

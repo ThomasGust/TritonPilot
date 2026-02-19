@@ -95,3 +95,10 @@ CONTROLLER_WIN_BUTTONS = _parse_int_list_env("TRITON_CONTROLLER_WIN_BUTTONS", []
 
 DEPTH_HOLD_TOGGLE_BUTTON = os.environ.get("TRITON_DEPTH_HOLD_TOGGLE", "rstick").strip().lower()
 DEPTH_HOLD_DEFAULT = os.environ.get("TRITON_DEPTH_HOLD_DEFAULT", "0").strip().lower() in ("1", "true", "yes")
+
+# These are for TOPSIDE display/interaction only (they don't change onboard behavior
+# unless you also update rov_config.py on the ROV side). They are used to show the
+# estimated setpoint when using "walk target" depth hold.
+DEPTH_HOLD_WALK_DEADBAND = float(os.environ.get("TRITON_DEPTH_HOLD_WALK_DEADBAND", "0.08"))
+DEPTH_HOLD_WALK_RATE_MPS = float(os.environ.get("TRITON_DEPTH_HOLD_WALK_RATE_MPS", "0.60"))
+DEPTH_HOLD_SENSOR_STALE_S = float(os.environ.get("TRITON_DEPTH_HOLD_SENSOR_STALE_S", "2.0"))

@@ -11,6 +11,8 @@ from dataclasses import fields
 
 import zmq
 
+from network.zmq_hotplug import apply_hotplug_opts
+
 from schema.pilot_common import PilotFrame, PilotAxes, PilotButtons
 from input.controller import GamepadSource, ControllerSnapshot, list_controllers, refresh_joysticks
 
@@ -223,11 +225,21 @@ class PilotPublisherService:
         # Create/connect PUB socket in this thread (ZMQ sockets are thread-affine)
         ctx = zmq.Context.instance()
         self.sock = ctx.socket(zmq.PUB)
-        try:
-            self.sock.setsockopt(zmq.LINGER, 0)
-            self.sock.setsockopt(zmq.SNDHWM, 1)
-        except Exception:
-            pass
+        # Hotplug-friendly: short keepalive + ZMQ heartbeats + fast reconnect.
+        apply_hotplug_opts(
+            self.sock,
+            linger_ms=0,
+            snd_hwm=1,
+            reconnect_ivl_ms=250,
+            reconnect_ivl_max_ms=2000,
+            heartbeat_ivl_ms=1000,
+            heartbeat_timeout_ms=3000,
+            heartbeat_ttl_ms=6000,
+            tcp_keepalive=True,
+            tcp_keepalive_idle_s=10,
+            tcp_keepalive_intvl_s=5,
+            tcp_keepalive_cnt=3,
+        )
         self.sock.connect(self.endpoint)
 
         # Create controller *inside* this thread for pygame stability

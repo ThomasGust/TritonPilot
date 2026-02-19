@@ -88,6 +88,10 @@ class VideoWidget(QWidget):
         self._next_retry_ts: float = 0.0
         self._stall_timeout_s: float = 2.0
 
+        # When disconnected/stalled we don't want to leave a stale frame visible.
+        # If no new frames arrive, we clear the pixmap and show a status message.
+        self._clear_stale_frame: bool = True
+
         self.label = QLabel(f"{self.stream_name}\nWaiting for stream…")
         self.label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.label.setWordWrap(True)
@@ -103,6 +107,21 @@ class VideoWidget(QWidget):
 
         # kick off first attempt immediately
         self._schedule_retry(0.0)
+
+    def _show_message(self, msg: str, *, clear_pixmap: bool | None = None) -> None:
+        """Show status text reliably.
+
+        QLabel will keep showing the pixmap even if setText() is called, so
+        we clear the pixmap whenever we want text to be visible.
+        """
+        if clear_pixmap is None:
+            clear_pixmap = self._clear_stale_frame
+        if clear_pixmap:
+            try:
+                self.label.setPixmap(QPixmap())
+            except Exception:
+                pass
+        self.label.setText(msg)
 
     # --- public helpers for MainWindow / status bar ---
     def status(self) -> dict:
@@ -124,7 +143,7 @@ class VideoWidget(QWidget):
             return
 
         self._state = "connecting"
-        self.label.setText(f"{self.stream_name}\nConnecting…")
+        self._show_message(f"{self.stream_name}\nConnecting…")
         self._connect_worker = _ConnectWorker(self.manager, self.stream_name, parent=self)
         self._connect_worker.connected.connect(self._on_connected)
         self._connect_worker.failed.connect(self._on_connect_failed)
@@ -149,11 +168,11 @@ class VideoWidget(QWidget):
         if notices:
             # Keep it short so it fits in the widget before the first frame arrives.
             tail = notices[-3:]
-            self.label.setText(
+            self._show_message(
                 f"{self.stream_name}\nConnected (ROV recovery):\n" + "\n".join(tail) + "\n\nWaiting for frames…"
             )
         else:
-            self.label.setText(f"{self.stream_name}\nWaiting for frames…")
+            self._show_message(f"{self.stream_name}\nWaiting for frames…")
 
         self.worker = _VideoWorker(self.camera, fps=30.0)
         self.worker.frame_ready.connect(self._on_frame)
@@ -169,7 +188,7 @@ class VideoWidget(QWidget):
 
         # Friendly message
         msg = f"{self.stream_name}\nStream not available. Retrying…\n\n{err}"
-        self.label.setText(msg)
+        self._show_message(msg)
 
     def _stop_worker_only(self):
         if self.worker:
@@ -181,8 +200,10 @@ class VideoWidget(QWidget):
 
     def _restart_stream(self):
         self._state = "stalled"
-        self.label.setText(f"{self.stream_name}\nReconnecting…")
-        self.shutdown(release_only=False)  # keep widget alive
+        # Clear any stale frame immediately so the user doesn't think the
+        # stream is still live.
+        self._show_message(f"{self.stream_name}\nDisconnected — attempting to reconnect…")
+        self.shutdown(release_only=True)  # keep widget alive + clear pixmap
         self._retry_backoff_s = 0.5
         self._schedule_retry(0.2)
 
@@ -205,6 +226,12 @@ class VideoWidget(QWidget):
         if self._rec is not None:
             self._rec.add_frame(frame)
 
+        # Clear any status text (pixmap will be shown instead).
+        try:
+            self.label.setText("")
+        except Exception:
+            pass
+
         h, w, ch = frame.shape
         bytes_per_line = ch * w
         image = QImage(frame.data, w, h, bytes_per_line, QImage.Format.Format_BGR888)
@@ -215,6 +242,14 @@ class VideoWidget(QWidget):
             Qt.TransformationMode.SmoothTransformation,
         )
         self.label.setPixmap(pix)
+
+    def mouseDoubleClickEvent(self, event):
+        """Allow the operator to force a reconnect on the active stream."""
+        try:
+            self._restart_stream()
+        except Exception:
+            pass
+        super().mouseDoubleClickEvent(event)
     # --- recording / snapshot ---
     def start_recording(self, out_dir: str | None = None, basename: str | None = None, fps: float = 30.0) -> str:
         """Start recording the currently displayed stream.
