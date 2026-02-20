@@ -79,6 +79,7 @@ class VideoWidget(QWidget):
 
         self.last_frame: np.ndarray | None = None
         self.last_frame_ts: float = 0.0
+        self._connected_ts: float = 0.0
         self._rec: VideoRecorder | None = None
 
         # state
@@ -87,6 +88,9 @@ class VideoWidget(QWidget):
         self._retry_backoff_s: float = 0.5
         self._next_retry_ts: float = 0.0
         self._stall_timeout_s: float = 2.0
+        # If we connect successfully but never receive a first frame, treat it as a stall
+        # after a slightly longer grace period.
+        self._first_frame_timeout_s: float = 4.0
 
         # When disconnected/stalled we don't want to leave a stale frame visible.
         # If no new frames arrive, we clear the pixmap and show a status message.
@@ -157,6 +161,11 @@ class VideoWidget(QWidget):
         self._last_error = None
         self._retry_backoff_s = 0.5
         self._state = "playing"
+        self._connected_ts = time.time()
+
+        # New connection: treat frames as "not yet received" until the first one arrives.
+        self.last_frame = None
+        self.last_frame_ts = 0.0
 
         # If the ROV reported recovery actions (e.g., USB rebind), surface them briefly.
         notices = []
@@ -200,6 +209,11 @@ class VideoWidget(QWidget):
 
     def _restart_stream(self):
         self._state = "stalled"
+        # Clear timestamps so we don't immediately re-trigger stall before the
+        # new pipeline produces its first frame.
+        self.last_frame = None
+        self.last_frame_ts = 0.0
+        self._connected_ts = 0.0
         # Clear any stale frame immediately so the user doesn't think the
         # stream is still live.
         self._show_message(f"{self.stream_name}\nDisconnected — attempting to reconnect…")
@@ -212,8 +226,13 @@ class VideoWidget(QWidget):
 
         if self._state == "playing":
             # Detect stall (no frames recently)
-            if self.last_frame_ts > 0 and (now - self.last_frame_ts) > self._stall_timeout_s:
-                self._restart_stream()
+            if self.last_frame_ts > 0:
+                if (now - self.last_frame_ts) > self._stall_timeout_s:
+                    self._restart_stream()
+            else:
+                # Connected but never got a first frame
+                if self._connected_ts > 0 and (now - self._connected_ts) > self._first_frame_timeout_s:
+                    self._restart_stream()
         else:
             # If we haven't received frames yet, we still want to retry connect.
             if now >= self._next_retry_ts:

@@ -85,6 +85,29 @@ class SensorPanel(QWidget):
             p = msg.get("pressure_mbar")
             p_s = f", {float(p):.1f} mbar" if p is not None else ""
             val = f"{msg.get('depth_m', 0):.2f} m, {msg.get('temperature_c', 0):.1f} C{p_s}"
+        elif typ == "power":
+            # Converted from Blue Robotics Power Sense Module (PSM)
+            if msg.get("error"):
+                val = f"ERR: {msg.get('error')}"
+            else:
+                try:
+                    v = float(msg.get("voltage_v", 0.0))
+                    a = float(msg.get("current_a", 0.0))
+                    w = float(msg.get("power_w", v * a))
+                    vch = msg.get("voltage_ch")
+                    ich = msg.get("current_ch")
+                    ok = msg.get("ok", True)
+                    held = bool(msg.get("held", False))
+                    ch_s = ""
+                    if vch is not None and ich is not None:
+                        ch_s = f" (Vch={vch},Ich={ich})"
+                    if held:
+                        warn = " [HOLD]"
+                    else:
+                        warn = "" if ok else " [CHECK]"
+                    val = f"{v:.2f} V, {a:.2f} A, {w:.1f} W{ch_s}{warn}"
+                except Exception:
+                    val = str(msg)
         elif typ == "heartbeat":
             armed = msg.get("armed")
             pa = msg.get("pilot_age")

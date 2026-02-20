@@ -170,6 +170,13 @@ class ReceiverProcess:
         self._frame_size = self.cfg.width * self.cfg.height * 3
         self._raw_buffer_lock = threading.Lock()
         self._latest_frame: Optional[bytes] = None
+        # Sequence bookkeeping so callers can tell whether a *new* frame arrived.
+        # Without this, callers will keep re-reading the last frame forever when
+        # the sender disappears (e.g. ROV reboot), making the UI think the stream
+        # is still live.
+        self._latest_seq: int = 0
+        self._last_delivered_seq: int = 0
+        self._latest_frame_ts: float = 0.0
         self._reader_thread: Optional[threading.Thread] = None
         self._stop_reader = threading.Event()
 
@@ -181,6 +188,13 @@ class ReceiverProcess:
 
             # 👇 NEW: make sure no old receiver is sitting on this UDP port
             _win_kill_udp_port_users(self.cfg.port)
+
+            # Reset frame bookkeeping so the first frame after (re)start is treated as new.
+            with self._raw_buffer_lock:
+                self._latest_frame = None
+                self._latest_seq = 0
+                self._last_delivered_seq = 0
+                self._latest_frame_ts = 0.0
 
             cmd = self._build_cmd(self.cfg)
             logger.info("Starting receiver '%s': %s", self.cfg.name, " ".join(cmd))
@@ -295,6 +309,8 @@ class ReceiverProcess:
             # just store it — no per-byte work here
             with self._raw_buffer_lock:
                 self._latest_frame = frame
+                self._latest_seq += 1
+                self._latest_frame_ts = time.time()
 
     def read_frame(self) -> Optional[bytes]:
         """
@@ -306,6 +322,15 @@ class ReceiverProcess:
 
         with self._raw_buffer_lock:
             frame = self._latest_frame
+            seq = self._latest_seq
+
+        # If we haven't received anything new since the last read, return None.
+        # This allows upstream code to detect stalls and reconnect automatically.
+        if frame is None or seq == self._last_delivered_seq:
+            return None
+
+        # Mark delivered *before* any expensive work.
+        self._last_delivered_seq = seq
 
         if frame is None:
             return None

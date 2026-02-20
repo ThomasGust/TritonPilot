@@ -73,6 +73,12 @@ class MainWindow(QMainWindow):
         self._last_depth_ts = 0.0
         self._last_depth: dict = {}
 
+        # quick power readout (from Power Sense Module conversion on ROV)
+        self._power_lbl = QLabel("Power: -")
+        self.statusBar().addPermanentWidget(self._power_lbl)
+        self._last_power_ts = 0.0
+        self._last_power: dict = {}
+
         # Depth-hold setpoint tracking (topside estimate).
         # This is purely for UI visibility; the real controller runs on the ROV.
         self._dh_enabled: bool = False
@@ -97,6 +103,7 @@ class MainWindow(QMainWindow):
             (self._ctrl_lbl, 220),
             (self._video_lbl, 220),
             (self._depth_lbl, 220),
+            (self._power_lbl, 240),
             (self._net_lbl, 300),
             (self._mode_lbl, 200),
         ]:
@@ -262,7 +269,8 @@ class MainWindow(QMainWindow):
                 if self._dh_target_m is not None:
                     t_txt = f"{float(self._dh_target_m):.2f}m"
 
-                s = f"Mode: DEPTH HOLD (z {z_txt} → set {t_txt})"
+                #s = f"Mode: DEPTH HOLD (z {z_txt} → set {t_txt})"
+                s = f"z {z_txt} → set {t_txt}"
                 if depth_stale:
                     s += " [DEPTH STALE]"
                 self._set_status(self._mode_lbl, s)
@@ -320,6 +328,28 @@ class MainWindow(QMainWindow):
                             self._set_status(self._depth_lbl, s)
                     except Exception:
                         self._set_status(self._depth_lbl, f"Depth: {sensor} -")
+
+            # Update a compact power readout in the status bar.
+            if typ == "power":
+                self._last_power_ts = time.time()
+                self._last_power = msg or {}
+                if (msg or {}).get("error"):
+                    self._set_status(self._power_lbl, "Power: (ERR)")
+                else:
+                    try:
+                        v = float((msg or {}).get("voltage_v", 0.0) or 0.0)
+                        a = float((msg or {}).get("current_a", 0.0) or 0.0)
+                        w = float((msg or {}).get("power_w", v * a) or (v * a))
+                        ok = bool((msg or {}).get("ok", True))
+                        held = bool((msg or {}).get("held", False))
+                        s = f"Power: {v:.2f}V {a:.2f}A {w:.0f}W"
+                        if held:
+                            s += " (hold)"
+                        elif not ok:
+                            s += " (check)"
+                        self._set_status(self._power_lbl, s)
+                    except Exception:
+                        self._set_status(self._power_lbl, "Power: -")
 
         self.sensor_panel.upsert_sensor(msg)
 
