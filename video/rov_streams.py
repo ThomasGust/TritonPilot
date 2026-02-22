@@ -49,6 +49,9 @@ class ROVStreams:
             tcp_keepalive_idle_s=10,
             tcp_keepalive_intvl_s=5,
             tcp_keepalive_cnt=3,
+            tcp_nodelay=True,
+            tos=0xB8,  # DSCP EF for video control RPC (best-effort)
+            priority=6,
         )
         # Allow send even if a previous recv timed out (best effort; not all libzmq expose these)
         try:

@@ -239,6 +239,9 @@ class PilotPublisherService:
             tcp_keepalive_idle_s=10,
             tcp_keepalive_intvl_s=5,
             tcp_keepalive_cnt=3,
+            tcp_nodelay=True,
+            tos=0xB8,  # DSCP EF for control frames (best-effort)
+            priority=6,
         )
         self.sock.connect(self.endpoint)
 
@@ -278,7 +281,11 @@ class PilotPublisherService:
                 self.seq += 1
 
                 frame_dict = frame.to_dict()
-                self.sock.send_string(json.dumps(frame_dict))
+                try:
+                    self.sock.send_string(json.dumps(frame_dict), flags=zmq.NOBLOCK)
+                except zmq.Again:
+                    # Keep control loop real-time: drop stale frame instead of blocking.
+                    continue
                 if self.on_send:
                     try:
                         self.on_send(frame_dict)

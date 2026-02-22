@@ -10,6 +10,7 @@ from PyQt6.QtWidgets import (
     QHeaderView,
 )
 from PyQt6.QtCore import Qt
+import time
 
 class SensorPanel(QWidget):
     """
@@ -44,6 +45,12 @@ class SensorPanel(QWidget):
         lay.addWidget(self.table)
 
         self._rows: dict[str, int] = {}
+        self._last_row_resize_ts: dict[int, float] = {}
+        self._last_value_text: dict[tuple[str, str], str] = {}
+        try:
+            self.table.setStyleSheet("QTableWidget { font-family: Menlo, Consolas, monospace; }")
+        except Exception:
+            pass
 
     def upsert_sensor(self, msg: dict):
         sensor = msg.get("sensor", "unknown")
@@ -165,9 +172,25 @@ class SensorPanel(QWidget):
             errs = f"{c.get('rx_errs','-')}/{c.get('tx_errs','-')}"
             tether = msg.get("is_tether")
             tether_s = "tether" if tether else "wifi/other"
-            val = f"{iface} {kind} {state} {sp_s} ip={ip} rx={rx_s} tx={tx_s} drop={drop} err={errs} ({tether_s})"
+            default_iface = msg.get("default_iface")
+            sel_reason = msg.get("selection_reason")
+            path_s = ""
+            if default_iface and default_iface != iface:
+                path_s = f" sel={iface} def={default_iface}"
+                if sel_reason:
+                    path_s += f"({sel_reason})"
+            elif sel_reason:
+                path_s = f" sel={iface}({sel_reason})"
+            val = f"{iface} {kind} {state} {sp_s} ip={ip} rx={rx_s} tx={tx_s} drop={drop} err={errs}{path_s} ({tether_s})"
         else:
             val = str(msg)
+
+        # Avoid unnecessary table churn when the rendered value has not changed.
+        cache_key = (str(sensor), str(typ))
+        last_val = self._last_value_text.get(cache_key)
+        if last_val == val:
+            return
+        self._last_value_text[cache_key] = val
 
         if sensor in self._rows:
             row = self._rows[sensor]
@@ -197,8 +220,13 @@ class SensorPanel(QWidget):
             except Exception:
                 pass
 
-        # Keep rows tall enough for wrapped text in the Value column.
+        # Keep rows tall enough for wrapped text in the Value column, but
+        # rate-limit this expensive call to avoid UI stutter during high-rate telemetry.
         try:
-            self.table.resizeRowToContents(row)
+            now = time.time()
+            prev = float(self._last_row_resize_ts.get(row, 0.0))
+            if (now - prev) > 0.25:
+                self.table.resizeRowToContents(row)
+                self._last_row_resize_ts[row] = now
         except Exception:
             pass

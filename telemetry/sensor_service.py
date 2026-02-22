@@ -91,6 +91,9 @@ class SensorSubscriberService:
             tcp_keepalive_idle_s=10,
             tcp_keepalive_intvl_s=5,
             tcp_keepalive_cnt=3,
+            tcp_nodelay=True,
+            tos=0x88,  # DSCP AF41 for telemetry (best-effort)
+            priority=5,
         )
 
         sock.setsockopt_string(zmq.SUBSCRIBE, "")

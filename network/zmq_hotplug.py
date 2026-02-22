@@ -47,6 +47,9 @@ def apply_hotplug_opts(
     tcp_keepalive_intvl_s: int = 5,
     tcp_keepalive_cnt: int = 3,
     immediate: Optional[bool] = None,
+    tcp_nodelay: Optional[bool] = True,
+    tos: Optional[int] = None,
+    priority: Optional[int] = None,
 ) -> None:
     """Apply best-effort hotplug/reconnect options to a socket."""
 
@@ -96,5 +99,24 @@ def apply_hotplug_opts(
     if immediate is not None:
         try:
             _set(sock, getattr(zmq, "IMMEDIATE"), 1 if immediate else 0)
+        except Exception:
+            pass
+
+    # Reduce latency for tiny control/telemetry frames (best-effort)
+    if tcp_nodelay is not None:
+        try:
+            _set(sock, getattr(zmq, "TCP_NODELAY"), 1 if tcp_nodelay else 0)
+        except Exception:
+            pass
+
+    # QoS hints (best-effort): TOS/DSCP and socket priority
+    if tos is not None:
+        try:
+            _set(sock, getattr(zmq, "TOS"), int(tos))
+        except Exception:
+            pass
+    if priority is not None:
+        try:
+            _set(sock, getattr(zmq, "PRIORITY"), int(priority))
         except Exception:
             pass

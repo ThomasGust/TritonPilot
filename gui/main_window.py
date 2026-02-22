@@ -2,6 +2,10 @@
 from __future__ import annotations
 
 import os
+import socket
+import threading
+import time
+from collections import deque
 from pathlib import Path
 
 from PyQt6.QtCore import pyqtSignal, QObject, Qt, QTimer
@@ -34,6 +38,7 @@ from video.cam import RemoteCameraManager
 from recording.stream_recorder import StreamRecorder
 from gui.video_tabs import VideoTabs
 from gui.sensor_panel import SensorPanel
+from gui.instruments import InstrumentPanel
 
 class MainWindow(QMainWindow):
     # we'll receive sensor messages from a background thread → emit to UI thread
@@ -57,6 +62,9 @@ class MainWindow(QMainWindow):
         self._last_sensor_ts = 0.0
         self._last_hb_ts = 0.0
         self._last_hb = {}
+        self._hb_period_ema_s: float | None = None
+        self._prev_hb_rx_ts: float | None = None
+        self._link_state_last: str = "NO DATA"
 
         self._link_lbl = QLabel("Link: (no data)")
         self.statusBar().addPermanentWidget(self._link_lbl)
@@ -96,6 +104,12 @@ class MainWindow(QMainWindow):
         self._last_net: dict = {}
         self._route_cache = {"ts": 0.0, "iface": None, "src_ip": None, "is_wifi": None, "err": None}
         self._rov_host = str(ROV_HOST)
+        self._netdiag_port = int(os.environ.get("TRITON_NETDIAG_PORT", "7700"))
+        self._netdiag_stop = threading.Event()
+        self._netdiag_lock = threading.Lock()
+        self._netdiag = {"ts": 0.0, "ok": False, "last_rtt_ms": None, "avg_rtt_ms": None, "jitter_ms": None, "loss_pct": None, "err": None}
+        self._netdiag_thread = threading.Thread(target=self._netdiag_probe_loop, daemon=True)
+        self._netdiag_thread.start()
 
         # Make status widgets readable and avoid losing info when space is tight.
         for _lbl, _w in [
@@ -145,6 +159,14 @@ class MainWindow(QMainWindow):
 
         # 2) sensor subscriber (ROV -> topside)
         self.sensor_panel = SensorPanel()
+        self.instrument_panel = InstrumentPanel()
+        self._sensor_ui_pending: dict[tuple[str, str], dict] = {}
+        self._sensor_ui_pending_order: list[tuple[str, str]] = []
+        self._sensor_ui_max_batch = 32
+        self._sensor_ui_timer = QTimer(self)
+        self._sensor_ui_timer.setInterval(50)  # ~20 Hz UI refresh cap for sensor table/widgets
+        self._sensor_ui_timer.timeout.connect(self._flush_sensor_ui)
+        self._sensor_ui_timer.start()
         self.sensor_svc = SensorSubscriberService(
             endpoint=SENSOR_SUB_ENDPOINT,
             on_message=self._on_sensor_msg_from_thread,
@@ -181,6 +203,7 @@ class MainWindow(QMainWindow):
         right_col = QWidget()
         right_lay = QVBoxLayout(right_col)
         right_lay.setContentsMargins(0, 0, 0, 0)
+        right_lay.addWidget(self.instrument_panel, 0)
         right_lay.addWidget(self.sensor_panel, 3)
         outer.addWidget(right_col, 1)
 
@@ -316,7 +339,16 @@ class MainWindow(QMainWindow):
         import time
         typ = msg.get("type")
         if msg.get("sensor") == "heartbeat" or typ == "heartbeat":
-            self._last_hb_ts = time.time()
+            now_ts = time.time()
+            if self._prev_hb_rx_ts is not None:
+                dt = now_ts - float(self._prev_hb_rx_ts)
+                if 0.05 < dt < 10.0:
+                    if self._hb_period_ema_s is None:
+                        self._hb_period_ema_s = float(dt)
+                    else:
+                        self._hb_period_ema_s = (0.8 * float(self._hb_period_ema_s)) + (0.2 * float(dt))
+            self._prev_hb_rx_ts = now_ts
+            self._last_hb_ts = now_ts
             self._last_hb = msg
         elif typ == "net" or msg.get("sensor") == "network":
             self._last_net_ts = time.time()
@@ -370,7 +402,39 @@ class MainWindow(QMainWindow):
                     except Exception:
                         self._set_status(self._power_lbl, "Power: -")
 
-        self.sensor_panel.upsert_sensor(msg)
+        self._queue_sensor_ui_msg(msg)
+
+    def _queue_sensor_ui_msg(self, msg: dict) -> None:
+        try:
+            sensor = str((msg or {}).get("sensor", "unknown"))
+            typ = str((msg or {}).get("type", "-"))
+            key = (sensor, typ)
+            if key not in self._sensor_ui_pending:
+                self._sensor_ui_pending_order.append(key)
+            self._sensor_ui_pending[key] = dict(msg or {})
+        except Exception:
+            pass
+
+    def _flush_sensor_ui(self) -> None:
+        """Apply coalesced sensor updates to UI widgets at a bounded rate."""
+        try:
+            n = 0
+            while self._sensor_ui_pending_order and n < int(self._sensor_ui_max_batch):
+                key = self._sensor_ui_pending_order.pop(0)
+                msg = self._sensor_ui_pending.pop(key, None)
+                if not isinstance(msg, dict):
+                    continue
+                try:
+                    self.instrument_panel.update_from_sensor(msg)
+                except Exception:
+                    pass
+                try:
+                    self.sensor_panel.upsert_sensor(msg)
+                except Exception:
+                    pass
+                n += 1
+        except Exception:
+            pass
 
     def _update_link_status(self):
         import time
@@ -384,28 +448,73 @@ class MainWindow(QMainWindow):
         if self._last_sensor_ts > 0:
             sensor_age = now - self._last_sensor_ts
 
-        # Determine link state from heartbeat when available.
+        # Determine link state from heartbeat when available. The heartbeat is
+        # typically ~1 Hz, so a 0.5 s "OK" threshold can visibly flap between
+        # OK/WARN even when the link is healthy. Use a cadence-aware threshold +
+        # light hysteresis to avoid false UI flicker.
         age = hb_age if hb_age is not None else sensor_age
+        if self._hb_period_ema_s is None:
+            hb_period = 1.0
+        else:
+            hb_period = max(0.2, min(5.0, float(self._hb_period_ema_s)))
+
+        ok_th = max(0.9, 1.35 * hb_period)
+        warn_th = max(2.5, 3.25 * hb_period)
+        # Hysteresis margin keeps the label from oscillating on threshold edges.
+        margin = 0.20 * hb_period
+
+        prev = str(getattr(self, "_link_state_last", "NO DATA"))
         if age is None:
             status = "NO DATA"
-        elif age < 0.5:
-            status = "OK"
-        elif age < 2.0:
-            status = "WARN"
         else:
-            status = "LOST"
+            # Start with nominal thresholds.
+            if age < ok_th:
+                status = "OK"
+            elif age < warn_th:
+                status = "WARN"
+            else:
+                status = "LOST"
+
+            # Hysteresis based on previous state.
+            if prev == "OK" and age < (ok_th + margin):
+                status = "OK"
+            elif prev == "WARN":
+                if age < (ok_th + margin):
+                    status = "OK"
+                elif age < (warn_th + margin):
+                    status = "WARN"
+            elif prev == "LOST" and age < (warn_th - margin):
+                status = "WARN" if age >= ok_th else "OK"
+
+        self._link_state_last = status
 
         parts = [f"Link: {status}"]
         if hb_age is not None:
             armed = bool(self._last_hb.get("armed", False))
             pilot_age = self._last_hb.get("pilot_age", None)
             if pilot_age is not None:
-                parts.append(f"pilot_age={pilot_age:.2f}s")
+                try:
+                    parts.append(f"pilot_age={float(pilot_age):.2f}s")
+                except Exception:
+                    parts.append(f"pilot_age={pilot_age}")
+            if self._hb_period_ema_s is not None:
+                parts.append(f"hb~{(1.0/max(1e-3,float(self._hb_period_ema_s))):.1f}Hz")
             parts.append("ARMED" if armed else "disarmed")
         elif sensor_age is not None:
             parts.append(f"sensor_age={sensor_age:.2f}s")
 
         self._set_status(self._link_lbl, " | ".join(parts))
+        try:
+            if status == "OK":
+                self._link_lbl.setStyleSheet("color: #9be89b;")
+            elif status == "WARN":
+                self._link_lbl.setStyleSheet("color: #ffd38a;")
+            elif status == "LOST":
+                self._link_lbl.setStyleSheet("color: #ff8d8d; font-weight: bold;")
+            else:
+                self._link_lbl.setStyleSheet("")
+        except Exception:
+            pass
 
         # Video indicator (show per-stream state; do not throw on missing video)
         try:
@@ -436,6 +545,86 @@ class MainWindow(QMainWindow):
             self._update_network_status()
         except Exception:
             pass
+
+    def _update_netdiag_snapshot(self, **kwargs) -> None:
+        try:
+            with self._netdiag_lock:
+                cur = dict(self._netdiag)
+                cur.update(kwargs)
+                self._netdiag = cur
+        except Exception:
+            pass
+
+    def _netdiag_probe_loop(self) -> None:
+        """Low-overhead UDP echo probe to estimate RTT/jitter/loss to the ROV."""
+        hist = deque(maxlen=24)  # RTTs in ms, or None on timeout/loss
+        seq = 0
+        sock = None
+        while not self._netdiag_stop.is_set():
+            t_cycle = time.time()
+            try:
+                if sock is None:
+                    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+                    sock.settimeout(0.20)
+                    try:
+                        sock.setsockopt(socket.IPPROTO_IP, socket.IP_TOS, 0xB8)
+                    except Exception:
+                        pass
+                t0 = time.time()
+                payload = f"{t0:.6f}|{seq}".encode("ascii")
+                seq += 1
+                sock.sendto(payload, (self._rov_host, int(self._netdiag_port)))
+                data, _ = sock.recvfrom(4096)
+                t1 = time.time()
+                if not data:
+                    raise RuntimeError("empty")
+                rtt_ms = (t1 - t0) * 1000.0
+                hist.append(rtt_ms)
+                vals = [v for v in hist if isinstance(v, (int, float))]
+                loss_pct = (100.0 * (len(hist) - len(vals)) / len(hist)) if hist else 0.0
+                avg = (sum(vals) / len(vals)) if vals else None
+                if len(vals) >= 2:
+                    diffs = [abs(vals[i] - vals[i - 1]) for i in range(1, len(vals))]
+                    jitter = (sum(diffs) / len(diffs)) if diffs else 0.0
+                else:
+                    jitter = None
+                self._update_netdiag_snapshot(
+                    ts=t1,
+                    ok=True,
+                    err=None,
+                    last_rtt_ms=float(rtt_ms),
+                    avg_rtt_ms=(None if avg is None else float(avg)),
+                    jitter_ms=(None if jitter is None else float(jitter)),
+                    loss_pct=float(loss_pct),
+                )
+            except Exception as e:
+                hist.append(None)
+                vals = [v for v in hist if isinstance(v, (int, float))]
+                loss_pct = (100.0 * (len(hist) - len(vals)) / len(hist)) if hist else None
+                self._update_netdiag_snapshot(ts=time.time(), ok=False, err=str(e), loss_pct=loss_pct)
+                try:
+                    if sock is not None:
+                        sock.close()
+                except Exception:
+                    pass
+                sock = None
+
+            sleep_s = 0.5 - (time.time() - t_cycle)
+            if sleep_s > 0:
+                self._netdiag_stop.wait(sleep_s)
+
+        try:
+            if sock is not None:
+                sock.close()
+        except Exception:
+            pass
+
+    def _get_netdiag_snapshot(self) -> dict:
+        try:
+            with self._netdiag_lock:
+                return dict(self._netdiag)
+        except Exception:
+            return {}
 
     def _iface_is_wifi_linux(self, iface: str) -> bool:
         try:
@@ -522,17 +711,23 @@ class MainWindow(QMainWindow):
         # Remote (ROV) network telemetry
         remote = self._last_net if (now - self._last_net_ts) < 3.0 else None
         if remote and isinstance(remote, dict):
-            rif = remote.get("iface") or "-"
+            rif = remote.get("selected_iface") or remote.get("iface") or "-"
+            rdef_if = remote.get("default_iface") or None
+            rsel_reason = remote.get("selection_reason") or None
             rlink = remote.get("link") or {}
             rkind = rlink.get("kind") or "-"
             rstate = rlink.get("state") or "-"
             rsp = rlink.get("speed_mbps")
             rsp_s = f"{int(rsp)}Mbps" if isinstance(rsp, (int, float)) and rsp and rsp > 0 else "-"
             rtether = bool(remote.get("is_tether"))
+            rdef_wifi = remote.get("default_is_wifi")
             rx_s = self._fmt_bps(remote.get("rx_bps"))
             tx_s = self._fmt_bps(remote.get("tx_bps"))
         else:
             rif = rkind = rstate = rsp_s = rx_s = tx_s = "-"
+            rdef_if = None
+            rsel_reason = None
+            rdef_wifi = None
             rtether = False
 
         # Compose status
@@ -549,19 +744,55 @@ class MainWindow(QMainWindow):
         remote_part = f"rov={rif} {rkind} {rstate} {rsp_s}"
         if remote and (remote.get("ip") or None):
             remote_part += f" ip={remote.get('ip')}"
+        if rdef_if and rdef_if != rif:
+            remote_part += f" (def={rdef_if}"
+            if rdef_wifi is True:
+                remote_part += "/wifi"
+            if rsel_reason:
+                remote_part += f", {rsel_reason}"
+            remote_part += ")"
+
+        # Optional RTT/jitter/loss probe (ROV netdiag UDP echo).
+        nd = self._get_netdiag_snapshot()
+        nd_age = None
+        try:
+            if nd.get("ts"):
+                nd_age = now - float(nd.get("ts", 0.0))
+        except Exception:
+            nd_age = None
+        rtt_part = None
+        if nd and (nd_age is not None) and nd_age < 2.5:
+            last_rtt = nd.get("last_rtt_ms")
+            avg_rtt = nd.get("avg_rtt_ms")
+            jitter = nd.get("jitter_ms")
+            loss_pct = nd.get("loss_pct")
+            segs = []
+            if isinstance(last_rtt, (int, float)):
+                segs.append(f"rtt={float(last_rtt):.1f}ms")
+            if isinstance(avg_rtt, (int, float)):
+                segs.append(f"avg={float(avg_rtt):.1f}ms")
+            if isinstance(jitter, (int, float)):
+                segs.append(f"jit={float(jitter):.1f}ms")
+            if isinstance(loss_pct, (int, float)):
+                segs.append(f"loss={float(loss_pct):.0f}%")
+            if segs:
+                rtt_part = "probe:" + " ".join(segs)
 
         # Warnings
-        warn = None
-        if local_wifi is True:
-            warn = "LOCAL WIFI"
+        warns = []
         if remote and (not rtether):
-            warn = "ROV NOT TETHER"
+            warns.append("ROV stats not tether")
+        if local_wifi is True and rtether:
+            # Informational: route for control/RPC may differ from the ROV stats interface.
+            warns.append("local route via Wi-Fi")
 
         parts = ["Net:", local_part, "|", remote_part]
         if remote:
             parts += ["|", f"rx={rx_s}", f"tx={tx_s}"]
-        if warn:
-            parts += ["|", f"⚠ {warn}"]
+        if rtt_part:
+            parts += ["|", rtt_part]
+        if warns:
+            parts += ["|", "⚠ " + "; ".join(warns)]
 
         self._set_status(self._net_lbl, " ".join(parts))
 
@@ -609,6 +840,10 @@ class MainWindow(QMainWindow):
         except Exception:
             pass
 
+        try:
+            self._netdiag_stop.set()
+        except Exception:
+            pass
         # stop services
         try:
             self.sensor_svc.stop()
