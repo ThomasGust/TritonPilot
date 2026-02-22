@@ -197,10 +197,10 @@ class RemoteCv2Camera:
         img = np.frombuffer(fr, dtype=np.uint8).reshape((self.height, self.width, 3))
         return True, img
 
-    def release(self):
+    def release(self, rx_grace_s: float = 0.15):
         # Stop local receiver first (tends to unblock quickly even if ROV is slow).
         try:
-            self.rx.stop()
+            self.rx.stop(grace_s=rx_grace_s)
         except Exception as e:
             logger.warning("Failed to stop local receiver for '%s': %s", self.name, e)
 

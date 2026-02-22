@@ -74,6 +74,21 @@ class SensorPanel(QWidget):
                 lines.append(f"mag=({mx:.2f},{my:.2f},{mz:.2f})")
 
             val = "\n".join(lines) if lines else str(msg)
+        elif typ == "attitude":
+            try:
+                rpy = msg.get("rpy_deg") or {}
+                r = float(rpy.get("roll", 0.0))
+                pch = float(rpy.get("pitch", 0.0))
+                y = float(rpy.get("yaw", 0.0))
+                health = msg.get("health") or {}
+                mode = health.get("mode", "-")
+                mag_src = msg.get("mag_source") or "-"
+                mq = health.get("mag_qual")
+                mq_s = f"{float(mq):.2f}" if mq is not None else "-"
+                st = int(bool(health.get("stationary", False)))
+                val = f"rpy=({r:.1f},{pch:.1f},{y:.1f})\nmode={mode} mag={mag_src} qual={mq_s} stat={st}"
+            except Exception:
+                val = str(msg)
         elif typ == "env":
             val = f"{msg.get('temperature_c', 0):.1f} C, {msg.get('pressure_kpa', 0):.1f} kPa"
         elif typ == "leak":

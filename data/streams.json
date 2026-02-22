@@ -1,8 +1,8 @@
 {
   "streams": [
     {
-      "name": "camera_1",
-      "device": "/dev/v4l/by-path/*1.2.7*video-index0",
+      "name": "Front Left Camera",
+      "device": "/dev/v4l/by-path/*1.2.3*video-index0",
       "width": 1280,
       "height": 720,
       "fps": 30,
@@ -14,8 +14,21 @@
       "enabled": true
     },
     {
-      "name": "camera_2",
+      "name": "Front Right Camera",
       "device": "/dev/v4l/by-path/*1.2.6*video-index0",
+      "width": 1280,
+      "height": 720,
+      "fps": 30,
+      "video_format": "mjpeg",
+      "encode": "h264",
+      "h264_bitrate": 10000000,
+      "h264_gop": 30,
+      "port": 5003,
+      "enabled": true
+    },
+    {
+      "name": "Reverse Camera",
+      "device": "/dev/v4l/by-path/*1.2.4*video-index0",
       "width": 1280,
       "height": 720,
       "fps": 30,
@@ -27,8 +40,8 @@
       "enabled": true
     },
     {
-      "name": "camera_3",
-      "device": "/dev/v4l/by-path/*1.2.4*video-index0",
+      "name": "Downward Camera",
+      "device": "/dev/v4l/by-path/*1.2.5*video-index0",
       "width": 1280,
       "height": 720,
       "fps": 30,
@@ -37,19 +50,6 @@
       "h264_bitrate": 10000000,
       "h264_gop": 30,
       "port": 5002,
-      "enabled": true
-    },
-    {
-      "name": "camera_4",
-      "device": "/dev/v4l/by-path/*1.2.3*video-index0",
-      "width": 1280,
-      "height": 720,
-      "fps": 30,
-      "video_format": "mjpeg",
-      "encode": "h264",
-      "h264_bitrate": 10000000,
-      "h264_gop": 30,
-      "port": 5003,
       "enabled": true
     }
   ]

@@ -209,6 +209,25 @@ class MainWindow(QMainWindow):
         self.pilot_msg_sig.emit(msg)
 
     def _handle_pilot_msg_on_ui(self, msg: dict):
+        # Camera tab switching (local UI only):
+        #   B -> next stream (to the right)
+        #   X -> previous stream (to the left)
+        try:
+            edges = (msg or {}).get("edges", {}) or {}
+            if self.video_panel is not None:
+                if edges.get("b") == "down":
+                    if hasattr(self.video_panel, "next_stream"):
+                        self.video_panel.next_stream()
+                    else:
+                        self.video_panel.tabs.setCurrentIndex((self.video_panel.tabs.currentIndex() + 1) % max(1, self.video_panel.tabs.count()))
+                if edges.get("x") == "down":
+                    if hasattr(self.video_panel, "prev_stream"):
+                        self.video_panel.prev_stream()
+                    else:
+                        self.video_panel.tabs.setCurrentIndex((self.video_panel.tabs.currentIndex() - 1) % max(1, self.video_panel.tabs.count()))
+        except Exception:
+            pass
+
         # Update mode indicator from locally-transmitted modes.
         # Also maintain a simple "walk target" estimate so the pilot can see the
         # *intended* setpoint even if the onboard controller temporarily pauses.

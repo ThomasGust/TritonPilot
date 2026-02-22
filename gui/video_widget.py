@@ -109,8 +109,8 @@ class VideoWidget(QWidget):
         self._tick_timer.timeout.connect(self._tick)
         self._tick_timer.start(250)
 
-        # kick off first attempt immediately
-        self._schedule_retry(0.0)
+        # kick off first attempt immediately (avoid waiting for the next timer tick)
+        self._start_connect()
 
     def _show_message(self, msg: str, *, clear_pixmap: bool | None = None) -> None:
         """Show status text reliably.

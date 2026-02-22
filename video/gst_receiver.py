@@ -238,7 +238,7 @@ class ReceiverProcess:
                 )
                 threading.Thread(target=self._log_stdout, daemon=True).start()
 
-    def stop(self):
+    def stop(self, grace_s: float = 0.2):
         with self._lock:
             if not self.proc:
                 return
@@ -250,7 +250,7 @@ class ReceiverProcess:
                     else:
                         self.proc.terminate()
                     try:
-                        self.proc.wait(2)
+                        self.proc.wait(max(0.0, float(grace_s)))
                     except subprocess.TimeoutExpired:
                         self.proc.kill()
                 except Exception:
