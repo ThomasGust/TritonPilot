@@ -1,7 +1,7 @@
 # gui/video_tabs.py
 from __future__ import annotations
 
-from PyQt6.QtCore import Qt
+from PyQt6.QtCore import Qt, QTimer
 from PyQt6.QtWidgets import QWidget, QTabWidget, QVBoxLayout, QLabel
 
 from gui.video_widget import VideoWidget
@@ -12,9 +12,17 @@ class VideoTabs(QWidget):
     """
     Multi-stream video panel.
 
-    Rev-1 behavior:
-      - Only the currently selected stream is active/decoded.
-      - Switching tabs stops the previous stream and starts the newly selected one.
+    Multi-cam warm mode behavior:
+      - Keep the current tabbed UI/"views".
+      - Start the selected stream immediately.
+      - Pre-warm all other streams in the background (staggered) so switching tabs
+        is effectively instant and future multi-view layouts can reuse live widgets.
+      - Do NOT stop streams when switching tabs.
+
+    Notes:
+      - Warm-up is serialized/staggered to avoid hammering the current VideoRPC
+        implementation with several simultaneous start_stream calls.
+      - Hidden tabs still run their stream widgets (intended for instant switching).
     """
 
     def __init__(self, manager: RemoteCameraManager, stream_names: list[str], parent=None):
@@ -23,7 +31,6 @@ class VideoTabs(QWidget):
         self.stream_names = stream_names
 
         self.tabs = QTabWidget()
-        # Keep tab titles readable when space is tight.
         try:
             self.tabs.setElideMode(Qt.TextElideMode.ElideRight)
             self.tabs.setUsesScrollButtons(True)
@@ -32,33 +39,51 @@ class VideoTabs(QWidget):
         self.tabs.currentChanged.connect(self._on_tab_changed)
 
         self._containers: dict[str, QWidget] = {}
-        self._active_widget: VideoWidget | None = None
-        self._active_name: str | None = None
+        self._widgets: dict[str, VideoWidget | None] = {}
+        self._warmup_index: int = 0
+        self._warmup_timer = QTimer(self)
+        self._warmup_timer.setSingleShot(True)
+        self._warmup_timer.timeout.connect(self._warmup_next)
 
         for name in self.stream_names:
             cont = QWidget()
             lay = QVBoxLayout(cont)
             lay.setContentsMargins(0, 0, 0, 0)
-            placeholder = QLabel(f"{name}\n(select tab to start stream)")
+            placeholder = QLabel(f"{name}\n(starting when needed)")
             placeholder.setAlignment(Qt.AlignmentFlag.AlignCenter)
             placeholder.setWordWrap(True)
             lay.addWidget(placeholder)
             self._containers[name] = cont
+            self._widgets[name] = None
             self.tabs.addTab(cont, name)
 
         outer = QVBoxLayout(self)
         outer.setContentsMargins(0, 0, 0, 0)
         outer.addWidget(self.tabs)
 
-        # Start first stream by default (selected tab)
+        # Start selected tab immediately, then prewarm the rest one-by-one.
         if self.stream_names:
-            self._on_tab_changed(self.tabs.currentIndex())
+            cur = self.tabs.currentIndex()
+            if cur < 0:
+                cur = 0
+            self._ensure_stream_started(self.stream_names[cur])
+            self._warmup_index = 0
+            self._warmup_timer.start(700)
 
     def current_video_widget(self) -> VideoWidget | None:
-        return self._active_widget
+        name = self.current_stream_name()
+        if name is None:
+            return None
+        return self._widgets.get(name)
 
     def current_stream_name(self) -> str | None:
-        return self._active_name
+        try:
+            idx = int(self.tabs.currentIndex())
+        except Exception:
+            idx = -1
+        if idx < 0 or idx >= len(self.stream_names):
+            return None
+        return self.stream_names[idx]
 
     # --- convenience proxies used by MainWindow ---
     def save_snapshot(self, out_dir: str | None = None, basename: str | None = None) -> str | None:
@@ -80,7 +105,6 @@ class VideoTabs(QWidget):
         vw.stop_recording()
 
     def cycle_stream(self, step: int) -> None:
-        """Move the selected stream tab left/right with wraparound."""
         try:
             count = int(self.tabs.count())
         except Exception:
@@ -112,81 +136,88 @@ class VideoTabs(QWidget):
             w = item.widget()
             if w is not None:
                 w.setParent(None)
-                w.deleteLater()
+                # Do not delete if this is a live VideoWidget we are preserving.
+                if not isinstance(w, VideoWidget):
+                    w.deleteLater()
 
-    def _start_stream(self, name: str):
+    def _ensure_stream_started(self, name: str):
         cont = self._containers.get(name)
         if cont is None:
             return
-        self._clear_container(cont)
+        existing = self._widgets.get(name)
+        if existing is not None:
+            return
 
+        self._clear_container(cont)
         try:
             vw = VideoWidget(self.manager, stream_name=name)
         except Exception as e:
-            # Put placeholder back + error
             lay = cont.layout()
             if lay is not None:
                 lbl = QLabel(f"Failed to start stream '{name}':\n{e}")
                 lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
                 lbl.setWordWrap(True)
                 lay.addWidget(lbl)
+            self._widgets[name] = None
             return
 
         lay = cont.layout()
         if lay is not None:
             lay.addWidget(vw)
+        self._widgets[name] = vw
 
-        self._active_widget = vw
-        self._active_name = name
-
-    def _stop_stream_widget(self, widget: VideoWidget | None, name: str | None, *, clear_active: bool = False):
-        if widget is None or name is None:
+    def _warmup_next(self):
+        if not self.stream_names:
             return
-        try:
-            widget.shutdown()
-        except Exception:
-            pass
-
-        # Replace with placeholder
-        cont = self._containers.get(name)
-        if cont is not None:
-            self._clear_container(cont)
-            lay = cont.layout()
-            if lay is not None:
-                placeholder = QLabel(f"{name}\n(select tab to start stream)")
-                placeholder.setAlignment(Qt.AlignmentFlag.AlignCenter)
-                placeholder.setWordWrap(True)
-                lay.addWidget(placeholder)
-
-        try:
-            widget.deleteLater()
-        except Exception:
-            pass
-
-        if clear_active and self._active_widget is widget:
-            self._active_widget = None
-            self._active_name = None
-
-    def _stop_stream(self):
-        self._stop_stream_widget(self._active_widget, self._active_name, clear_active=True)
+        n = len(self.stream_names)
+        # Walk the list once, starting after the current tab, and start the first missing stream.
+        cur_name = self.current_stream_name()
+        for _ in range(n):
+            idx = self._warmup_index % n
+            self._warmup_index += 1
+            name = self.stream_names[idx]
+            if name == cur_name:
+                continue
+            if self._widgets.get(name) is None:
+                self._ensure_stream_started(name)
+                # Continue warming the remaining streams, staggered.
+                self._warmup_timer.start(700)
+                return
 
     def _on_tab_changed(self, idx: int):
         if idx < 0 or idx >= len(self.stream_names):
             return
         new_name = self.stream_names[idx]
-        if new_name == self._active_name:
-            return
-        old_widget = self._active_widget
-        old_name = self._active_name
-        # Start the new stream first so connect/setup can begin immediately.
-        self._start_stream(new_name)
-        # Then tear down the old stream. This avoids paying shutdown latency
-        # before the selected stream even begins connecting.
-        if old_widget is not None and old_name is not None:
-            self._stop_stream_widget(old_widget, old_name, clear_active=False)
+        # Ensure stream exists (covers cases where warmup hasn't reached it yet).
+        self._ensure_stream_started(new_name)
 
     def stop_all(self):
-        self._stop_stream()
+        try:
+            self._warmup_timer.stop()
+        except Exception:
+            pass
+        for name, widget in list(self._widgets.items()):
+            if widget is None:
+                continue
+            try:
+                widget.shutdown()
+            except Exception:
+                pass
+            try:
+                widget.deleteLater()
+            except Exception:
+                pass
+            self._widgets[name] = None
+
+            cont = self._containers.get(name)
+            if cont is not None:
+                self._clear_container(cont)
+                lay = cont.layout()
+                if lay is not None:
+                    placeholder = QLabel(f"{name}\n(stopped)")
+                    placeholder.setAlignment(Qt.AlignmentFlag.AlignCenter)
+                    placeholder.setWordWrap(True)
+                    lay.addWidget(placeholder)
 
     def closeEvent(self, event):
         try:

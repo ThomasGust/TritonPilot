@@ -3,6 +3,7 @@ from __future__ import annotations
 from config import VIDEO_RPC_ENDPOINT
 import zmq
 import logging
+import threading
 
 from network.zmq_hotplug import apply_hotplug_opts
 
@@ -22,6 +23,10 @@ class ROVStreams:
         self.ctx = zmq.Context.instance()
         self.endpoint = endpoint
         self.timeout_ms = int(timeout_ms)
+        # Serialize REQ/REP access: one outstanding request at a time.
+        # This becomes important when multiple video widgets are active and
+        # reconnecting in parallel (multi-cam warm mode).
+        self._rpc_lock = threading.Lock()
         self.sock = self._make_sock()
 
     def _make_sock(self):
@@ -62,41 +67,42 @@ class ROVStreams:
         self.sock = self._make_sock()
 
     def _call(self, cmd: str, **args):
-        try:
-            self.sock.send_json({"cmd": cmd, "args": args})
-            reply = self.sock.recv_json()
-        except zmq.Again as e:
-            # Timeout (ROV down / not responding)
-            self._reset_sock()
-            raise TimeoutError(f"ROV video RPC timed out calling '{cmd}' (is TritonOS running?)") from e
-        except zmq.ZMQError as e:
-            # REQ state errors or disconnects
-            self._reset_sock()
-            raise ConnectionError(f"ROV video RPC error calling '{cmd}': {e}") from e
-
-        data = reply.get("data")
-        # Messages may appear either top-level (error path) or inside data (success path)
-        msgs = reply.get("messages")
-        if (not msgs) and isinstance(data, dict):
-            msgs = data.get("messages")
-
-        if not reply.get("ok"):
-            err = str(reply.get("error") or "unknown error")
-            if msgs:
+        with self._rpc_lock:
                 try:
-                    err = err + "\n" + "\n".join([str(m) for m in msgs])
-                except Exception:
-                    pass
-            raise RuntimeError(f"ROV error: {err}")
+                    self.sock.send_json({"cmd": cmd, "args": args})
+                    reply = self.sock.recv_json()
+                except zmq.Again as e:
+                    # Timeout (ROV down / not responding)
+                    self._reset_sock()
+                    raise TimeoutError(f"ROV video RPC timed out calling '{cmd}' (is TritonOS running?)") from e
+                except zmq.ZMQError as e:
+                    # REQ state errors or disconnects
+                    self._reset_sock()
+                    raise ConnectionError(f"ROV video RPC error calling '{cmd}': {e}") from e
 
-        if msgs:
-            try:
-                for m in msgs:
-                    logger.warning("ROV video: %s", m)
-            except Exception:
-                pass
+                data = reply.get("data")
+                # Messages may appear either top-level (error path) or inside data (success path)
+                msgs = reply.get("messages")
+                if (not msgs) and isinstance(data, dict):
+                    msgs = data.get("messages")
 
-        return data
+                if not reply.get("ok"):
+                    err = str(reply.get("error") or "unknown error")
+                    if msgs:
+                        try:
+                            err = err + "\n" + "\n".join([str(m) for m in msgs])
+                        except Exception:
+                            pass
+                    raise RuntimeError(f"ROV error: {err}")
+
+                if msgs:
+                    try:
+                        for m in msgs:
+                            logger.warning("ROV video: %s", m)
+                    except Exception:
+                        pass
+
+                return data
 
     def start_stream(self, **kwargs):
         return self._call("start_stream", **kwargs)

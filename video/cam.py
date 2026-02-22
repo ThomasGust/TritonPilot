@@ -1,6 +1,7 @@
 import json
 import socket
 import logging
+import threading
 import numpy as np
 from config import VIDEO_RPC_ENDPOINT
 
@@ -234,6 +235,9 @@ class RemoteCameraManager:
         self.stream_defs = {s["name"]: s for s in cfg.get("streams", [])}
         # If a stream def omits "enabled", assume True.
         self._opened: dict[str, RemoteCv2Camera] = {}
+        # Serialize open/close across background connect workers. This avoids
+        # racing on shared bookkeeping and on the single ROV video RPC REQ socket.
+        self._mgr_lock = threading.RLock()
 
     def list_available(self):
         names = []
@@ -243,35 +247,37 @@ class RemoteCameraManager:
         return names
 
     def open(self, name: str) -> RemoteCv2Camera:
-        if name in self._opened:
-            return self._opened[name]
+        with self._mgr_lock:
+            if name in self._opened:
+                return self._opened[name]
 
-        if name not in self.stream_defs:
-            raise KeyError(f"Unknown stream '{name}'")
-        s = self.stream_defs[name]
-        if not s.get('enabled', True):
-            raise ValueError(f"Stream '{name}' is disabled in config")
+            if name not in self.stream_defs:
+                raise KeyError(f"Unknown stream '{name}'")
+            s = self.stream_defs[name]
+            if not s.get('enabled', True):
+                raise ValueError(f"Stream '{name}' is disabled in config")
 
-        # Merge stream options with top-level defaults
-        stream_opts = dict(self._defaults)
-        stream_opts.update(s)
+            # Merge stream options with top-level defaults
+            stream_opts = dict(self._defaults)
+            stream_opts.update(s)
 
-        cam = RemoteCv2Camera(
-            rov=self.rov,
-            name=s['name'],
-            device=s['device'],
-            width=s['width'],
-            height=s['height'],
-            fps=s['fps'],
-            video_format=s.get('video_format', 'mjpeg'),
-            port=s.get('port', 5000),
-            windows_host=self.windows_host,
-            stream_opts=stream_opts,
-        )
-        self._opened[name] = cam
-        return cam
+            cam = RemoteCv2Camera(
+                rov=self.rov,
+                name=s['name'],
+                device=s['device'],
+                width=s['width'],
+                height=s['height'],
+                fps=s['fps'],
+                video_format=s.get('video_format', 'mjpeg'),
+                port=s.get('port', 5000),
+                windows_host=self.windows_host,
+                stream_opts=stream_opts,
+            )
+            self._opened[name] = cam
+            return cam
 
     def close(self, name: str):
-        cam = self._opened.pop(name, None)
+        with self._mgr_lock:
+            cam = self._opened.pop(name, None)
         if cam:
             cam.release()
