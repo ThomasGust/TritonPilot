@@ -113,3 +113,22 @@ PILOT_MAX_GAIN_STEP = float(os.environ.get("TRITON_PILOT_MAX_GAIN_STEP", "0.05")
 DEPTH_HOLD_WALK_DEADBAND = float(os.environ.get("TRITON_DEPTH_HOLD_WALK_DEADBAND", "0.08"))
 DEPTH_HOLD_WALK_RATE_MPS = float(os.environ.get("TRITON_DEPTH_HOLD_WALK_RATE_MPS", "0.60"))
 DEPTH_HOLD_SENSOR_STALE_S = float(os.environ.get("TRITON_DEPTH_HOLD_SENSOR_STALE_S", "2.0"))
+
+
+# ---------------------------------------------------------------------------
+# Competition tasks (topside-only features)
+# ---------------------------------------------------------------------------
+
+# Trigger button for crab recognition on the controller.
+# Default uses LB (left bumper) because A/Y are already used for max-gain and
+# B/X are used for camera tab switching.
+CRAB_TASK_TRIGGER_BUTTON = os.environ.get("TRITON_CRAB_TASK_BUTTON", "lb").strip().lower()
+
+# When the crab task runs, optionally save an annotated PNG to the active
+# recordings directory. Set to 0 to disable.
+CRAB_TASK_SAVE_ANNOTATED = os.environ.get("TRITON_CRAB_TASK_SAVE", "1").strip().lower() in (
+    "1",
+    "true",
+    "yes",
+)
+

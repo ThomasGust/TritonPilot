@@ -29,6 +29,8 @@ from config import (
     DEPTH_HOLD_WALK_DEADBAND,
     DEPTH_HOLD_WALK_RATE_MPS,
     DEPTH_HOLD_SENSOR_STALE_S,
+    CRAB_TASK_TRIGGER_BUTTON,
+    CRAB_TASK_SAVE_ANNOTATED,
 )
 
 from network.net_select import list_local_ipv4_addrs
@@ -45,6 +47,7 @@ class MainWindow(QMainWindow):
     sensor_msg_sig = pyqtSignal(dict)
     pilot_status_sig = pyqtSignal(dict)
     pilot_msg_sig = pyqtSignal(dict)
+    crab_result_sig = pyqtSignal(object)  # {'annotated_bgr': np.ndarray, 'green_count': int, 'saved_path': str|None}
 
     def _set_status(self, lbl: QLabel, text: str) -> None:
         """Set status text + tooltip (so truncated UI still preserves full info)."""
@@ -143,6 +146,12 @@ class MainWindow(QMainWindow):
         self.sensor_msg_sig.connect(self._handle_sensor_msg_on_ui)
         self.pilot_status_sig.connect(self._handle_pilot_status_on_ui)
         self.pilot_msg_sig.connect(self._handle_pilot_msg_on_ui)
+        self.crab_result_sig.connect(self._handle_crab_result_on_ui)
+
+        # crab recognition state
+        self._crab_detector = None
+        self._crab_dialog = None
+        self._crab_busy = False
         self._last_ctrl_status: dict = {'controller': 'unknown'}
         self._last_pilot_msg_ts: float = 0.0
         self._last_pilot_msg: dict = {}
@@ -261,6 +270,141 @@ class MainWindow(QMainWindow):
                         self.video_panel.prev_stream()
                     else:
                         self.video_panel.tabs.setCurrentIndex((self.video_panel.tabs.currentIndex() - 1) % max(1, self.video_panel.tabs.count()))
+
+            # Crab recognition trigger (topside-only): take a snapshot of the
+            # current stream and run the crab task on it.
+            try:
+                btn = str(CRAB_TASK_TRIGGER_BUTTON or "lb").strip().lower()
+                if btn and edges.get(btn) == "down":
+                    self._trigger_crab_recognition()
+            except Exception:
+                pass
+        except Exception:
+            pass
+
+    def _trigger_crab_recognition(self) -> None:
+        """Snapshot current video frame and run crab recognition in a background thread."""
+        if self._crab_busy:
+            try:
+                self.statusBar().showMessage("Crab recognition already running…", 2000)
+            except Exception:
+                pass
+            return
+
+        vw = self._current_video_widget()
+        if vw is None or getattr(vw, "last_frame", None) is None:
+            try:
+                self.statusBar().showMessage("Crab recognition: no video frame yet", 3000)
+            except Exception:
+                pass
+            return
+
+        # Copy the frame so video decoding can continue.
+        try:
+            frame = vw.last_frame.copy()
+        except Exception:
+            try:
+                self.statusBar().showMessage("Crab recognition: failed to copy frame", 3000)
+            except Exception:
+                pass
+            return
+
+        self._crab_busy = True
+        try:
+            self.statusBar().showMessage("Running crab recognition on snapshot…", 2000)
+        except Exception:
+            pass
+
+        def _worker(img_bgr):
+            import time
+            try:
+                import cv2
+            except Exception as e:  # pragma: no cover
+                self.crab_result_sig.emit({"error": f"OpenCV not available: {e}"})
+                return
+
+            try:
+                # Lazy init detector (ORB templates are a bit expensive)
+                if self._crab_detector is None:
+                    from tasks.crab_recognition.crab_detector import create_default_detector
+
+                    self._crab_detector = create_default_detector()
+
+                detector = self._crab_detector
+                green = detector.detect_green(img_bgr)
+                annotated = detector.draw_count_and_boxes(img_bgr, green, count_label="GREEN CRABS")
+
+                saved_path = None
+                if bool(CRAB_TASK_SAVE_ANNOTATED):
+                    try:
+                        out_dir = self._record_dir
+                        if not out_dir:
+                            from recording.stream_recorder import StreamRecorder
+
+                            out_dir = str(StreamRecorder.make_session_dir("recordings"))
+                            self._record_dir = out_dir
+                        ts = time.strftime("%Y%m%d-%H%M%S")
+                        saved_path = str(Path(out_dir) / f"crab_{ts}.png")
+                        cv2.imwrite(saved_path, annotated)
+                    except Exception:
+                        saved_path = None
+
+                self.crab_result_sig.emit(
+                    {
+                        "annotated_bgr": annotated,
+                        "green_count": int(len(green)),
+                        "saved_path": saved_path,
+                    }
+                )
+            except Exception as e:
+                self.crab_result_sig.emit({"error": str(e)})
+
+        import threading
+
+        threading.Thread(target=_worker, args=(frame,), daemon=True).start()
+
+    def _handle_crab_result_on_ui(self, result: object) -> None:
+        """UI-thread: show crab recognition result."""
+        self._crab_busy = False
+
+        if not isinstance(result, dict):
+            try:
+                self.statusBar().showMessage("Crab recognition failed (bad result)", 4000)
+            except Exception:
+                pass
+            return
+
+        err = result.get("error")
+        if err:
+            try:
+                self.statusBar().showMessage(f"Crab recognition error: {err}", 6000)
+            except Exception:
+                pass
+            return
+
+        annotated = result.get("annotated_bgr", None)
+        green_count = int(result.get("green_count", 0) or 0)
+        saved_path = result.get("saved_path", None)
+
+        try:
+            from gui.crab_result_dialog import CrabResultDialog
+
+            if self._crab_dialog is None:
+                self._crab_dialog = CrabResultDialog(parent=self)
+
+            if annotated is not None:
+                self._crab_dialog.set_result(annotated, green_count)
+                self._crab_dialog.show()
+                self._crab_dialog.raise_()
+                self._crab_dialog.activateWindow()
+        except Exception:
+            pass
+
+        try:
+            if saved_path:
+                self.statusBar().showMessage(f"Green crabs: {green_count} (saved {saved_path})", 6000)
+            else:
+                self.statusBar().showMessage(f"Green crabs: {green_count}", 4000)
         except Exception:
             pass
 
@@ -848,6 +992,7 @@ class MainWindow(QMainWindow):
         bar = self.menuBar()
         file_menu = bar.addMenu("&File")
         rec_menu = bar.addMenu("&Record")
+        task_menu = bar.addMenu("&Tasks")
 
         # Stream log (JSONL)
         start_log = QAction("Start Stream Log", self)
@@ -871,6 +1016,12 @@ class MainWindow(QMainWindow):
         stop_vid = QAction("Stop Video Recording", self)
         stop_vid.triggered.connect(self._stop_video_recording)
         rec_menu.addAction(stop_vid)
+
+        # Tasks
+        crab_act = QAction("Crab Recognition (snapshot)", self)
+        crab_act.setToolTip("Capture a snapshot from the current stream and count European Green crabs")
+        crab_act.triggered.connect(self._trigger_crab_recognition)
+        task_menu.addAction(crab_act)
 
         quit_act = QAction("Quit", self)
         quit_act.triggered.connect(self.close)
