@@ -96,6 +96,17 @@ CONTROLLER_WIN_BUTTONS = _parse_int_list_env("TRITON_CONTROLLER_WIN_BUTTONS", []
 DEPTH_HOLD_TOGGLE_BUTTON = os.environ.get("TRITON_DEPTH_HOLD_TOGGLE", "rstick").strip().lower()
 DEPTH_HOLD_DEFAULT = os.environ.get("TRITON_DEPTH_HOLD_DEFAULT", "0").strip().lower() in ("1", "true", "yes")
 
+
+# Pilot-adjustable max gain / power cap (transmitted in PilotFrame.modes["max_gain"]).
+# Y = +5%, A = -5% by default (handled in input/pilot_service.py).
+# Values are normalized fractions (0.0..1.0) and interpreted on the ROV side as
+# a multiplier of the configured POWER_SCALE baseline.
+PILOT_MAX_GAIN_DEFAULT = float(os.environ.get("TRITON_PILOT_MAX_GAIN_DEFAULT", "1.0"))
+PILOT_MAX_GAIN_MIN = float(os.environ.get("TRITON_PILOT_MAX_GAIN_MIN", "0.05"))
+PILOT_MAX_GAIN_MAX = float(os.environ.get("TRITON_PILOT_MAX_GAIN_MAX", "1.0"))
+PILOT_MAX_GAIN_STEP = float(os.environ.get("TRITON_PILOT_MAX_GAIN_STEP", "0.05"))
+
+
 # These are for TOPSIDE display/interaction only (they don't change onboard behavior
 # unless you also update rov_config.py on the ROV side). They are used to show the
 # estimated setpoint when using "walk target" depth hold.

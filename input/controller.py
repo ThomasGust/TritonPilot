@@ -249,6 +249,82 @@ class GamepadSource:
             f"buttons={self.js.get_numbuttons()} hats={self.js.get_numhats()}"
         )
 
+    def close(self) -> None:
+        """Release the joystick handle (best-effort)."""
+        try:
+            if hasattr(self, "js") and self.js is not None:
+                try:
+                    self.js.quit()
+                except Exception:
+                    pass
+        finally:
+            pass
+
+    def is_attached(self) -> bool:
+        """Best-effort attachment check for hotplug recovery.
+
+        pygame/SDL can sometimes leave a Joystick object readable even after a
+        disconnect/reconnect cycle. We consult several indicators so the pilot
+        service can proactively reopen the controller instead of requiring an app
+        restart.
+        """
+        if pygame is None:
+            return False
+
+        try:
+            pygame.event.pump()
+        except Exception:
+            pass
+
+        # Newer pygame exposes explicit attachment status.
+        fn_attached = getattr(self.js, "get_attached", None)
+        if callable(fn_attached):
+            try:
+                if not bool(fn_attached()):
+                    return False
+            except Exception:
+                return False
+
+        # Generic init status check.
+        fn_init = getattr(self.js, "get_init", None)
+        if callable(fn_init):
+            try:
+                if not bool(fn_init()):
+                    return False
+            except Exception:
+                return False
+
+        # If we know the SDL instance_id, verify it still exists in the current
+        # joystick list. This catches stale handles after unplug/replug.
+        iid = getattr(self, "instance_id", None)
+        try:
+            count = int(pygame.joystick.get_count())
+        except Exception:
+            count = 0
+
+        if iid is not None:
+            found = False
+            for i in range(max(0, count)):
+                try:
+                    jsi = pygame.joystick.Joystick(i)
+                    jsi.init()
+                    get_iid = getattr(jsi, "get_instance_id", None)
+                    cur_iid = get_iid() if callable(get_iid) else None
+                    if cur_iid == iid:
+                        found = True
+                        break
+                except Exception:
+                    continue
+            if not found:
+                return False
+
+        return True
+
+    def healthcheck(self) -> None:
+        """Raise if the controller appears detached/stale."""
+        if not self.is_attached():
+            raise RuntimeError("Controller detached/stale (SDL reports device not attached)")
+
     def _dz(self, v: float) -> float:
         return 0.0 if abs(v) < self.deadzone else v
 

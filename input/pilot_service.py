@@ -85,16 +85,37 @@ class PilotPublisherService:
         self._last_raw_dump = 0.0
 
         # --- modes / toggles ----------------------------------------------
-        from config import DEPTH_HOLD_TOGGLE_BUTTON, DEPTH_HOLD_DEFAULT
+        from config import (
+            DEPTH_HOLD_TOGGLE_BUTTON,
+            DEPTH_HOLD_DEFAULT,
+            PILOT_MAX_GAIN_DEFAULT,
+            PILOT_MAX_GAIN_MIN,
+            PILOT_MAX_GAIN_MAX,
+            PILOT_MAX_GAIN_STEP,
+        )
 
         self._depth_hold_toggle_button = str(DEPTH_HOLD_TOGGLE_BUTTON or "rstick").strip().lower()
+
+        # Pilot-adjustable gain cap (Y +5%, A -5%). This is transmitted in
+        # PilotFrame.modes["max_gain"] and interpreted on the ROV side as a
+        # multiplier of the configured POWER_SCALE baseline.
+        self._max_gain_min = float(PILOT_MAX_GAIN_MIN)
+        self._max_gain_max = float(PILOT_MAX_GAIN_MAX)
+        if self._max_gain_max < self._max_gain_min:
+            self._max_gain_min, self._max_gain_max = self._max_gain_max, self._max_gain_min
+        self._max_gain_step = max(0.0, float(PILOT_MAX_GAIN_STEP))
+        self._max_gain = max(self._max_gain_min, min(self._max_gain_max, float(PILOT_MAX_GAIN_DEFAULT)))
+
         self._modes = {
             "depth_hold": bool(DEPTH_HOLD_DEFAULT),
+            "max_gain": float(self._max_gain),
         }
         self._prev_buttons: Optional[PilotButtons] = None
 
         # Controller is created inside the run loop thread
         self._controller: Optional[GamepadSource] = None
+        self._last_ctrl_health_check = 0.0
+        self._ctrl_health_check_period_s = 0.5
 
     @staticmethod
     def _buttons_to_dict(b: PilotButtons) -> dict:
@@ -115,6 +136,24 @@ class PilotPublisherService:
                 edges[k] = "up"
         return edges
 
+    def _adjust_max_gain(self, delta: float) -> bool:
+        """Adjust pilot max gain cap. Returns True if the value changed."""
+        try:
+            step = float(delta)
+        except Exception:
+            step = 0.0
+        if step == 0.0:
+            return False
+        prev = float(self._max_gain)
+        new_val = prev + step
+        new_val = max(float(self._max_gain_min), min(float(self._max_gain_max), float(new_val)))
+        # Snap to 1% granularity for stable UI text / wire representation.
+        new_val = round(new_val, 2)
+        changed = abs(new_val - prev) > 1e-9
+        self._max_gain = float(new_val)
+        self._modes["max_gain"] = float(self._max_gain)
+        return changed
+
     def start(self, threaded: bool = True):
         if threaded:
             if self._thread and self._thread.is_alive():
@@ -133,6 +172,12 @@ class PilotPublisherService:
         if self._thread:
             # Wait briefly for the publisher thread to exit
             self._thread.join(timeout=1.0)
+        if self._controller is not None:
+            try:
+                self._controller.close()
+            except Exception:
+                pass
+            self._controller = None
         if self.sock is not None:
             try:
                 self.sock.close(0)
@@ -249,7 +294,9 @@ class PilotPublisherService:
         while not self._stop.is_set() and self._controller is None:
             try:
                 self._controller = self._open_controller()
-                self._emit_status({'controller': 'connected', 'index': self.index, 'name': getattr(self._controller, 'name', None)})
+                self._prev_buttons = None
+                self._last_ctrl_health_check = 0.0
+                self._emit_status({'controller': 'connected', 'index': self.index, 'name': getattr(self._controller, 'name', None), 'max_gain': float(self._max_gain)})
             except Exception as e:
                 self._emit_status({'controller': 'disconnected', 'index': self.index, 'error': str(e)})
                 if self.debug:
@@ -264,6 +311,10 @@ class PilotPublisherService:
             try:
                 assert self._controller is not None
 
+                if (t0 - self._last_ctrl_health_check) >= float(self._ctrl_health_check_period_s):
+                    self._last_ctrl_health_check = t0
+                    self._controller.healthcheck()
+
                 snap: ControllerSnapshot = self._controller.read_once()
                 frame = self._build_frame(t0, snap)
 
@@ -275,6 +326,25 @@ class PilotPublisherService:
                 if edges.get(self._depth_hold_toggle_button) == "down":
                     self._modes["depth_hold"] = not bool(self._modes.get("depth_hold", False))
 
+                if edges.get("y") == "down":
+                    if self._adjust_max_gain(+self._max_gain_step):
+                        self._emit_status({
+                            'controller': 'connected',
+                            'index': self.index,
+                            'name': getattr(self._controller, 'name', None),
+                            'max_gain': float(self._max_gain),
+                        })
+                if edges.get("a") == "down":
+                    if self._adjust_max_gain(-self._max_gain_step):
+                        self._emit_status({
+                            'controller': 'connected',
+                            'index': self.index,
+                            'name': getattr(self._controller, 'name', None),
+                            'max_gain': float(self._max_gain),
+                        })
+
+                # Always include the latest local mode values on the wire.
+                self._modes["max_gain"] = float(self._max_gain)
                 frame.modes = dict(self._modes)
                 self._prev_buttons = frame.buttons
 
@@ -316,12 +386,20 @@ class PilotPublisherService:
 
                 # Try to recover by reopening controller (hotplug / SDL weirdness)
                 self._emit_status({'controller': 'disconnected', 'index': self.index, 'error': str(e)})
+                try:
+                    if self._controller is not None:
+                        self._controller.close()
+                except Exception:
+                    pass
                 self._controller = None
+                self._prev_buttons = None
                 time.sleep(max(0.1, self.reopen_on_error_s))
                 while not self._stop.is_set() and self._controller is None:
                     try:
                         self._controller = self._open_controller()
-                        self._emit_status({'controller': 'connected', 'index': self.index, 'name': getattr(self._controller, 'name', None)})
+                        self._prev_buttons = None
+                        self._last_ctrl_health_check = 0.0
+                        self._emit_status({'controller': 'connected', 'index': self.index, 'name': getattr(self._controller, 'name', None), 'max_gain': float(self._max_gain)})
                     except Exception as e2:
                         self._emit_status({'controller': 'disconnected', 'index': self.index, 'error': str(e2)})
                         if self.debug:

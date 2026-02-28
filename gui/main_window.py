@@ -87,6 +87,10 @@ class MainWindow(QMainWindow):
         self._last_power_ts = 0.0
         self._last_power: dict = {}
 
+        # Pilot-adjustable gain cap (Y/A on controller).
+        self._gain_lbl = QLabel("Max Gain: 100%")
+        self.statusBar().addPermanentWidget(self._gain_lbl)
+
         # Depth-hold setpoint tracking (topside estimate).
         # This is purely for UI visibility; the real controller runs on the ROV.
         self._dh_enabled: bool = False
@@ -118,6 +122,7 @@ class MainWindow(QMainWindow):
             (self._video_lbl, 220),
             (self._depth_lbl, 220),
             (self._power_lbl, 240),
+            (self._gain_lbl, 150),
             (self._net_lbl, 300),
             (self._mode_lbl, 200),
         ]:
@@ -139,6 +144,8 @@ class MainWindow(QMainWindow):
         self.pilot_status_sig.connect(self._handle_pilot_status_on_ui)
         self.pilot_msg_sig.connect(self._handle_pilot_msg_on_ui)
         self._last_ctrl_status: dict = {'controller': 'unknown'}
+        self._last_pilot_msg_ts: float = 0.0
+        self._last_pilot_msg: dict = {}
 
         # 1) pilot publisher (xbox -> ROV)
         self.pilot_svc = PilotPublisherService(
@@ -232,6 +239,12 @@ class MainWindow(QMainWindow):
         self.pilot_msg_sig.emit(msg)
 
     def _handle_pilot_msg_on_ui(self, msg: dict):
+        try:
+            self._last_pilot_msg_ts = time.time()
+            self._last_pilot_msg = dict(msg or {})
+        except Exception:
+            pass
+
         # Camera tab switching (local UI only):
         #   B -> next stream (to the right)
         #   X -> previous stream (to the left)
@@ -257,6 +270,15 @@ class MainWindow(QMainWindow):
         try:
             modes = (msg or {}).get("modes", {}) or {}
             dh = bool(modes.get("depth_hold", False))
+
+            # Pilot max gain display (Y/A adjusts this topside).
+            try:
+                mg = modes.get("max_gain", None)
+                if mg is not None:
+                    pct = int(round(max(0.0, min(1.0, float(mg))) * 100.0))
+                    self._set_status(self._gain_lbl, f"Max Gain: {pct}%")
+            except Exception:
+                pass
 
             # Compute dt from pilot timestamps.
             ts = float((msg or {}).get("ts", 0.0) or 0.0)
@@ -326,7 +348,15 @@ class MainWindow(QMainWindow):
         state = (status or {}).get('controller', 'unknown')
         if state == 'connected':
             name = (status or {}).get('name') or 'controller'
-            self._set_status(self._ctrl_lbl, f"Controller: OK ({name})")
+            mg = (status or {}).get('max_gain', None)
+            if mg is None:
+                self._set_status(self._ctrl_lbl, f"Controller: OK ({name})")
+            else:
+                try:
+                    pct = int(round(max(0.0, min(1.0, float(mg))) * 100.0))
+                    self._set_status(self._ctrl_lbl, f"Controller: OK ({name}) [{pct}%]")
+                except Exception:
+                    self._set_status(self._ctrl_lbl, f"Controller: OK ({name})")
         elif state == 'disconnected':
             err = (status or {}).get('error') or 'not connected'
             self._set_status(self._ctrl_lbl, f"Controller: - ({err})")
@@ -513,6 +543,24 @@ class MainWindow(QMainWindow):
                 self._link_lbl.setStyleSheet("color: #ff8d8d; font-weight: bold;")
             else:
                 self._link_lbl.setStyleSheet("")
+        except Exception:
+            pass
+
+        # Controller freshness indicator: the controller can appear "connected"
+        # but the publisher thread may be wedged or no pilot frames may be making
+        # it to the UI anymore. Mark it stale without waiting for a manual restart.
+        try:
+            ctrl_state = str((self._last_ctrl_status or {}).get("controller", "unknown"))
+            if ctrl_state == "connected":
+                age = None
+                if self._last_pilot_msg_ts > 0:
+                    age = max(0.0, now - float(self._last_pilot_msg_ts))
+                if age is None:
+                    # no pilot frame yet after connect: tolerate a short startup window
+                    pass
+                elif age > 1.5:
+                    name = (self._last_ctrl_status or {}).get("name") or "controller"
+                    self._set_status(self._ctrl_lbl, f"Controller: STALE ({name}, age={age:.1f}s)")
         except Exception:
             pass
 
