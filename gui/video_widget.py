@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import time
+from collections import deque
 from pathlib import Path
 
 from PyQt6.QtCore import Qt, QThread, pyqtSignal, QTimer
@@ -79,6 +80,7 @@ class VideoWidget(QWidget):
 
         self.last_frame: np.ndarray | None = None
         self.last_frame_ts: float = 0.0
+        self.frame_buffer: deque[np.ndarray] = deque(maxlen=5)
         self._connected_ts: float = 0.0
         self._rec: VideoRecorder | None = None
 
@@ -166,6 +168,7 @@ class VideoWidget(QWidget):
         # New connection: treat frames as "not yet received" until the first one arrives.
         self.last_frame = None
         self.last_frame_ts = 0.0
+        self.frame_buffer.clear()
 
         # If the ROV reported recovery actions (e.g., USB rebind), surface them briefly.
         notices = []
@@ -213,6 +216,7 @@ class VideoWidget(QWidget):
         # new pipeline produces its first frame.
         self.last_frame = None
         self.last_frame_ts = 0.0
+        self.frame_buffer.clear()
         self._connected_ts = 0.0
         # Clear any stale frame immediately so the user doesn't think the
         # stream is still live.
@@ -242,6 +246,10 @@ class VideoWidget(QWidget):
     def _on_frame(self, frame: np.ndarray):
         self.last_frame = frame
         self.last_frame_ts = time.time()
+        try:
+            self.frame_buffer.append(frame.copy())
+        except Exception:
+            pass
         if self._rec is not None:
             self._rec.add_frame(frame)
 
