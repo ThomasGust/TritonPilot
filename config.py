@@ -114,3 +114,23 @@ DEPTH_HOLD_WALK_DEADBAND = float(os.environ.get("TRITON_DEPTH_HOLD_WALK_DEADBAND
 DEPTH_HOLD_WALK_RATE_MPS = float(os.environ.get("TRITON_DEPTH_HOLD_WALK_RATE_MPS", "0.60"))
 DEPTH_HOLD_SENSOR_STALE_S = float(os.environ.get("TRITON_DEPTH_HOLD_SENSOR_STALE_S", "2.0"))
 
+
+# ---------------------------------------------------------------------------
+# Out-of-water lens correction (DWE exploreHD)
+# ---------------------------------------------------------------------------
+# When enabled via View > Water Correction, each video frame is passed through
+# a remap that approximates how the ExploreHD appears once submerged.
+#
+# The model reprojects the in-air fisheye-like image into a rectilinear view.
+# `WATER_CORRECTION_TARGET_HFOV_DEG` sets the corrected horizontal field of
+# view, while `WATER_CORRECTION_ZOOM` is a small trim on top:
+#   1.00 = use the configured target FOV
+#   >1.0 = slightly tighter crop
+#   <1.0 = slightly wider crop
+WATER_CORRECTION_ZOOM = float(os.environ.get("TRITON_WATER_ZOOM", "1.0"))
+WATER_CORRECTION_K1   = float(os.environ.get("TRITON_WATER_K1",   "0.0"))
+WATER_CORRECTION_K2   = float(os.environ.get("TRITON_WATER_K2",   "0.0"))
+WATER_CORRECTION_K3   = float(os.environ.get("TRITON_WATER_K3",   "0.0"))
+WATER_CORRECTION_AIR_HFOV_DEG = float(os.environ.get("TRITON_WATER_AIR_HFOV_DEG", "138.0"))
+WATER_CORRECTION_TARGET_HFOV_DEG = float(os.environ.get("TRITON_WATER_TARGET_HFOV_DEG", "96.0"))
+

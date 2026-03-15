@@ -13,6 +13,15 @@ import numpy as np
 
 from recording.video_recorder import VideoRecorder, save_snapshot
 from video.cam import RemoteCameraManager, RemoteCv2Camera
+from video.frame_correction import WaterCorrection
+from config import (
+    WATER_CORRECTION_ZOOM,
+    WATER_CORRECTION_K1,
+    WATER_CORRECTION_K2,
+    WATER_CORRECTION_K3,
+    WATER_CORRECTION_AIR_HFOV_DEG,
+    WATER_CORRECTION_TARGET_HFOV_DEG,
+)
 
 
 class _VideoWorker(QThread):
@@ -24,12 +33,22 @@ class _VideoWorker(QThread):
         self.camera = camera
         self.period = 1.0 / float(fps)
         self._running = True
+        # Set to a WaterCorrection instance to enable; None to disable.
+        # Replacing this reference from the UI thread is safe in CPython
+        # because object-reference assignment is atomic under the GIL.
+        self.correction: WaterCorrection | None = None
 
     def run(self):
         while self._running:
             t0 = time.time()
             ok, frame = self.camera.read()
             if ok and frame is not None:
+                c = self.correction  # read once; atomic under GIL
+                if c is not None:
+                    try:
+                        frame = c.apply(frame)
+                    except Exception:
+                        pass
                 self.frame_ready.emit(frame)
             dt = time.time() - t0
             sleep_for = self.period - dt
@@ -107,6 +126,10 @@ class VideoWidget(QWidget):
         lay = QVBoxLayout(self)
         lay.addWidget(self.label)
 
+        # Out-of-water lens correction (toggleable)
+        self._correction: WaterCorrection | None = None
+        self._correction_enabled: bool = False
+
         self._tick_timer = QTimer(self)
         self._tick_timer.timeout.connect(self._tick)
         self._tick_timer.start(250)
@@ -129,6 +152,23 @@ class VideoWidget(QWidget):
                 pass
         self.label.setText(msg)
 
+    # --- out-of-water correction ---
+    def set_water_correction(self, enabled: bool) -> None:
+        """Enable or disable the out-of-water lens correction."""
+        self._correction_enabled = bool(enabled)
+        if enabled and self._correction is None:
+            self._correction = WaterCorrection(
+                zoom=WATER_CORRECTION_ZOOM,
+                k1=WATER_CORRECTION_K1,
+                k2=WATER_CORRECTION_K2,
+                k3=WATER_CORRECTION_K3,
+                air_hfov_deg=WATER_CORRECTION_AIR_HFOV_DEG,
+                target_hfov_deg=WATER_CORRECTION_TARGET_HFOV_DEG,
+            )
+        # Push to the worker thread (atomic assignment, safe under GIL).
+        if self.worker is not None:
+            self.worker.correction = self._correction if enabled else None
+
     # --- public helpers for MainWindow / status bar ---
     def status(self) -> dict:
         age = None
@@ -139,6 +179,9 @@ class VideoWidget(QWidget):
             "age_s": age,
             "last_error": self._last_error,
         }
+
+    def water_correction_enabled(self) -> bool:
+        return bool(self._correction_enabled)
 
     # --- connection / recovery ---
     def _schedule_retry(self, delay_s: float):
@@ -187,6 +230,8 @@ class VideoWidget(QWidget):
             self._show_message(f"{self.stream_name}\nWaiting for frames…")
 
         self.worker = _VideoWorker(self.camera, fps=30.0)
+        if self._correction_enabled and self._correction is not None:
+            self.worker.correction = self._correction
         self.worker.frame_ready.connect(self._on_frame)
         self.worker.start()
 
@@ -246,6 +291,7 @@ class VideoWidget(QWidget):
     def _on_frame(self, frame: np.ndarray):
         self.last_frame = frame
         self.last_frame_ts = time.time()
+
         try:
             self.frame_buffer.append(frame.copy())
         except Exception:

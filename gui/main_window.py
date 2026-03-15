@@ -6,8 +6,6 @@ import socket
 import threading
 import time
 from collections import deque
-from pathlib import Path
-
 from PyQt6.QtCore import pyqtSignal, QObject, Qt, QTimer
 from PyQt6.QtGui import QAction
 from PyQt6.QtWidgets import (
@@ -39,7 +37,6 @@ from recording.stream_recorder import StreamRecorder
 from gui.video_tabs import VideoTabs
 from gui.sensor_panel import SensorPanel
 from gui.instruments import InstrumentPanel
-
 class MainWindow(QMainWindow):
     # we'll receive sensor messages from a background thread → emit to UI thread
     sensor_msg_sig = pyqtSignal(dict)
@@ -164,7 +161,6 @@ class MainWindow(QMainWindow):
         # optional stream recorder (pilot + sensors + heartbeat)
         self._stream_recorder: StreamRecorder | None = None
         self._record_dir: str | None = None
-
         # 2) sensor subscriber (ROV -> topside)
         self.sensor_panel = SensorPanel()
         self.instrument_panel = InstrumentPanel()
@@ -846,10 +842,29 @@ class MainWindow(QMainWindow):
 
         self._set_status(self._net_lbl, " ".join(parts))
 
+    def _toggle_water_correction(self, checked: bool) -> None:
+        if self.video_panel is not None:
+            self.video_panel.set_water_correction(checked)
+        self.statusBar().showMessage(
+            "Water correction ON (out-of-water mode)" if checked else "Water correction OFF",
+            3000,
+        )
+
     def _make_menu(self):
         bar = self.menuBar()
         file_menu = bar.addMenu("&File")
         rec_menu = bar.addMenu("&Record")
+        view_menu = bar.addMenu("&View")
+
+        water_act = QAction("Water Correction (out-of-water mode)", self)
+        water_act.setCheckable(True)
+        water_act.setChecked(False)
+        water_act.setToolTip(
+            "Simulate underwater optics for bench testing: undistorts fisheye "
+            "and narrows FOV to match what the exploreHD sees when submerged."
+        )
+        water_act.toggled.connect(self._toggle_water_correction)
+        view_menu.addAction(water_act)
 
         # Stream log (JSONL)
         start_log = QAction("Start Stream Log", self)
@@ -964,5 +979,3 @@ class MainWindow(QMainWindow):
             return
         vw.stop_recording()
         self.statusBar().showMessage("Video recording stopped", 3000)
-
-

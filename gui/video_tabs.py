@@ -29,6 +29,7 @@ class VideoTabs(QWidget):
         super().__init__(parent)
         self.manager = manager
         self.stream_names = stream_names
+        self._water_correction_enabled: bool = False
 
         self.tabs = QTabWidget()
         try:
@@ -104,6 +105,13 @@ class VideoTabs(QWidget):
             return
         vw.stop_recording()
 
+    def set_water_correction(self, enabled: bool) -> None:
+        """Propagate the out-of-water correction toggle to every stream widget."""
+        self._water_correction_enabled = bool(enabled)
+        for widget in self._widgets.values():
+            if widget is not None:
+                widget.set_water_correction(enabled)
+
     def cycle_stream(self, step: int) -> None:
         try:
             count = int(self.tabs.count())
@@ -165,6 +173,8 @@ class VideoTabs(QWidget):
         if lay is not None:
             lay.addWidget(vw)
         self._widgets[name] = vw
+        if self._water_correction_enabled:
+            vw.set_water_correction(True)
 
     def _warmup_next(self):
         if not self.stream_names:
