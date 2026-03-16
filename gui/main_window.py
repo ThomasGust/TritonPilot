@@ -15,6 +15,7 @@ from PyQt6.QtWidgets import (
     QVBoxLayout,
     QLabel,
     QSizePolicy,
+    QMessageBox,
 )
 from config import (
     PILOT_PUB_ENDPOINT,
@@ -37,6 +38,7 @@ from recording.stream_recorder import StreamRecorder
 from gui.video_tabs import VideoTabs
 from gui.sensor_panel import SensorPanel
 from gui.instruments import InstrumentPanel
+from gui.crab_result_dialog import CrabResultDialog
 class MainWindow(QMainWindow):
     # we'll receive sensor messages from a background thread → emit to UI thread
     sensor_msg_sig = pyqtSignal(dict)
@@ -216,6 +218,7 @@ class MainWindow(QMainWindow):
         self._make_menu()
 
         self.resize(1200, 700)
+        self._task_windows: list[QWidget] = []
 
     # background → UI
     def _on_sensor_msg_from_thread(self, msg: dict):
@@ -855,6 +858,7 @@ class MainWindow(QMainWindow):
         file_menu = bar.addMenu("&File")
         rec_menu = bar.addMenu("&Record")
         view_menu = bar.addMenu("&View")
+        task_menu = bar.addMenu("&Tasks")
 
         water_act = QAction("Water Correction (out-of-water mode)", self)
         water_act.setCheckable(True)
@@ -865,6 +869,11 @@ class MainWindow(QMainWindow):
         )
         water_act.toggled.connect(self._toggle_water_correction)
         view_menu.addAction(water_act)
+
+        crab_act = QAction("Crab Detection", self)
+        crab_act.setToolTip("Capture the current stream frame and open side-by-side crab identification views.")
+        crab_act.triggered.connect(self._run_crab_detection_task)
+        task_menu.addAction(crab_act)
 
         # Stream log (JSONL)
         start_log = QAction("Start Stream Log", self)
@@ -964,6 +973,36 @@ class MainWindow(QMainWindow):
             self.statusBar().showMessage(f"Saved snapshot: {path}", 5000)
         else:
             self.statusBar().showMessage("No frame yet (snapshot not saved)", 3000)
+
+    def _run_crab_detection_task(self):
+        vw = self._current_video_widget()
+        if vw is None or vw.last_frame is None:
+            self.statusBar().showMessage("No frame available for crab detection", 3000)
+            return
+
+        try:
+            from crab_detector_cv import detection_summary_text, render_detection_views
+
+            frame = vw.last_frame.copy()
+            detection_result, annotated_original, annotated_unwrapped = render_detection_views(frame)
+            if detection_result is None or annotated_original is None or annotated_unwrapped is None:
+                QMessageBox.warning(self, "Crab Detection", "Could not find the board or identify any crabs in this frame.")
+                return
+
+            dialog = CrabResultDialog(
+                detection_summary_text(detection_result),
+                annotated_original,
+                annotated_unwrapped,
+                parent=self,
+            )
+            self._task_windows.append(dialog)
+            dialog.destroyed.connect(lambda *_: self._task_windows.remove(dialog) if dialog in self._task_windows else None)
+            dialog.show()
+            dialog.raise_()
+            dialog.activateWindow()
+            self.statusBar().showMessage(detection_summary_text(detection_result), 8000)
+        except Exception as e:
+            QMessageBox.critical(self, "Crab Detection", f"Crab detection failed:\n{e}")
 
     def _start_video_recording(self):
         vw = self._current_video_widget()
