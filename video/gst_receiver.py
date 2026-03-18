@@ -15,10 +15,9 @@ import threading
 import time
 import logging
 from dataclasses import dataclass, asdict, field
-from shutil import which
 from typing import Dict, Optional, Any, List
-import sys
-import re
+
+from video.gst_runtime import bootstrap_gstreamer_env
 
 logger = logging.getLogger("gst_receiver_subproc")
 if not logger.handlers:
@@ -29,27 +28,13 @@ logger.setLevel(logging.INFO)
 
 
 def _find_gst_launch() -> str:
-    env_val = os.environ.get("GST_LAUNCH")
-    if env_val and os.path.exists(env_val):
-        return env_val
-
-    p = which("gst-launch-1.0") or which("gst-launch-1.0.exe")
-    if p:
-        return p
-
-    candidates = [
-        r"C:\gstreamer\1.0\msvc_x86_64\bin\gst-launch-1.0.exe",
-        r"C:\gstreamer\1.0\mingw_x86_64\bin\gst-launch-1.0.exe",
-        r"C:\Program Files\GStreamer\1.0\msvc_x86_64\bin\gst-launch-1.0.exe",
-        r"C:\Program Files\GStreamer\1.0\bin\gst-launch-1.0.exe",
-    ]
-    for c in candidates:
-        if os.path.exists(c):
-            return c
+    runtime = bootstrap_gstreamer_env()
+    if runtime is not None:
+        return str(runtime.gst_launch)
 
     raise FileNotFoundError(
         "Could not find 'gst-launch-1.0'. "
-        "Install GStreamer (Complete) and either add its /bin to PATH or set GST_LAUNCH to the full exe path."
+        "Run setup_windows.ps1, or install GStreamer (Complete x86_64) and set GST_LAUNCH to the full exe path."
     )
 
 
@@ -166,6 +151,7 @@ class ReceiverProcess:
         self.proc: Optional[subprocess.Popen] = None
         self._lock = threading.Lock()
         self._gst = _find_gst_launch()
+        self._proc_env = dict(os.environ)
 
         self._frame_size = self.cfg.width * self.cfg.height * 3
         self._raw_buffer_lock = threading.Lock()
@@ -213,6 +199,7 @@ class ReceiverProcess:
                     stdin=subprocess.PIPE,
                     stdout=subprocess.PIPE,      # pure video bytes here
                     stderr=subprocess.PIPE,      # log separately
+                    env=self._proc_env,
                     creationflags=creationflags,
                     bufsize=0,
                 )
@@ -233,6 +220,7 @@ class ReceiverProcess:
                     stdin=subprocess.PIPE,
                     stdout=subprocess.PIPE,
                     stderr=subprocess.STDOUT,
+                    env=self._proc_env,
                     creationflags=creationflags,
                     bufsize=0,
                 )
@@ -390,9 +378,9 @@ class ReceiverProcess:
 
         # >>> CHANGE 2: raw = quiet, window = verbose
         if cfg.mode == "raw":
-            base: List[str] = [gst, "-q"]   # quiet so stdout is clean
+            base: List[str] = [gst, "--gst-disable-registry-fork", "-q"]   # quiet so stdout is clean
         else:
-            base = [gst, "-v"]
+            base = [gst, "--gst-disable-registry-fork", "-v"]
 
         if cfg.mode == "raw":
             if cfg.codec.lower() == "jpeg":

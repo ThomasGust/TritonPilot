@@ -9,6 +9,24 @@ param(
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
 
+$script:GStreamerRootEnvNames = @(
+    "GSTREAMER_1_0_ROOT_MSVC_X86_64",
+    "GSTREAMER_1_0_ROOT_X86_64",
+    "GSTREAMER_ROOT_X86_64",
+    "GSTREAMER_ROOT",
+    "GST_ROOT"
+)
+
+$script:GStreamerRequiredElements = @(
+    "rtph264depay",
+    "h264parse",
+    "avdec_h264",
+    "videoconvert",
+    "fdsink",
+    "rtpjpegdepay",
+    "jpegdec"
+)
+
 function Write-Step {
     param([string]$Message)
     Write-Host ""
@@ -24,6 +42,67 @@ function Test-CommandPath {
         }
     }
     return $null
+}
+
+function Get-ScopedEnvironmentValue {
+    param(
+        [ValidateSet("Process", "User", "Machine")]
+        [string]$Scope,
+        [string]$Name
+    )
+
+    return [Environment]::GetEnvironmentVariable(
+        $Name,
+        [System.EnvironmentVariableTarget]::$Scope
+    )
+}
+
+function Add-UniquePathEntry {
+    param(
+        [AllowNull()]
+        [string]$PathValue,
+        [string]$Entry
+    )
+
+    if (-not $Entry) {
+        return $PathValue
+    }
+
+    $parts = @()
+    if ($PathValue) {
+        $parts = $PathValue -split ';' | Where-Object { $_ }
+    }
+
+    foreach ($part in $parts) {
+        if ($part.TrimEnd('\').ToLowerInvariant() -eq $Entry.TrimEnd('\').ToLowerInvariant()) {
+            return ($parts -join ';')
+        }
+    }
+
+    return (($Entry + ';') + ($parts -join ';')).Trim(';')
+}
+
+function Set-UserEnvironmentValue {
+    param(
+        [string]$Name,
+        [string]$Value
+    )
+
+    [Environment]::SetEnvironmentVariable(
+        $Name,
+        $Value,
+        [System.EnvironmentVariableTarget]::User
+    )
+}
+
+function Ensure-UserPathEntry {
+    param([string]$Entry)
+
+    $userPath = Get-ScopedEnvironmentValue -Scope User -Name "Path"
+    $updated = Add-UniquePathEntry -PathValue $userPath -Entry $Entry
+    if ($updated -ne $userPath) {
+        Set-UserEnvironmentValue -Name "Path" -Value $updated
+    }
 }
 
 function Find-PackageManager {
@@ -59,19 +138,45 @@ function Find-PackageManager {
 function Install-WithWinget {
     param(
         [string]$WingetPath,
-        [string]$PackageId
+        [string[]]$PackageIds
     )
 
-    & $WingetPath install --id $PackageId --exact --accept-package-agreements --accept-source-agreements
+    foreach ($packageId in $PackageIds) {
+        try {
+            & $WingetPath install --id $packageId --exact --accept-package-agreements --accept-source-agreements
+            if ($LASTEXITCODE -eq 0) {
+                return $packageId
+            }
+            Write-Warning "winget install for '$packageId' exited with code $LASTEXITCODE."
+        }
+        catch {
+            Write-Warning "winget install for '$packageId' failed: $_"
+        }
+    }
+
+    throw "Failed to install package via winget. Tried: $($PackageIds -join ', ')"
 }
 
 function Install-WithChocolatey {
     param(
         [string]$ChocoPath,
-        [string]$PackageName
+        [string[]]$PackageNames
     )
 
-    & $ChocoPath install $PackageName -y
+    foreach ($packageName in $PackageNames) {
+        try {
+            & $ChocoPath install $packageName -y
+            if ($LASTEXITCODE -eq 0) {
+                return $packageName
+            }
+            Write-Warning "choco install for '$packageName' exited with code $LASTEXITCODE."
+        }
+        catch {
+            Write-Warning "choco install for '$packageName' failed: $_"
+        }
+    }
+
+    throw "Failed to install package via Chocolatey. Tried: $($PackageNames -join ', ')"
 }
 
 function Find-PythonCommand {
@@ -111,30 +216,226 @@ function Find-PythonCommand {
     return $null
 }
 
-function Find-GstLaunch {
+function Add-GStreamerRootCandidate {
+    param(
+        [System.Collections.Generic.List[string]]$Roots,
+        [AllowNull()]
+        [string]$Candidate
+    )
+
+    if (-not $Candidate) {
+        return
+    }
+
+    try {
+        $normalized = [System.IO.Path]::GetFullPath($Candidate)
+    }
+    catch {
+        return
+    }
+
+    if (-not (Test-Path $normalized)) {
+        return
+    }
+
+    foreach ($existing in $Roots) {
+        if ($existing.TrimEnd('\').ToLowerInvariant() -eq $normalized.TrimEnd('\').ToLowerInvariant()) {
+            return
+        }
+    }
+
+    [void]$Roots.Add($normalized)
+}
+
+function Get-GStreamerRootCandidates {
+    $roots = [System.Collections.Generic.List[string]]::new()
+
     if ($env:GST_LAUNCH -and (Test-Path $env:GST_LAUNCH)) {
-        return $env:GST_LAUNCH
+        Add-GStreamerRootCandidate -Roots $roots -Candidate (Split-Path -Parent (Split-Path -Parent $env:GST_LAUNCH))
+    }
+
+    if ($env:GST_PLUGIN_SCANNER -and (Test-Path $env:GST_PLUGIN_SCANNER)) {
+        $scannerDir = Split-Path -Parent $env:GST_PLUGIN_SCANNER
+        $libexecDir = Split-Path -Parent $scannerDir
+        $rootDir = Split-Path -Parent $libexecDir
+        Add-GStreamerRootCandidate -Roots $roots -Candidate $rootDir
     }
 
     $cmdPath = Test-CommandPath @("gst-launch-1.0.exe", "gst-launch-1.0")
     if ($cmdPath) {
-        return $cmdPath
+        Add-GStreamerRootCandidate -Roots $roots -Candidate (Split-Path -Parent (Split-Path -Parent $cmdPath))
     }
 
-    $candidates = @(
-        "C:\gstreamer\1.0\msvc_x86_64\bin\gst-launch-1.0.exe",
-        "C:\gstreamer\1.0\mingw_x86_64\bin\gst-launch-1.0.exe",
-        "C:\Program Files\GStreamer\1.0\msvc_x86_64\bin\gst-launch-1.0.exe",
-        "C:\Program Files\GStreamer\1.0\bin\gst-launch-1.0.exe"
+    foreach ($scope in @("Process", "User", "Machine")) {
+        foreach ($name in $script:GStreamerRootEnvNames) {
+            $value = Get-ScopedEnvironmentValue -Scope $scope -Name $name
+            Add-GStreamerRootCandidate -Roots $roots -Candidate $value
+        }
+    }
+
+    $commonRoots = @(
+        "C:\gstreamer\1.0\msvc_x86_64",
+        "C:\gstreamer\1.0\mingw_x86_64"
     )
 
-    foreach ($candidate in $candidates) {
-        if (Test-Path $candidate) {
-            return $candidate
+    if ($env:ProgramFiles) {
+        $commonRoots += @(
+            (Join-Path $env:ProgramFiles "GStreamer\1.0\msvc_x86_64"),
+            (Join-Path $env:ProgramFiles "gstreamer\1.0\msvc_x86_64"),
+            (Join-Path $env:ProgramFiles "GStreamer\1.0\mingw_x86_64"),
+            (Join-Path $env:ProgramFiles "gstreamer\1.0\mingw_x86_64")
+        )
+    }
+
+    if ($env:LOCALAPPDATA) {
+        $commonRoots += @(
+            (Join-Path $env:LOCALAPPDATA "Programs\GStreamer\1.0\msvc_x86_64"),
+            (Join-Path $env:LOCALAPPDATA "Programs\gstreamer\1.0\msvc_x86_64"),
+            (Join-Path $env:LOCALAPPDATA "Programs\GStreamer\1.0\mingw_x86_64"),
+            (Join-Path $env:LOCALAPPDATA "Programs\gstreamer\1.0\mingw_x86_64")
+        )
+    }
+
+    foreach ($root in $commonRoots) {
+        Add-GStreamerRootCandidate -Roots $roots -Candidate $root
+    }
+
+    return $roots
+}
+
+function Get-GStreamerRuntime {
+    foreach ($root in Get-GStreamerRootCandidates) {
+        $binDir = Join-Path $root "bin"
+        $gstLaunch = Join-Path $binDir "gst-launch-1.0.exe"
+        if (-not (Test-Path $gstLaunch)) {
+            $gstLaunch = Join-Path $binDir "gst-launch-1.0"
+        }
+        if (-not (Test-Path $gstLaunch)) {
+            continue
+        }
+
+        $gstInspect = Join-Path $binDir "gst-inspect-1.0.exe"
+        if (-not (Test-Path $gstInspect)) {
+            $gstInspect = Join-Path $binDir "gst-inspect-1.0"
+        }
+        if (-not (Test-Path $gstInspect)) {
+            $gstInspect = $null
+        }
+
+        $pluginScanner = Join-Path $root "libexec\gstreamer-1.0\gst-plugin-scanner.exe"
+        if (-not (Test-Path $pluginScanner)) {
+            $pluginScanner = $null
+        }
+
+        $pluginDir = Join-Path $root "lib\gstreamer-1.0"
+        if (-not (Test-Path $pluginDir)) {
+            $pluginDir = $null
+        }
+
+        return @{
+            Root = $root
+            BinDir = $binDir
+            GstLaunch = $gstLaunch
+            GstInspect = $gstInspect
+            PluginScanner = $pluginScanner
+            PluginDir = $pluginDir
         }
     }
 
     return $null
+}
+
+function Find-GstLaunch {
+    $runtime = Get-GStreamerRuntime
+    if ($runtime) {
+        return $runtime.GstLaunch
+    }
+    return $null
+}
+
+function Initialize-GStreamerSession {
+    param([switch]$PersistUserEnv)
+
+    $runtime = Get-GStreamerRuntime
+    if (-not $runtime) {
+        return $null
+    }
+
+    $env:PATH = Add-UniquePathEntry -PathValue $env:PATH -Entry $runtime.BinDir
+    $env:GST_LAUNCH = $runtime.GstLaunch
+    $env:GSTREAMER_1_0_ROOT_MSVC_X86_64 = $runtime.Root
+
+    if ($runtime.PluginScanner) {
+        $env:GST_PLUGIN_SCANNER = $runtime.PluginScanner
+    }
+
+    if ($runtime.PluginDir -and ((-not $env:GST_PLUGIN_SYSTEM_PATH_1_0) -or -not (Test-Path $env:GST_PLUGIN_SYSTEM_PATH_1_0))) {
+        $env:GST_PLUGIN_SYSTEM_PATH_1_0 = $runtime.PluginDir
+    }
+
+    if ($PersistUserEnv) {
+        Set-UserEnvironmentValue -Name "GST_LAUNCH" -Value $runtime.GstLaunch
+        Set-UserEnvironmentValue -Name "GSTREAMER_1_0_ROOT_MSVC_X86_64" -Value $runtime.Root
+        if ($runtime.PluginScanner) {
+            Set-UserEnvironmentValue -Name "GST_PLUGIN_SCANNER" -Value $runtime.PluginScanner
+        }
+        Ensure-UserPathEntry -Entry $runtime.BinDir
+    }
+
+    return $runtime
+}
+
+function Test-GStreamerElement {
+    param(
+        [hashtable]$Runtime,
+        [string]$Element
+    )
+
+    if (-not $Runtime.GstInspect) {
+        return $false
+    }
+
+    $args = @("--gst-disable-registry-fork", "--exists", $Element)
+    $null = & $Runtime.GstInspect @args 2>$null
+    return ($LASTEXITCODE -eq 0)
+}
+
+function Test-GStreamerRuntime {
+    param([hashtable]$Runtime)
+
+    if (-not $Runtime) {
+        throw "GStreamer 1.0 was not detected after setup."
+    }
+
+    $smokeArgs = @(
+        "--gst-disable-registry-fork",
+        "-q",
+        "videotestsrc",
+        "num-buffers=1",
+        "!",
+        "videoconvert",
+        "!",
+        "fakesink"
+    )
+    $null = & $Runtime.GstLaunch @smokeArgs 2>$null
+    if ($LASTEXITCODE -ne 0) {
+        throw "GStreamer was found at '$($Runtime.GstLaunch)' but a basic smoke test failed. Reinstall the complete x86_64 package and rerun setup_windows.ps1."
+    }
+
+    if (-not $Runtime.GstInspect) {
+        throw "GStreamer was found, but gst-inspect-1.0.exe was missing. Reinstall the complete x86_64 package and rerun setup_windows.ps1."
+    }
+
+    $missing = [System.Collections.Generic.List[string]]::new()
+    foreach ($element in $script:GStreamerRequiredElements) {
+        if (-not (Test-GStreamerElement -Runtime $Runtime -Element $element)) {
+            [void]$missing.Add($element)
+        }
+    }
+
+    if ($missing.Count -gt 0) {
+        throw "GStreamer is installed but missing required plugins/elements: $($missing -join ', '). Install the complete x86_64 package and rerun setup_windows.ps1."
+    }
 }
 
 function Ensure-SystemPackage {
@@ -142,8 +443,8 @@ function Ensure-SystemPackage {
         [string]$DisplayName,
         [ScriptBlock]$Probe,
         [hashtable]$PackageManager,
-        [string]$WingetId,
-        [string]$ChocoName
+        [string[]]$WingetIds,
+        [string[]]$ChocoNames
     )
 
     $existing = & $Probe
@@ -158,10 +459,12 @@ function Ensure-SystemPackage {
 
     Write-Step "Installing $DisplayName with $($PackageManager.Name)"
     if ($PackageManager.Name -eq "winget") {
-        Install-WithWinget -WingetPath $PackageManager.Command -PackageId $WingetId
+        $installedId = Install-WithWinget -WingetPath $PackageManager.Command -PackageIds $WingetIds
+        Write-Host "Installed via winget package id: $installedId" -ForegroundColor Green
     }
     elseif ($PackageManager.Name -eq "choco") {
-        Install-WithChocolatey -ChocoPath $PackageManager.Command -PackageName $ChocoName
+        $installedName = Install-WithChocolatey -ChocoPath $PackageManager.Command -PackageNames $ChocoNames
+        Write-Host "Installed via Chocolatey package: $installedName" -ForegroundColor Green
     }
     else {
         throw "Unsupported package manager: $($PackageManager.Name)"
@@ -169,7 +472,7 @@ function Ensure-SystemPackage {
 
     $installed = & $Probe
     if (-not $installed) {
-        throw "$DisplayName was not detected after installation. Open a new PowerShell session and run setup_windows.ps1 again."
+        throw "$DisplayName was installed but was not detected. The installer may have completed without updating this shell; rerun setup_windows.ps1 if needed."
     }
 
     Write-Host "$DisplayName installed successfully: $installed" -ForegroundColor Green
@@ -197,10 +500,10 @@ function Ensure-PythonCommand {
 
     Write-Step "Installing Python 3"
     if ($PackageManager.Name -eq "winget") {
-        Install-WithWinget -WingetPath $PackageManager.Command -PackageId "Python.Python.3.11"
+        $null = Install-WithWinget -WingetPath $PackageManager.Command -PackageIds @("Python.Python.3.11")
     }
     elseif ($PackageManager.Name -eq "choco") {
-        Install-WithChocolatey -ChocoPath $PackageManager.Command -PackageName "python"
+        $null = Install-WithChocolatey -ChocoPath $PackageManager.Command -PackageNames @("python")
     }
     else {
         throw "Unsupported package manager: $($PackageManager.Name)"
@@ -218,6 +521,7 @@ function Ensure-PythonCommand {
 $repoRoot = Split-Path -Parent $MyInvocation.MyCommand.Path
 $venvDir = Join-Path $repoRoot ".venv"
 $requirementsFile = Join-Path $repoRoot "requirements-windows.txt"
+$packageManager = Find-PackageManager
 
 Write-Step "Using repository root $repoRoot"
 
@@ -227,7 +531,6 @@ if (-not (Test-Path $requirementsFile)) {
 
 if (-not $SkipSystemDeps) {
     Write-Step "Checking system dependencies"
-    $packageManager = Find-PackageManager
     if ($packageManager) {
         Write-Host "Using package manager: $($packageManager.Name)" -ForegroundColor Green
     }
@@ -239,11 +542,18 @@ if (-not $SkipSystemDeps) {
         -DisplayName "GStreamer 1.0" `
         -Probe ${function:Find-GstLaunch} `
         -PackageManager $packageManager `
-        -WingetId "GStreamer.GStreamer" `
-        -ChocoName "gstreamer" | Out-Null
+        -WingetIds @("gstreamerproject.gstreamer", "GStreamer.GStreamer") `
+        -ChocoNames @("gstreamer") | Out-Null
+
+    Write-Step "Configuring GStreamer environment"
+    $gstRuntime = Initialize-GStreamerSession -PersistUserEnv
+    if (-not $gstRuntime) {
+        throw "GStreamer 1.0 was not detected after installation."
+    }
+    Write-Host "Using GStreamer root: $($gstRuntime.Root)" -ForegroundColor Green
 }
 
-$pythonCmd = Ensure-PythonCommand -PackageManager (Find-PackageManager) -SkipInstall:$SkipPythonInstall
+$pythonCmd = Ensure-PythonCommand -PackageManager $packageManager -SkipInstall:$SkipPythonInstall
 $pythonExe = $pythonCmd.Exe
 $pythonArgs = @($pythonCmd.Args)
 
@@ -276,11 +586,10 @@ Write-Step "Verifying Python imports"
 
 if (-not $SkipSystemDeps) {
     Write-Step "Verifying GStreamer"
-    $gstLaunch = Find-GstLaunch
-    if (-not $gstLaunch) {
-        throw "GStreamer 1.0 was not detected after setup."
-    }
-    Write-Host "Found gst-launch-1.0 at: $gstLaunch" -ForegroundColor Green
+    $gstRuntime = Initialize-GStreamerSession -PersistUserEnv
+    Test-GStreamerRuntime -Runtime $gstRuntime
+    Write-Host "Found gst-launch-1.0 at: $($gstRuntime.GstLaunch)" -ForegroundColor Green
+    Write-Host "Persisted GStreamer environment for future PowerShell sessions." -ForegroundColor Green
 }
 
 Write-Step "Setup complete"

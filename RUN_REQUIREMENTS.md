@@ -50,7 +50,7 @@ The video receiver path depends on the external `gst-launch-1.0` executable. On 
 - `gst-launch-1.0.exe` is on `PATH`
 - or `GST_LAUNCH` is set to the full path to `gst-launch-1.0.exe`
 
-The current receiver code is Windows-oriented and looks for GStreamer in common Windows install paths if it is not already on `PATH`.
+The current receiver code is Windows-oriented and looks for GStreamer in common Windows install paths, environment variables, and Windows registry-backed install roots if it is not already on `PATH`.
 
 The install must include the plugins needed for:
 
@@ -60,7 +60,7 @@ The install must include the plugins needed for:
 - `videoconvert`
 - `fdsink`
 
-In practice, a normal "Complete" GStreamer install is the safest option.
+In practice, a normal "Complete" x86_64 GStreamer install is the safest option.
 
 ## Required hardware and external services
 
@@ -154,6 +154,13 @@ From the repo root:
 ```powershell
 powershell -ExecutionPolicy Bypass -File .\setup_windows.ps1
 ```
+
+That setup script now:
+
+- installs GStreamer if needed
+- persists the GStreamer runtime path into the user's environment
+- verifies the exact GStreamer elements TritonPilot needs for H.264/JPEG receive pipelines
+- installs the Python dependencies into `.venv`
 
 If needed, point the app at the correct ROV host:
 
