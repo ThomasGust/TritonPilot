@@ -1,7 +1,9 @@
 [CmdletBinding()]
 param(
     [switch]$Force,
-    [switch]$SkipGStreamerCheck
+    [Alias("SkipGStreamerCheck")]
+    [switch]$SkipSystemDeps,
+    [switch]$SkipPythonInstall
 )
 
 Set-StrictMode -Version Latest
@@ -13,18 +15,100 @@ function Write-Step {
     Write-Host "==> $Message" -ForegroundColor Cyan
 }
 
+function Test-CommandPath {
+    param([string[]]$Names)
+    foreach ($name in $Names) {
+        $cmd = Get-Command $name -ErrorAction SilentlyContinue
+        if ($cmd) {
+            return $cmd.Source
+        }
+    }
+    return $null
+}
+
+function Find-PackageManager {
+    $wingetCmd = Get-Command winget.exe -ErrorAction SilentlyContinue
+    if ($wingetCmd) {
+        try {
+            $null = & $wingetCmd.Source --version
+            return @{
+                Name = "winget"
+                Command = $wingetCmd.Source
+            }
+        }
+        catch {
+        }
+    }
+
+    $chocoCmd = Get-Command choco.exe -ErrorAction SilentlyContinue
+    if ($chocoCmd) {
+        try {
+            $null = & $chocoCmd.Source --version
+            return @{
+                Name = "choco"
+                Command = $chocoCmd.Source
+            }
+        }
+        catch {
+        }
+    }
+
+    return $null
+}
+
+function Install-WithWinget {
+    param(
+        [string]$WingetPath,
+        [string]$PackageId
+    )
+
+    & $WingetPath install --id $PackageId --exact --accept-package-agreements --accept-source-agreements
+}
+
+function Install-WithChocolatey {
+    param(
+        [string]$ChocoPath,
+        [string]$PackageName
+    )
+
+    & $ChocoPath install $PackageName -y
+}
+
 function Find-PythonCommand {
     $py = Get-Command py -ErrorAction SilentlyContinue
     if ($py) {
-        return @($py.Source, "-3")
+        return @{
+            Exe = $py.Source
+            Args = @("-3")
+        }
     }
 
     $python = Get-Command python -ErrorAction SilentlyContinue
     if ($python) {
-        return @($python.Source)
+        return @{
+            Exe = $python.Source
+            Args = @()
+        }
     }
 
-    throw "Python 3 was not found. Install Python 3.10+ first, then re-run this script."
+    $searchPatterns = @(
+        "$env:LOCALAPPDATA\Programs\Python\Python*\python.exe",
+        "C:\Program Files\Python*\python.exe",
+        "C:\Python*\python.exe"
+    )
+    $candidates = @()
+    foreach ($pattern in $searchPatterns) {
+        $candidates += Get-ChildItem -Path $pattern -ErrorAction SilentlyContinue
+    }
+    $candidate = $candidates | Sort-Object FullName -Descending | Select-Object -First 1
+    if ($candidate) {
+        return @{
+            Exe = $candidate.FullName
+            Args = @()
+        }
+    }
+
+    return $null
 }
 
 function Find-GstLaunch {
@@ -32,14 +116,9 @@ function Find-GstLaunch {
         return $env:GST_LAUNCH
     }
 
-    $cmd = Get-Command gst-launch-1.0.exe -ErrorAction SilentlyContinue
-    if ($cmd) {
-        return $cmd.Source
-    }
-
-    $cmd = Get-Command gst-launch-1.0 -ErrorAction SilentlyContinue
-    if ($cmd) {
-        return $cmd.Source
+    $cmdPath = Test-CommandPath @("gst-launch-1.0.exe", "gst-launch-1.0")
+    if ($cmdPath) {
+        return $cmdPath
     }
 
     $candidates = @(
@@ -58,21 +137,115 @@ function Find-GstLaunch {
     return $null
 }
 
+function Ensure-SystemPackage {
+    param(
+        [string]$DisplayName,
+        [ScriptBlock]$Probe,
+        [hashtable]$PackageManager,
+        [string]$WingetId,
+        [string]$ChocoName
+    )
+
+    $existing = & $Probe
+    if ($existing) {
+        Write-Host "$DisplayName already available at: $existing" -ForegroundColor Green
+        return $existing
+    }
+
+    if (-not $PackageManager) {
+        throw "$DisplayName is not installed and no supported package manager (winget/choco) is available."
+    }
+
+    Write-Step "Installing $DisplayName with $($PackageManager.Name)"
+    if ($PackageManager.Name -eq "winget") {
+        Install-WithWinget -WingetPath $PackageManager.Command -PackageId $WingetId
+    }
+    elseif ($PackageManager.Name -eq "choco") {
+        Install-WithChocolatey -ChocoPath $PackageManager.Command -PackageName $ChocoName
+    }
+    else {
+        throw "Unsupported package manager: $($PackageManager.Name)"
+    }
+
+    $installed = & $Probe
+    if (-not $installed) {
+        throw "$DisplayName was not detected after installation. Open a new PowerShell session and run setup_windows.ps1 again."
+    }
+
+    Write-Host "$DisplayName installed successfully: $installed" -ForegroundColor Green
+    return $installed
+}
+
+function Ensure-PythonCommand {
+    param(
+        [hashtable]$PackageManager,
+        [switch]$SkipInstall
+    )
+
+    $pythonCmd = Find-PythonCommand
+    if ($pythonCmd) {
+        return $pythonCmd
+    }
+
+    if ($SkipInstall) {
+        throw "Python 3.10+ was not found. Install it first, or rerun without -SkipPythonInstall."
+    }
+
+    if (-not $PackageManager) {
+        throw "Python 3.10+ was not found and no supported package manager (winget/choco) is available."
+    }
+
+    Write-Step "Installing Python 3"
+    if ($PackageManager.Name -eq "winget") {
+        Install-WithWinget -WingetPath $PackageManager.Command -PackageId "Python.Python.3.11"
+    }
+    elseif ($PackageManager.Name -eq "choco") {
+        Install-WithChocolatey -ChocoPath $PackageManager.Command -PackageName "python"
+    }
+    else {
+        throw "Unsupported package manager: $($PackageManager.Name)"
+    }
+
+    $pythonCmd = Find-PythonCommand
+    if (-not $pythonCmd) {
+        throw "Python was installed but was not detected in this shell. Open a new PowerShell session and rerun setup_windows.ps1."
+    }
+
+    Write-Host "Python installed successfully." -ForegroundColor Green
+    return $pythonCmd
+}
+
 $repoRoot = Split-Path -Parent $MyInvocation.MyCommand.Path
 $venvDir = Join-Path $repoRoot ".venv"
 $requirementsFile = Join-Path $repoRoot "requirements-windows.txt"
-$pythonCmd = Find-PythonCommand
-$pythonExe = $pythonCmd[0]
-$pythonArgs = @()
-if ($pythonCmd.Length -gt 1) {
-    $pythonArgs = $pythonCmd[1..($pythonCmd.Length - 1)]
-}
 
 Write-Step "Using repository root $repoRoot"
 
 if (-not (Test-Path $requirementsFile)) {
     throw "Missing requirements file: $requirementsFile"
 }
+
+if (-not $SkipSystemDeps) {
+    Write-Step "Checking system dependencies"
+    $packageManager = Find-PackageManager
+    if ($packageManager) {
+        Write-Host "Using package manager: $($packageManager.Name)" -ForegroundColor Green
+    }
+    else {
+        Write-Warning "No supported package manager was detected. Existing system dependencies will be used if already installed."
+    }
+
+    Ensure-SystemPackage `
+        -DisplayName "GStreamer 1.0" `
+        -Probe ${function:Find-GstLaunch} `
+        -PackageManager $packageManager `
+        -WingetId "GStreamer.GStreamer" `
+        -ChocoName "gstreamer" | Out-Null
+}
+
+$pythonCmd = Ensure-PythonCommand -PackageManager (Find-PackageManager) -SkipInstall:$SkipPythonInstall
+$pythonExe = $pythonCmd.Exe
+$pythonArgs = @($pythonCmd.Args)
 
 if ((Test-Path $venvDir) -and $Force) {
     Write-Step "Removing existing virtual environment"
@@ -101,16 +274,13 @@ Write-Step "Installing Python dependencies"
 Write-Step "Verifying Python imports"
 & $venvPython -c "import PyQt6, zmq, pygame, numpy, cv2; print('Python packages verified')"
 
-if (-not $SkipGStreamerCheck) {
-    Write-Step "Checking for GStreamer"
+if (-not $SkipSystemDeps) {
+    Write-Step "Verifying GStreamer"
     $gstLaunch = Find-GstLaunch
-    if ($gstLaunch) {
-        Write-Host "Found gst-launch-1.0 at: $gstLaunch" -ForegroundColor Green
+    if (-not $gstLaunch) {
+        throw "GStreamer 1.0 was not detected after setup."
     }
-    else {
-        Write-Warning "GStreamer was not found. The GUI can start, but live video will not work until GStreamer 1.0 is installed."
-        Write-Host "Install GStreamer 1.0 on Windows, then either add its bin directory to PATH or set GST_LAUNCH to gst-launch-1.0.exe." -ForegroundColor Yellow
-    }
+    Write-Host "Found gst-launch-1.0 at: $gstLaunch" -ForegroundColor Green
 }
 
 Write-Step "Setup complete"

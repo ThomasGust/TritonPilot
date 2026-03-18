@@ -152,10 +152,7 @@ These are the important runtime overrides supported by the current code.
 From the repo root:
 
 ```powershell
-python -m venv .venv
-.\.venv\Scripts\Activate.ps1
-pip install --upgrade pip
-pip install PyQt6 pyzmq pygame numpy opencv-python pytest
+powershell -ExecutionPolicy Bypass -File .\setup_windows.ps1
 ```
 
 If needed, point the app at the correct ROV host:
@@ -192,3 +189,4 @@ If the GUI opens but video is missing, controller input is unavailable, or telem
 
 - There is currently no checked-in `requirements.txt` or `pyproject.toml`, so the Python dependency list above was inferred from the current imports in the repo.
 - The topside video receiver implementation is Windows-specific because it shells out to `gst-launch-1.0.exe` and includes Windows process handling.
+- This repo now includes `setup_windows.ps1` and `requirements-windows.txt` to make Windows onboarding easier.
