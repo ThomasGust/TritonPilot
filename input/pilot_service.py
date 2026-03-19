@@ -92,9 +92,13 @@ class PilotPublisherService:
             PILOT_MAX_GAIN_MIN,
             PILOT_MAX_GAIN_MAX,
             PILOT_MAX_GAIN_STEP,
+            REVERSE_MODE_DEFAULT,
+            REVERSE_TOGGLE_BUTTON,
         )
 
         self._depth_hold_toggle_button = str(DEPTH_HOLD_TOGGLE_BUTTON or "rstick").strip().lower()
+        self._reverse_toggle_button = str(REVERSE_TOGGLE_BUTTON or "").strip().lower()
+        self._mode_lock = threading.Lock()
 
         # Pilot-adjustable gain cap (Y +5%, A -5%). This is transmitted in
         # PilotFrame.modes["max_gain"] and interpreted on the ROV side as a
@@ -109,6 +113,7 @@ class PilotPublisherService:
         self._modes = {
             "depth_hold": bool(DEPTH_HOLD_DEFAULT),
             "max_gain": float(self._max_gain),
+            "reverse": bool(REVERSE_MODE_DEFAULT),
         }
         self._prev_buttons: Optional[PilotButtons] = None
 
@@ -144,15 +149,66 @@ class PilotPublisherService:
             step = 0.0
         if step == 0.0:
             return False
-        prev = float(self._max_gain)
-        new_val = prev + step
-        new_val = max(float(self._max_gain_min), min(float(self._max_gain_max), float(new_val)))
-        # Snap to 1% granularity for stable UI text / wire representation.
-        new_val = round(new_val, 2)
-        changed = abs(new_val - prev) > 1e-9
-        self._max_gain = float(new_val)
-        self._modes["max_gain"] = float(self._max_gain)
+        with self._mode_lock:
+            prev = float(self._max_gain)
+            new_val = prev + step
+            new_val = max(float(self._max_gain_min), min(float(self._max_gain_max), float(new_val)))
+            # Snap to 1% granularity for stable UI text / wire representation.
+            new_val = round(new_val, 2)
+            changed = abs(new_val - prev) > 1e-9
+            self._max_gain = float(new_val)
+            self._modes["max_gain"] = float(self._max_gain)
         return changed
+
+    def current_modes(self) -> dict:
+        with self._mode_lock:
+            return dict(self._modes)
+
+    def is_reverse_enabled(self) -> bool:
+        return bool(self.current_modes().get("reverse", False))
+
+    def set_reverse_enabled(self, enabled: bool) -> bool:
+        enabled = bool(enabled)
+        with self._mode_lock:
+            prev = bool(self._modes.get("reverse", False))
+            self._modes["reverse"] = enabled
+        changed = prev != enabled
+        if changed:
+            self._emit_status(self._status_payload())
+        return changed
+
+    def toggle_reverse_enabled(self) -> bool:
+        new_state = not self.is_reverse_enabled()
+        self.set_reverse_enabled(new_state)
+        return new_state
+
+    def _set_depth_hold_enabled(self, enabled: bool) -> bool:
+        enabled = bool(enabled)
+        with self._mode_lock:
+            prev = bool(self._modes.get("depth_hold", False))
+            self._modes["depth_hold"] = enabled
+        return prev != enabled
+
+    def _toggle_depth_hold(self) -> bool:
+        return self._set_depth_hold_enabled(not bool(self.current_modes().get("depth_hold", False)))
+
+    def _status_payload(self, controller: str | None = None, error: str | None = None) -> dict:
+        state = str(controller or (self._last_status or {}).get("controller") or ("connected" if self._controller is not None else "unknown"))
+        payload = {
+            "controller": state,
+            "index": self.index,
+        }
+        if state == "connected":
+            payload["name"] = getattr(self._controller, "name", None)
+        if error:
+            payload["error"] = error
+        elif state != "connected":
+            prev_err = (self._last_status or {}).get("error")
+            if prev_err:
+                payload["error"] = prev_err
+        payload.update(self.current_modes())
+        payload["max_gain"] = float(self._max_gain)
+        return payload
 
     def start(self, threaded: bool = True):
         if threaded:
@@ -240,7 +296,7 @@ class PilotPublisherService:
         return ctrl
 
     def _build_frame(self, t0: float, snap: ControllerSnapshot) -> PilotFrame:
-        return PilotFrame(
+        frame = PilotFrame(
             seq=self.seq,
             ts=t0,
             axes=PilotAxes(
@@ -265,6 +321,14 @@ class PilotPublisherService:
             ),
             dpad=snap.dpad,
         )
+        if bool(self.current_modes().get("reverse", False)):
+            # Rear camera view is rotated 180 degrees in the horizontal plane.
+            # Flip surge, sway, and yaw so the operator's inputs stay aligned
+            # with what is on screen.
+            frame.axes.lx = -frame.axes.lx
+            frame.axes.ly = -frame.axes.ly
+            frame.axes.rx = -frame.axes.rx
+        return frame
 
     def _run_loop(self):
         # Create/connect PUB socket in this thread (ZMQ sockets are thread-affine)
@@ -296,7 +360,7 @@ class PilotPublisherService:
                 self._controller = self._open_controller()
                 self._prev_buttons = None
                 self._last_ctrl_health_check = 0.0
-                self._emit_status({'controller': 'connected', 'index': self.index, 'name': getattr(self._controller, 'name', None), 'max_gain': float(self._max_gain)})
+                self._emit_status(self._status_payload(controller="connected"))
             except Exception as e:
                 self._emit_status({'controller': 'disconnected', 'index': self.index, 'error': str(e)})
                 if self.debug:
@@ -324,28 +388,21 @@ class PilotPublisherService:
                     frame.edges = dict(edges)
 
                 if edges.get(self._depth_hold_toggle_button) == "down":
-                    self._modes["depth_hold"] = not bool(self._modes.get("depth_hold", False))
+                    if self._toggle_depth_hold():
+                        self._emit_status(self._status_payload(controller="connected"))
+
+                if self._reverse_toggle_button and edges.get(self._reverse_toggle_button) == "down":
+                    self.toggle_reverse_enabled()
 
                 if edges.get("y") == "down":
                     if self._adjust_max_gain(+self._max_gain_step):
-                        self._emit_status({
-                            'controller': 'connected',
-                            'index': self.index,
-                            'name': getattr(self._controller, 'name', None),
-                            'max_gain': float(self._max_gain),
-                        })
+                        self._emit_status(self._status_payload(controller="connected"))
                 if edges.get("a") == "down":
                     if self._adjust_max_gain(-self._max_gain_step):
-                        self._emit_status({
-                            'controller': 'connected',
-                            'index': self.index,
-                            'name': getattr(self._controller, 'name', None),
-                            'max_gain': float(self._max_gain),
-                        })
+                        self._emit_status(self._status_payload(controller="connected"))
 
                 # Always include the latest local mode values on the wire.
-                self._modes["max_gain"] = float(self._max_gain)
-                frame.modes = dict(self._modes)
+                frame.modes = self.current_modes()
                 self._prev_buttons = frame.buttons
 
                 self.seq += 1
@@ -399,7 +456,7 @@ class PilotPublisherService:
                         self._controller = self._open_controller()
                         self._prev_buttons = None
                         self._last_ctrl_health_check = 0.0
-                        self._emit_status({'controller': 'connected', 'index': self.index, 'name': getattr(self._controller, 'name', None), 'max_gain': float(self._max_gain)})
+                        self._emit_status(self._status_payload(controller="connected"))
                     except Exception as e2:
                         self._emit_status({'controller': 'disconnected', 'index': self.index, 'error': str(e2)})
                         if self.debug:

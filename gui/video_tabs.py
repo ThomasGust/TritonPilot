@@ -86,6 +86,18 @@ class VideoTabs(QWidget):
             return None
         return self.stream_names[idx]
 
+    def has_stream(self, name: str | None) -> bool:
+        if not name:
+            return False
+        return name in self.stream_names
+
+    def set_current_stream(self, name: str) -> bool:
+        if name not in self.stream_names:
+            return False
+        idx = self.stream_names.index(name)
+        self.tabs.setCurrentIndex(idx)
+        return True
+
     # --- convenience proxies used by MainWindow ---
     def save_snapshot(self, out_dir: str | None = None, basename: str | None = None) -> str | None:
         vw = self.current_video_widget()

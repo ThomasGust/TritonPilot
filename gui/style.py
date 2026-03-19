@@ -41,6 +41,28 @@ def apply_modern_style(app: QApplication) -> None:
     QTabBar::tab { padding: 8px 12px; margin: 2px; border-radius: 10px; }
     QTabBar::tab:selected { background: #2a2a36; }
     QStatusBar { border-top: 1px solid #2a2a32; }
+    QLabel#summaryCard {
+        background: #202028;
+        border: 1px solid #2f2f3a;
+        border-radius: 10px;
+        padding: 2px 4px;
+        font-size: 13px;
+    }
+    QLabel#summaryCard[tone="alert"] {
+        background: #3b2525;
+        border: 1px solid #9c4a4a;
+        color: #ffd9d9;
+        font-weight: 700;
+    }
+    QLabel#summaryCard[tone="warn"] {
+        background: #332b1d;
+        border: 1px solid #a07e34;
+        color: #ffe6ae;
+    }
+    QLabel#summaryHint {
+        color: #b6bac8;
+        padding: 2px 4px 6px 4px;
+    }
     QTableWidget { border: 1px solid #2a2a32; border-radius: 10px; gridline-color: #2a2a32; }
     QHeaderView::section { background: #202028; padding: 6px 8px; border: none; border-bottom: 1px solid #2a2a32; }
     QLabel { color: #ebebeb; }

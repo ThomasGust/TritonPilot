@@ -96,6 +96,37 @@ CONTROLLER_WIN_BUTTONS = _parse_int_list_env("TRITON_CONTROLLER_WIN_BUTTONS", []
 DEPTH_HOLD_TOGGLE_BUTTON = os.environ.get("TRITON_DEPTH_HOLD_TOGGLE", "rstick").strip().lower()
 DEPTH_HOLD_DEFAULT = os.environ.get("TRITON_DEPTH_HOLD_DEFAULT", "0").strip().lower() in ("1", "true", "yes")
 
+# Reverse drive mode rotates the pilot's horizontal-plane commands by 180
+# degrees so the controls still match when the operator swaps to a rear camera.
+# By default we expose this from the GUI/menu with the `R` shortcut and keep the
+# controller-side toggle unbound so we do not accidentally reuse a button that
+# already has a safety- or payload-related meaning on the ROV side.
+REVERSE_MODE_DEFAULT = os.environ.get("TRITON_REVERSE_MODE_DEFAULT", "0").strip().lower() in ("1", "true", "yes")
+REVERSE_TOGGLE_BUTTON = os.environ.get("TRITON_REVERSE_TOGGLE", "").strip().lower()
+REVERSE_TOGGLE_SHORTCUT = os.environ.get("TRITON_REVERSE_SHORTCUT", "R").strip() or "R"
+
+
+def _parse_str_list_env(var: str, default: list[str]) -> list[str]:
+    s = os.environ.get(var, "").strip()
+    if not s:
+        return list(default)
+    parts = [p.strip() for p in s.split(",")]
+    return [p for p in parts if p]
+
+
+REVERSE_CAMERA_NAMES = _parse_str_list_env(
+    "TRITON_REVERSE_CAMERA_NAMES",
+    ["Reverse Camera", "Rear Camera", "Back Camera"],
+)
+REVERSE_CAMERA_KEYWORDS = _parse_str_list_env(
+    "TRITON_REVERSE_CAMERA_KEYWORDS",
+    ["reverse", "rear", "back"],
+)
+FORWARD_CAMERA_KEYWORDS = _parse_str_list_env(
+    "TRITON_FORWARD_CAMERA_KEYWORDS",
+    ["front", "forward"],
+)
+
 
 # Pilot-adjustable max gain / power cap (transmitted in PilotFrame.modes["max_gain"]).
 # Y = +5%, A = -5% by default (handled in input/pilot_service.py).

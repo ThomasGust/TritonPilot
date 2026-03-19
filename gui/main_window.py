@@ -6,7 +6,7 @@ import socket
 import threading
 import time
 from collections import deque
-from PyQt6.QtCore import pyqtSignal, QObject, Qt, QTimer
+from PyQt6.QtCore import pyqtSignal, Qt, QTimer
 from PyQt6.QtGui import QAction
 from PyQt6.QtWidgets import (
     QMainWindow,
@@ -28,9 +28,12 @@ from config import (
     DEPTH_HOLD_WALK_DEADBAND,
     DEPTH_HOLD_WALK_RATE_MPS,
     DEPTH_HOLD_SENSOR_STALE_S,
+    REVERSE_CAMERA_KEYWORDS,
+    REVERSE_CAMERA_NAMES,
+    REVERSE_TOGGLE_BUTTON,
+    REVERSE_TOGGLE_SHORTCUT,
 )
 
-from network.net_select import list_local_ipv4_addrs
 from input.pilot_service import PilotPublisherService
 from telemetry.sensor_service import SensorSubscriberService
 from video.cam import RemoteCameraManager
@@ -39,6 +42,8 @@ from gui.video_tabs import VideoTabs
 from gui.sensor_panel import SensorPanel
 from gui.instruments import InstrumentPanel
 from gui.crab_result_dialog import CrabResultDialog
+
+
 class MainWindow(QMainWindow):
     # we'll receive sensor messages from a background thread → emit to UI thread
     sensor_msg_sig = pyqtSignal(dict)
@@ -53,6 +58,158 @@ class MainWindow(QMainWindow):
         except Exception:
             pass
 
+    def _set_status_tone(self, lbl: QLabel, tone: str | None = None) -> None:
+        try:
+            lbl.setProperty("tone", tone or "")
+            lbl.style().unpolish(lbl)
+            lbl.style().polish(lbl)
+            lbl.update()
+        except Exception:
+            pass
+
+    def _configure_info_label(self, lbl: QLabel, min_width: int) -> None:
+        try:
+            lbl.setMinimumWidth(int(min_width))
+            lbl.setWordWrap(True)
+            lbl.setMargin(10)
+            lbl.setObjectName("summaryCard")
+            lbl.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
+            lbl.setToolTip(lbl.text())
+            lbl.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        except Exception:
+            pass
+
+    @staticmethod
+    def _stream_name_matches(name: str | None, tokens: list[str]) -> bool:
+        if not name:
+            return False
+        hay = str(name).strip().lower()
+        return any(str(tok).strip().lower() in hay for tok in tokens if str(tok).strip())
+
+    def _select_reverse_stream_name(self, stream_names: list[str]) -> str | None:
+        exact = {str(name).strip().lower(): name for name in stream_names}
+        for preferred in REVERSE_CAMERA_NAMES:
+            match = exact.get(str(preferred).strip().lower())
+            if match:
+                return match
+        for name in stream_names:
+            if self._stream_name_matches(name, REVERSE_CAMERA_KEYWORDS):
+                return name
+        return None
+
+    def _select_forward_stream_name(self) -> str | None:
+        if self.video_panel is None:
+            return None
+        if self._forward_restore_stream and self.video_panel.has_stream(self._forward_restore_stream):
+            return self._forward_restore_stream
+        for name in self.video_panel.stream_names:
+            if name != self._reverse_camera_name:
+                return name
+        return self.video_panel.current_stream_name()
+
+    def _sync_reverse_action(self) -> None:
+        act = getattr(self, "_reverse_act", None)
+        if act is None:
+            return
+        try:
+            act.blockSignals(True)
+            act.setChecked(bool(self._reverse_enabled))
+        finally:
+            try:
+                act.blockSignals(False)
+            except Exception:
+                pass
+
+    def _refresh_drive_status(self) -> None:
+        direction = "REVERSE" if self._reverse_enabled else "FORWARD"
+        parts = [f"Drive: {direction}", self._depth_hold_status_text]
+        if self._reverse_enabled:
+            if self._reverse_camera_name:
+                parts.append(f"Rear cam: {self._reverse_camera_name}")
+            else:
+                parts.append("Rear cam: not found")
+        self._set_status(self._mode_lbl, " | ".join(parts))
+        self._set_status_tone(self._mode_lbl, "alert" if self._reverse_enabled else None)
+
+    def _refresh_video_status(self) -> None:
+        if self.video_panel is None:
+            self._set_status(self._video_lbl, "Camera: -")
+            self._set_status_tone(self._video_lbl, None)
+            return
+
+        name = self.video_panel.current_stream_name()
+        vw = self.video_panel.current_video_widget()
+        if name is None or vw is None:
+            self._set_status(self._video_lbl, "Camera: -")
+            self._set_status_tone(self._video_lbl, None)
+            return
+
+        st = vw.status()
+        state = str(st.get("state") or "-")
+        if state == "playing":
+            age = st.get("age_s")
+            state_txt = f"live, age={float(age):.1f}s" if isinstance(age, (int, float)) else "live"
+        elif state == "waiting":
+            state_txt = "waiting"
+        else:
+            state_txt = state
+
+        parts = [f"Camera: {name}", state_txt]
+        mismatch = False
+        if self._reverse_enabled:
+            if self._reverse_camera_name is None:
+                parts.append("reverse mode active; no rear camera matched")
+                mismatch = True
+            elif name != self._reverse_camera_name:
+                parts.append(f"reverse mode expects {self._reverse_camera_name}")
+                mismatch = True
+            else:
+                parts.append("reverse-aligned")
+
+        self._set_status(self._video_lbl, " | ".join(parts))
+        self._set_status_tone(self._video_lbl, "warn" if mismatch else None)
+
+    def _apply_reverse_camera_selection(self) -> None:
+        if self.video_panel is None:
+            return
+
+        cur = self.video_panel.current_stream_name()
+        if self._reverse_enabled:
+            if cur and cur != self._reverse_camera_name:
+                self._forward_restore_stream = cur
+            if self._reverse_camera_name:
+                self.video_panel.set_current_stream(self._reverse_camera_name)
+        else:
+            target = self._select_forward_stream_name()
+            if target:
+                self.video_panel.set_current_stream(target)
+
+    def _set_reverse_mode(self, enabled: bool, *, announce: bool = True) -> None:
+        enabled = bool(enabled)
+        self._reverse_enabled = enabled
+        try:
+            self.pilot_svc.set_reverse_enabled(enabled)
+        except Exception:
+            pass
+        self._sync_reverse_action()
+        self._apply_reverse_camera_selection()
+        self._refresh_drive_status()
+        self._refresh_video_status()
+        if announce:
+            if enabled:
+                detail = self._reverse_camera_name or "no rear camera matched"
+                self.statusBar().showMessage(f"Reverse drive ON | {detail}", 4000)
+            else:
+                self.statusBar().showMessage("Reverse drive OFF", 3000)
+
+    def _toggle_reverse_mode(self, checked: bool | None = None) -> None:
+        if checked is None:
+            checked = not self._reverse_enabled
+        self._set_reverse_mode(bool(checked))
+
+    def _on_video_tab_changed(self, _idx: int) -> None:
+        self._refresh_video_status()
+
     def __init__(self, streams_path: str, parent=None):
         super().__init__(parent)
         self.setWindowTitle("ROV Topside (PyQt6)")
@@ -64,6 +221,10 @@ class MainWindow(QMainWindow):
         self._hb_period_ema_s: float | None = None
         self._prev_hb_rx_ts: float | None = None
         self._link_state_last: str = "NO DATA"
+        self._reverse_enabled: bool = False
+        self._reverse_camera_name: str | None = None
+        self._forward_restore_stream: str | None = None
+        self._depth_hold_status_text: str = "Depth Hold: OFF"
 
         self._link_lbl = QLabel("Link: (no data)")
         self.statusBar().addPermanentWidget(self._link_lbl)
@@ -71,24 +232,25 @@ class MainWindow(QMainWindow):
         self._ctrl_lbl = QLabel("Controller: (starting)")
         self.statusBar().addPermanentWidget(self._ctrl_lbl)
 
-        self._video_lbl = QLabel("Video: -")
-        self.statusBar().addPermanentWidget(self._video_lbl)
+        self._mode_lbl = QLabel("Drive: FORWARD | Depth Hold: OFF")
+        self._video_lbl = QLabel("Camera: -")
+        self._depth_lbl = QLabel("Depth: -")
+        self._power_lbl = QLabel("Power: -")
+        self._gain_lbl = QLabel("Max Gain: 100%")
+        reverse_hint = f"Reverse toggle: {REVERSE_TOGGLE_SHORTCUT}"
+        if REVERSE_TOGGLE_BUTTON:
+            reverse_hint += f" | controller: {REVERSE_TOGGLE_BUTTON}"
+        self._hint_lbl = QLabel(
+            reverse_hint + " | Camera cycle: B/X | Gain: Y/A | Depth hold: RStick"
+        )
 
         # quick depth readout (from external depth sensor)
-        self._depth_lbl = QLabel("Depth: -")
-        self.statusBar().addPermanentWidget(self._depth_lbl)
         self._last_depth_ts = 0.0
         self._last_depth: dict = {}
 
         # quick power readout (from Power Sense Module conversion on ROV)
-        self._power_lbl = QLabel("Power: -")
-        self.statusBar().addPermanentWidget(self._power_lbl)
         self._last_power_ts = 0.0
         self._last_power: dict = {}
-
-        # Pilot-adjustable gain cap (Y/A on controller).
-        self._gain_lbl = QLabel("Max Gain: 100%")
-        self.statusBar().addPermanentWidget(self._gain_lbl)
 
         # Depth-hold setpoint tracking (topside estimate).
         # This is purely for UI visibility; the real controller runs on the ROV.
@@ -99,10 +261,6 @@ class MainWindow(QMainWindow):
         # network status (tether vs wifi, local route to ROV, remote link state)
         self._net_lbl = QLabel("Net: -")
         self.statusBar().addPermanentWidget(self._net_lbl)
-
-        # pilot mode indicator (local modes we transmit to the ROV)
-        self._mode_lbl = QLabel("Mode: MANUAL")
-        self.statusBar().addPermanentWidget(self._mode_lbl)
         self._last_net_ts = 0.0
         self._last_net: dict = {}
         self._route_cache = {"ts": 0.0, "iface": None, "src_ip": None, "is_wifi": None, "err": None}
@@ -114,16 +272,11 @@ class MainWindow(QMainWindow):
         self._netdiag_thread = threading.Thread(target=self._netdiag_probe_loop, daemon=True)
         self._netdiag_thread.start()
 
-        # Make status widgets readable and avoid losing info when space is tight.
+        # Keep the status bar compact; use the top summary strip for the verbose bits.
         for _lbl, _w in [
-            (self._link_lbl, 260),
+            (self._link_lbl, 230),
             (self._ctrl_lbl, 220),
-            (self._video_lbl, 220),
-            (self._depth_lbl, 220),
-            (self._power_lbl, 240),
-            (self._gain_lbl, 150),
-            (self._net_lbl, 300),
-            (self._mode_lbl, 200),
+            (self._net_lbl, 320),
         ]:
             try:
                 _lbl.setMinimumWidth(int(_w))
@@ -132,6 +285,20 @@ class MainWindow(QMainWindow):
                 _lbl.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
             except Exception:
                 pass
+        for _lbl, _w in [
+            (self._mode_lbl, 280),
+            (self._video_lbl, 320),
+            (self._depth_lbl, 190),
+            (self._power_lbl, 220),
+            (self._gain_lbl, 150),
+        ]:
+            self._configure_info_label(_lbl, _w)
+        try:
+            self._hint_lbl.setWordWrap(True)
+            self._hint_lbl.setObjectName("summaryHint")
+            self._hint_lbl.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        except Exception:
+            pass
 
         self._link_timer = QTimer(self)
         self._link_timer.timeout.connect(self._update_link_status)
@@ -159,6 +326,7 @@ class MainWindow(QMainWindow):
             on_send=self._on_pilot_msg_from_thread,
         )
         self.pilot_svc.start()
+        self._reverse_enabled = bool(self.pilot_svc.is_reverse_enabled())
 
         # optional stream recorder (pilot + sensors + heartbeat)
         self._stream_recorder: StreamRecorder | None = None
@@ -192,6 +360,8 @@ class MainWindow(QMainWindow):
                 stream_names = self.cam_mgr.list_available()
                 if stream_names:
                     self.video_panel = VideoTabs(self.cam_mgr, stream_names=stream_names)
+                    self._reverse_camera_name = self._select_reverse_stream_name(stream_names)
+                    self.video_panel.tabs.currentChanged.connect(self._on_video_tab_changed)
                 else:
                     self.statusBar().showMessage("No enabled video streams in streams.json", 8000)
         except Exception as e:
@@ -201,7 +371,25 @@ class MainWindow(QMainWindow):
 
         # layout
         central = QWidget()
-        outer = QHBoxLayout(central)
+        root = QVBoxLayout(central)
+        root.setContentsMargins(8, 8, 8, 8)
+        root.setSpacing(8)
+
+        summary = QWidget()
+        summary_lay = QHBoxLayout(summary)
+        summary_lay.setContentsMargins(0, 0, 0, 0)
+        summary_lay.setSpacing(8)
+        summary_lay.addWidget(self._mode_lbl, 3)
+        summary_lay.addWidget(self._video_lbl, 3)
+        summary_lay.addWidget(self._depth_lbl, 2)
+        summary_lay.addWidget(self._power_lbl, 2)
+        summary_lay.addWidget(self._gain_lbl, 1)
+        root.addWidget(summary, 0)
+        root.addWidget(self._hint_lbl, 0)
+
+        outer = QHBoxLayout()
+        outer.setContentsMargins(0, 0, 0, 0)
+        outer.setSpacing(8)
         if self.video_panel is not None:
             outer.addWidget(self.video_panel, 2)
 
@@ -212,12 +400,18 @@ class MainWindow(QMainWindow):
         right_lay.addWidget(self.instrument_panel, 0)
         right_lay.addWidget(self.sensor_panel, 3)
         outer.addWidget(right_col, 1)
+        root.addLayout(outer, 1)
 
         self.setCentralWidget(central)
 
         self._make_menu()
+        self._sync_reverse_action()
+        self._refresh_drive_status()
+        self._refresh_video_status()
+        if self._reverse_enabled:
+            self._apply_reverse_camera_selection()
 
-        self.resize(1200, 700)
+        self.resize(1440, 860)
         self._task_windows: list[QWidget] = []
 
     # background → UI
@@ -252,15 +446,9 @@ class MainWindow(QMainWindow):
             edges = (msg or {}).get("edges", {}) or {}
             if self.video_panel is not None:
                 if edges.get("b") == "down":
-                    if hasattr(self.video_panel, "next_stream"):
-                        self.video_panel.next_stream()
-                    else:
-                        self.video_panel.tabs.setCurrentIndex((self.video_panel.tabs.currentIndex() + 1) % max(1, self.video_panel.tabs.count()))
+                    self.video_panel.next_stream()
                 if edges.get("x") == "down":
-                    if hasattr(self.video_panel, "prev_stream"):
-                        self.video_panel.prev_stream()
-                    else:
-                        self.video_panel.tabs.setCurrentIndex((self.video_panel.tabs.currentIndex() - 1) % max(1, self.video_panel.tabs.count()))
+                    self.video_panel.prev_stream()
 
         except Exception:
             pass
@@ -271,6 +459,11 @@ class MainWindow(QMainWindow):
         try:
             modes = (msg or {}).get("modes", {}) or {}
             dh = bool(modes.get("depth_hold", False))
+            reverse = bool(modes.get("reverse", False))
+            if reverse != self._reverse_enabled:
+                self._reverse_enabled = reverse
+                self._sync_reverse_action()
+                self._apply_reverse_camera_selection()
 
             # Pilot max gain display (Y/A adjusts this topside).
             try:
@@ -336,28 +529,37 @@ class MainWindow(QMainWindow):
 
                 #s = f"Mode: DEPTH HOLD (z {z_txt} → set {t_txt})"
                 s = f"z {z_txt} → set {t_txt}"
+                s = f"Depth Hold: z {z_txt} -> set {t_txt}"
                 if depth_stale:
                     s += " [DEPTH STALE]"
-                self._set_status(self._mode_lbl, s)
+                self._depth_hold_status_text = s
             else:
-                self._set_status(self._mode_lbl, "Mode: MANUAL")
+                self._depth_hold_status_text = "Depth Hold: OFF"
         except Exception:
-            self._set_status(self._mode_lbl, "Mode: -")
+            self._depth_hold_status_text = "Depth Hold: -"
+        self._refresh_drive_status()
+        self._refresh_video_status()
 
     def _handle_pilot_status_on_ui(self, status: dict):
         self._last_ctrl_status = status or {'controller': 'unknown'}
+        try:
+            self._reverse_enabled = bool((status or {}).get('reverse', self._reverse_enabled))
+        except Exception:
+            pass
+        self._sync_reverse_action()
         state = (status or {}).get('controller', 'unknown')
         if state == 'connected':
             name = (status or {}).get('name') or 'controller'
             mg = (status or {}).get('max_gain', None)
+            reverse_tag = " [REV]" if self._reverse_enabled else ""
             if mg is None:
-                self._set_status(self._ctrl_lbl, f"Controller: OK ({name})")
+                self._set_status(self._ctrl_lbl, f"Controller: OK ({name}){reverse_tag}")
             else:
                 try:
                     pct = int(round(max(0.0, min(1.0, float(mg))) * 100.0))
-                    self._set_status(self._ctrl_lbl, f"Controller: OK ({name}) [{pct}%]")
+                    self._set_status(self._ctrl_lbl, f"Controller: OK ({name}) [{pct}%]{reverse_tag}")
                 except Exception:
-                    self._set_status(self._ctrl_lbl, f"Controller: OK ({name})")
+                    self._set_status(self._ctrl_lbl, f"Controller: OK ({name}){reverse_tag}")
         elif state == 'disconnected':
             err = (status or {}).get('error') or 'not connected'
             self._set_status(self._ctrl_lbl, f"Controller: - ({err})")
@@ -365,6 +567,7 @@ class MainWindow(QMainWindow):
             self._set_status(self._ctrl_lbl, "Controller: stopped")
         else:
             self._set_status(self._ctrl_lbl, f"Controller: {state}")
+        self._refresh_drive_status()
 
     def _handle_sensor_msg_on_ui(self, msg: dict):
         import time
@@ -565,29 +768,10 @@ class MainWindow(QMainWindow):
         except Exception:
             pass
 
-        # Video indicator (show per-stream state; do not throw on missing video)
         try:
-            if self.video_panel is None:
-                self._set_status(self._video_lbl, "Video: -")
-            else:
-                name = self.video_panel.current_stream_name()
-                vw = self.video_panel.current_video_widget()
-                if name is None or vw is None:
-                    self._set_status(self._video_lbl, "Video: -")
-                else:
-                    st = vw.status()
-                    if st.get("state") == "playing":
-                        age = st.get("age_s")
-                        if age is not None:
-                            self._set_status(self._video_lbl, f"Video: {name} (OK, age={age:.1f}s)")
-                        else:
-                            self._set_status(self._video_lbl, f"Video: {name} (OK)")
-                    elif st.get("state") == "waiting":
-                        self._set_status(self._video_lbl, f"Video: {name} (waiting)")
-                    else:
-                        self._set_status(self._video_lbl, f"Video: {name} ({st.get('state')})")
+            self._refresh_video_status()
         except Exception:
-            self._set_status(self._video_lbl, "Video: -")
+            self._set_status(self._video_lbl, "Camera: -")
 
         # Network indicator (lightweight; throttled internally)
         try:
@@ -859,6 +1043,17 @@ class MainWindow(QMainWindow):
         rec_menu = bar.addMenu("&Record")
         view_menu = bar.addMenu("&View")
         task_menu = bar.addMenu("&Tasks")
+
+        self._reverse_act = QAction("Reverse Drive", self)
+        self._reverse_act.setCheckable(True)
+        self._reverse_act.setChecked(bool(self._reverse_enabled))
+        self._reverse_act.setShortcut(REVERSE_TOGGLE_SHORTCUT)
+        self._reverse_act.setToolTip(
+            "Swap to reverse driving mode: flips surge/sway/yaw and switches to the rear camera when available."
+        )
+        self._reverse_act.toggled.connect(self._toggle_reverse_mode)
+        view_menu.addAction(self._reverse_act)
+        self.addAction(self._reverse_act)
 
         water_act = QAction("Water Correction (out-of-water mode)", self)
         water_act.setCheckable(True)

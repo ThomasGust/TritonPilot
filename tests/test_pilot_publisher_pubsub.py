@@ -12,6 +12,12 @@ class FakeController:
     def __init__(self):
         self.i = 0
 
+    def healthcheck(self) -> None:
+        return None
+
+    def close(self) -> None:
+        return None
+
     def read_once(self) -> ControllerSnapshot:
         self.i += 1
         return ControllerSnapshot(
@@ -56,3 +62,44 @@ def test_pilot_publisher_sends_frames(monkeypatch):
     assert len(msgs) >= 2
     assert msgs[0]["schema"] == 1
     assert msgs[1]["seq"] > msgs[0]["seq"]
+
+
+def test_reverse_mode_flips_horizontal_axes(monkeypatch):
+    monkeypatch.setattr("input.pilot_service.time.sleep", lambda *_args, **_kwargs: None)
+
+    svc = PilotPublisherService(endpoint="inproc://reverse_test", rate_hz=30.0, deadzone=0.0, debug=False)
+    snap = ControllerSnapshot(
+        lx=0.25,
+        ly=-0.75,
+        rx=0.5,
+        ry=-0.2,
+        lt=0.1,
+        rt=0.9,
+        dpad=(0, 0),
+        a=False,
+        b=False,
+        x=False,
+        y=False,
+        lb=False,
+        rb=False,
+        win=False,
+        menu=False,
+        lstick=False,
+        rstick=False,
+    )
+
+    fwd = svc._build_frame(123.0, snap)
+    assert fwd.axes.lx == 0.25
+    assert fwd.axes.ly == -0.75
+    assert fwd.axes.rx == 0.5
+    assert fwd.axes.ry == -0.2
+
+    svc.set_reverse_enabled(True)
+    rev = svc._build_frame(124.0, snap)
+    assert rev.axes.lx == -0.25
+    assert rev.axes.ly == 0.75
+    assert rev.axes.rx == -0.5
+    assert rev.axes.ry == -0.2
+    assert rev.axes.lt == 0.1
+    assert rev.axes.rt == 0.9
+    assert svc.current_modes()["reverse"] is True
