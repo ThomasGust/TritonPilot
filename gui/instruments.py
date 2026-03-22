@@ -267,19 +267,13 @@ class InstrumentPanel(QWidget):
         self.depth_card.body.addWidget(self.depth_gauge)
         self.depth_card.body.addWidget(self.depth_meta)
 
-        self.env_card = _Card("Temp / Power")
+        self.env_card = _Card("Temp / Leak")
         self.temp_bar = QProgressBar()
         self.temp_bar.setRange(0, 1000)  # map -10..90 C internally
         self.temp_bar.setFormat("Temp: -")
-        self.power_bar = QProgressBar()
-        self.power_bar.setRange(0, 1000)  # map 0..2000W
-        self.power_bar.setFormat("Power: -")
-        self.power_lbl = QLabel("-")
-        self.power_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.power_lbl.setWordWrap(True)
         self.leak_lbl = QLabel("Leak: unknown")
         self.leak_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        for w in (self.temp_bar, self.power_bar, self.power_lbl, self.leak_lbl):
+        for w in (self.temp_bar, self.leak_lbl):
             self.env_card.body.addWidget(w)
 
         grid = QGridLayout(self)
@@ -293,7 +287,6 @@ class InstrumentPanel(QWidget):
         self._last_att_ts = 0.0
         self._last_depth_ts = 0.0
         self._last_env_ts = 0.0
-        self._last_power_ts = 0.0
         self._last_leak_ts = 0.0
 
     def update_from_sensor(self, msg: dict) -> None:
@@ -353,28 +346,6 @@ class InstrumentPanel(QWidget):
             return
 
         if typ == "power":
-            try:
-                if (msg or {}).get("error"):
-                    self.power_bar.setValue(0)
-                    self.power_bar.setFormat("Power: ERR")
-                    self.power_lbl.setText(str((msg or {}).get("error")))
-                else:
-                    v = float((msg or {}).get("voltage_v", 0.0) or 0.0)
-                    a = float((msg or {}).get("current_a", 0.0) or 0.0)
-                    w = float((msg or {}).get("power_w", v * a) or (v * a))
-                    frac = max(0.0, min(1.0, w / 2000.0))
-                    self.power_bar.setValue(int(round(frac * 1000)))
-                    self.power_bar.setFormat(f"Power: {w:.0f} W")
-                    state_bits = []
-                    if bool((msg or {}).get("held", False)):
-                        state_bits.append("HOLD")
-                    elif not bool((msg or {}).get("ok", True)):
-                        state_bits.append("CHECK")
-                    st = f" [{' '.join(state_bits)}]" if state_bits else ""
-                    self.power_lbl.setText(f"{v:.2f} V • {a:.2f} A{st}")
-                self._last_power_ts = time.time()
-            except Exception:
-                pass
             return
 
         if typ == "leak":

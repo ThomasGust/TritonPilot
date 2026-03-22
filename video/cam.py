@@ -28,7 +28,7 @@ class RemoteCv2Camera:
         video_format: str = "mjpeg",
         port: int = 5000,
         codec: str = "jpeg",     # must match video_format or what you send
-        latency_ms: int = 60,
+        latency_ms: int = 25,
         channel_order: str = "BGR",
         windows_host: str | None = None,
         stream_opts: dict | None = None,

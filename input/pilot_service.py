@@ -117,6 +117,10 @@ class PilotPublisherService:
         }
         self._prev_buttons: Optional[PilotButtons] = None
 
+        # External/GUI-provided auxiliary controls (e.g. keyboard-controlled manipulator axes).
+        self._aux_lock = threading.Lock()
+        self._aux_axes: dict[str, float] = {}
+
         # Controller is created inside the run loop thread
         self._controller: Optional[GamepadSource] = None
         self._last_ctrl_health_check = 0.0
@@ -159,6 +163,41 @@ class PilotPublisherService:
             self._max_gain = float(new_val)
             self._modes["max_gain"] = float(self._max_gain)
         return changed
+
+
+    @staticmethod
+    def _clamp_unit(x: float) -> float:
+        try:
+            v = float(x)
+        except Exception:
+            v = 0.0
+        if v < -1.0:
+            return -1.0
+        if v > 1.0:
+            return 1.0
+        return v
+
+    def set_aux_axis(self, name: str, value: float) -> None:
+        key = str(name or "").strip()
+        if not key:
+            return
+        v = self._clamp_unit(value)
+        with self._aux_lock:
+            if abs(v) < 1e-9:
+                self._aux_axes.pop(key, None)
+            else:
+                self._aux_axes[key] = v
+
+    def clear_aux_axis(self, name: str) -> None:
+        key = str(name or "").strip()
+        if not key:
+            return
+        with self._aux_lock:
+            self._aux_axes.pop(key, None)
+
+    def get_aux_axes(self) -> dict[str, float]:
+        with self._aux_lock:
+            return dict(self._aux_axes)
 
     def current_modes(self) -> dict:
         with self._mode_lock:
@@ -321,6 +360,7 @@ class PilotPublisherService:
             ),
             dpad=snap.dpad,
         )
+        frame.aux = self.get_aux_axes()
         if bool(self.current_modes().get("reverse", False)):
             # Rear camera view is rotated 180 degrees in the horizontal plane.
             # Flip surge, sway, and yaw so the operator's inputs stay aligned

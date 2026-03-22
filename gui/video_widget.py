@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import time
+import threading
 from collections import deque
 from pathlib import Path
 
@@ -26,7 +27,6 @@ from config import (
 
 class _VideoWorker(QThread):
     """Reads frames from RemoteCv2Camera at a target FPS."""
-    frame_ready = pyqtSignal(object)   # emits numpy array
 
     def __init__(self, camera: RemoteCv2Camera, parent=None, fps: float = 30.0):
         super().__init__(parent)
@@ -37,6 +37,10 @@ class _VideoWorker(QThread):
         # Replacing this reference from the UI thread is safe in CPython
         # because object-reference assignment is atomic under the GIL.
         self.correction: WaterCorrection | None = None
+        self._frame_lock = threading.Lock()
+        self._latest_frame: np.ndarray | None = None
+        self._latest_seq: int = 0
+        self._last_taken_seq: int = 0
 
     def run(self):
         while self._running:
@@ -49,11 +53,20 @@ class _VideoWorker(QThread):
                         frame = c.apply(frame)
                     except Exception:
                         pass
-                self.frame_ready.emit(frame)
+                with self._frame_lock:
+                    self._latest_frame = frame
+                    self._latest_seq += 1
             dt = time.time() - t0
             sleep_for = self.period - dt
             if sleep_for > 0:
                 QThread.msleep(int(sleep_for * 1000))
+
+    def take_latest_frame(self) -> np.ndarray | None:
+        with self._frame_lock:
+            if self._latest_frame is None or self._latest_seq == self._last_taken_seq:
+                return None
+            self._last_taken_seq = self._latest_seq
+            return self._latest_frame
 
     def stop(self):
         self._running = False
@@ -99,7 +112,7 @@ class VideoWidget(QWidget):
 
         self.last_frame: np.ndarray | None = None
         self.last_frame_ts: float = 0.0
-        self.frame_buffer: deque[np.ndarray] = deque(maxlen=5)
+        self.frame_buffer: deque[np.ndarray] = deque(maxlen=1)
         self._connected_ts: float = 0.0
         self._rec: VideoRecorder | None = None
 
@@ -132,7 +145,7 @@ class VideoWidget(QWidget):
 
         self._tick_timer = QTimer(self)
         self._tick_timer.timeout.connect(self._tick)
-        self._tick_timer.start(250)
+        self._tick_timer.start(33)
 
         # kick off first attempt immediately (avoid waiting for the next timer tick)
         self._start_connect()
@@ -232,7 +245,6 @@ class VideoWidget(QWidget):
         self.worker = _VideoWorker(self.camera, fps=30.0)
         if self._correction_enabled and self._correction is not None:
             self.worker.correction = self._correction
-        self.worker.frame_ready.connect(self._on_frame)
         self.worker.start()
 
     def _on_connect_failed(self, err: str):
@@ -273,6 +285,14 @@ class VideoWidget(QWidget):
     def _tick(self):
         now = time.time()
 
+        if self.worker is not None:
+            try:
+                frame = self.worker.take_latest_frame()
+            except Exception:
+                frame = None
+            if frame is not None:
+                self._on_frame(frame)
+
         if self._state == "playing":
             # Detect stall (no frames recently)
             if self.last_frame_ts > 0:
@@ -293,7 +313,9 @@ class VideoWidget(QWidget):
         self.last_frame_ts = time.time()
 
         try:
-            self.frame_buffer.append(frame.copy())
+            if self.frame_buffer.maxlen != 1:
+                self.frame_buffer = deque(maxlen=1)
+            self.frame_buffer.append(frame)
         except Exception:
             pass
         if self._rec is not None:
@@ -312,7 +334,7 @@ class VideoWidget(QWidget):
             self.label.width(),
             self.label.height(),
             Qt.AspectRatioMode.KeepAspectRatio,
-            Qt.TransformationMode.SmoothTransformation,
+            Qt.TransformationMode.FastTransformation,
         )
         self.label.setPixmap(pix)
 

@@ -122,7 +122,6 @@ def fit_board_quadrilateral(contour):
 
     return cv2.boxPoints(cv2.minAreaRect(contour))
 
-
 def build_white_board_mask(image):
     height, width = image.shape[:2]
     hsv = cv2.cvtColor(image, cv2.COLOR_BGR2HSV)
@@ -275,7 +274,6 @@ def recover_board_mask_from_core(board_mask):
     recovered_mask = cv2.bitwise_and(recovered_mask, board_mask)
     recovered_mask = cv2.morphologyEx(recovered_mask, cv2.MORPH_CLOSE, close_kernel)
     return recovered_mask
-
 
 def refine_board_polygon(image, polygon, iterations=1):
     current_polygon = order_corners(polygon).astype(np.float32)

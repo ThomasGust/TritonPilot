@@ -129,7 +129,7 @@ class RxConfig:
     # Bind the UDP receiver to a specific local interface address.
     # Default "0.0.0.0" listens on all interfaces.
     bind_address: str = "0.0.0.0"
-    latency_ms: int = 60
+    latency_ms: int = 25
     sink: str = "autovideosink"
     sync: bool = False
     record_path: Optional[str] = None
@@ -386,11 +386,12 @@ class ReceiverProcess:
             if cfg.codec.lower() == "jpeg":
                 caps = "application/x-rtp,media=video,encoding-name=JPEG,payload=26,clock-rate=90000"
                 pipeline = [
-                    "udpsrc", f"address={cfg.bind_address}", "reuse=true", f"port={cfg.port}", f"caps={caps}",
-                    "!", "rtpjitterbuffer", f"latency={cfg.latency_ms}",
+                    "udpsrc", f"address={cfg.bind_address}", "reuse=true", f"port={cfg.port}", "buffer-size=262144", f"caps={caps}",
+                    "!", "rtpjitterbuffer", f"latency={cfg.latency_ms}", "drop-on-latency=true", "faststart-min-packets=1",
                     "!", "rtpjpegdepay",
                     "!", "jpegdec",
                     "!", "videoconvert",
+                    "!", "queue", "max-size-buffers=1", "max-size-bytes=0", "max-size-time=0", "leaky=downstream",
                     "!", (
                         f"video/x-raw,format=BGR,width={cfg.width},height={cfg.height},"
                         "colorimetry=1:4:0:0,range=full"
@@ -400,12 +401,13 @@ class ReceiverProcess:
             else:
                 caps = "application/x-rtp,media=video,encoding-name=H264,payload=96,clock-rate=90000"
                 pipeline = [
-                    "udpsrc", f"address={cfg.bind_address}", "reuse=true", f"port={cfg.port}", f"caps={caps}",
-                    "!", "rtpjitterbuffer", f"latency={cfg.latency_ms}",
+                    "udpsrc", f"address={cfg.bind_address}", "reuse=true", f"port={cfg.port}", "buffer-size=262144", f"caps={caps}",
+                    "!", "rtpjitterbuffer", f"latency={cfg.latency_ms}", "drop-on-latency=true", "faststart-min-packets=1",
                     "!", "rtph264depay",
-                    "!", "h264parse",
+                    "!", "h264parse", "config-interval=-1", "disable-passthrough=true",
                     "!", "avdec_h264",
                     "!", "videoconvert",
+                    "!", "queue", "max-size-buffers=1", "max-size-bytes=0", "max-size-time=0", "leaky=downstream",
                     "!", (
                         f"video/x-raw,format=BGR,width={cfg.width},height={cfg.height},"
                         "colorimetry=1:4:0:0,range=full"
@@ -421,23 +423,25 @@ class ReceiverProcess:
         if cfg.codec.lower() == "jpeg":
             caps = "application/x-rtp,media=video,encoding-name=JPEG,payload=26,clock-rate=90000"
             pipeline = [
-                "udpsrc", f"address={cfg.bind_address}", "reuse=true", f"port={cfg.port}", f"caps={caps}",
-                "!", "rtpjitterbuffer", f"latency={cfg.latency_ms}",
+                "udpsrc", f"address={cfg.bind_address}", "reuse=true", f"port={cfg.port}", "buffer-size=262144", f"caps={caps}",
+                "!", "rtpjitterbuffer", f"latency={cfg.latency_ms}", "drop-on-latency=true", "faststart-min-packets=1",
                 "!", "rtpjpegdepay",
                 "!", "jpegdec",
                 "!", "videoconvert",
+                "!", "queue", "max-size-buffers=1", "max-size-bytes=0", "max-size-time=0", "leaky=downstream",
                 "!", "video/x-raw,format=BGR,colorimetry=1:4:0:0,range=full",
                 "!", cfg.sink, f"sync={'true' if cfg.sync else 'false'}",
             ]
         else:
             caps = "application/x-rtp,media=video,encoding-name=H264,payload=96,clock-rate=90000"
             pipeline = [
-                "udpsrc", f"address={cfg.bind_address}", "reuse=true", f"port={cfg.port}", f"caps={caps}",
-                "!", "rtpjitterbuffer", f"latency={cfg.latency_ms}",
+                "udpsrc", f"address={cfg.bind_address}", "reuse=true", f"port={cfg.port}", "buffer-size=262144", f"caps={caps}",
+                "!", "rtpjitterbuffer", f"latency={cfg.latency_ms}", "drop-on-latency=true", "faststart-min-packets=1",
                 "!", "rtph264depay",
-                "!", "h264parse",
+                "!", "h264parse", "config-interval=-1", "disable-passthrough=true",
                 "!", "avdec_h264",
                 "!", "videoconvert",
+                "!", "queue", "max-size-buffers=1", "max-size-bytes=0", "max-size-time=0", "leaky=downstream",
                 "!", "video/x-raw,format=BGR,colorimetry=1:4:0:0,range=full",
                 "!", cfg.sink, f"sync={'true' if cfg.sync else 'false'}",
             ]
@@ -487,7 +491,7 @@ if __name__ == "__main__":
     ap.add_argument("--name", default="cam0")
     ap.add_argument("--codec", choices=["jpeg", "h264"], default="jpeg")
     ap.add_argument("--port", type=int, default=5000)
-    ap.add_argument("--latency-ms", type=int, default=60)
+    ap.add_argument("--latency-ms", type=int, default=25)
     ap.add_argument("--sink", default="autovideosink")
     ap.add_argument("--sync", action="store_true")
     ap.add_argument("--record-path", default=None)

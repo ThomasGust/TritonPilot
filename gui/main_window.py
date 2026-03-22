@@ -6,9 +6,10 @@ import socket
 import threading
 import time
 from collections import deque
-from PyQt6.QtCore import pyqtSignal, Qt, QTimer
+from PyQt6.QtCore import pyqtSignal, Qt, QTimer, QEvent
 from PyQt6.QtGui import QAction
 from PyQt6.QtWidgets import (
+    QApplication,
     QMainWindow,
     QWidget,
     QHBoxLayout,
@@ -241,7 +242,7 @@ class MainWindow(QMainWindow):
         if REVERSE_TOGGLE_BUTTON:
             reverse_hint += f" | controller: {REVERSE_TOGGLE_BUTTON}"
         self._hint_lbl = QLabel(
-            reverse_hint + " | Camera cycle: B/X | Gain: Y/A | Depth hold: RStick"
+            reverse_hint + " | Camera cycle: B/X | Gain: Y/A | Depth hold: RStick | Gripper: W/S pitch, A/D yaw"
         )
 
         # quick depth readout (from external depth sensor)
@@ -315,6 +316,14 @@ class MainWindow(QMainWindow):
         self._last_pilot_msg: dict = {}
 
         # 1) pilot publisher (xbox -> ROV)
+        self._gripper_keys_down: set[str] = set()
+        self._gripper_keymap = {
+            Qt.Key.Key_W: ("gripper_pitch", +1.0, "W"),
+            Qt.Key.Key_S: ("gripper_pitch", -1.0, "S"),
+            Qt.Key.Key_D: ("gripper_yaw", +1.0, "D"),
+            Qt.Key.Key_A: ("gripper_yaw", -1.0, "A"),
+        }
+
         self.pilot_svc = PilotPublisherService(
             endpoint=PILOT_PUB_ENDPOINT,
             rate_hz=30.0,
@@ -411,8 +420,54 @@ class MainWindow(QMainWindow):
         if self._reverse_enabled:
             self._apply_reverse_camera_selection()
 
+        try:
+            self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
+            app = QApplication.instance()
+            if app is not None:
+                app.installEventFilter(self)
+        except Exception:
+            pass
+
         self.resize(1440, 860)
         self._task_windows: list[QWidget] = []
+
+
+    def _sync_gripper_keyboard_axes(self) -> None:
+        pitch = 0.0
+        yaw = 0.0
+        if "W" in self._gripper_keys_down and "S" not in self._gripper_keys_down:
+            pitch = 1.0
+        elif "S" in self._gripper_keys_down and "W" not in self._gripper_keys_down:
+            pitch = -1.0
+        if "D" in self._gripper_keys_down and "A" not in self._gripper_keys_down:
+            yaw = 1.0
+        elif "A" in self._gripper_keys_down and "D" not in self._gripper_keys_down:
+            yaw = -1.0
+
+        try:
+            self.pilot_svc.set_aux_axis("gripper_pitch", pitch)
+            self.pilot_svc.set_aux_axis("gripper_yaw", yaw)
+        except Exception:
+            pass
+
+    def eventFilter(self, obj, event):
+        try:
+            et = event.type()
+            if et in (QEvent.Type.KeyPress, QEvent.Type.KeyRelease):
+                if hasattr(event, "isAutoRepeat") and event.isAutoRepeat():
+                    return False
+                entry = self._gripper_keymap.get(event.key())
+                if entry is not None:
+                    _axis_name, _axis_value, label = entry
+                    if et == QEvent.Type.KeyPress:
+                        self._gripper_keys_down.add(label)
+                    else:
+                        self._gripper_keys_down.discard(label)
+                    self._sync_gripper_keyboard_axes()
+                    return False
+        except Exception:
+            pass
+        return super().eventFilter(obj, event)
 
     # background → UI
     def _on_sensor_msg_from_thread(self, msg: dict):

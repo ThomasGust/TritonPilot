@@ -10,6 +10,7 @@ def test_pilot_frame_roundtrip():
         dpad=(1, -1),
         edges={"menu": "down"},
         modes={"example": 1},
+        aux={"gripper_pitch": 1.0, "gripper_yaw": -1.0},
     )
     d = f.to_dict()
     f2 = PilotFrame.from_dict(d)
@@ -18,3 +19,5 @@ def test_pilot_frame_roundtrip():
     assert f2.buttons.a is True
     assert f2.dpad == (1, -1)
     assert f2.edges["menu"] == "down"
+
+    assert f2.aux["gripper_pitch"] == 1.0

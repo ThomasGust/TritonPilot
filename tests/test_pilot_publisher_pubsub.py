@@ -103,3 +103,22 @@ def test_reverse_mode_flips_horizontal_axes(monkeypatch):
     assert rev.axes.lt == 0.1
     assert rev.axes.rt == 0.9
     assert svc.current_modes()["reverse"] is True
+
+
+def test_aux_axes_are_embedded_in_frame(monkeypatch):
+    monkeypatch.setattr("input.pilot_service.time.sleep", lambda *_args, **_kwargs: None)
+
+    svc = PilotPublisherService(endpoint="inproc://aux_test", rate_hz=30.0, deadzone=0.0, debug=False)
+    svc.set_aux_axis("gripper_pitch", 1.0)
+    svc.set_aux_axis("gripper_yaw", -1.0)
+
+    snap = ControllerSnapshot(
+        lx=0.0, ly=0.0, rx=0.0, ry=0.0, lt=0.0, rt=0.0,
+        dpad=(0, 0),
+        a=False, b=False, x=False, y=False, lb=False, rb=False,
+        win=False, menu=False, lstick=False, rstick=False,
+    )
+    frame = svc._build_frame(10.0, snap)
+
+    assert frame.aux["gripper_pitch"] == 1.0
+    assert frame.aux["gripper_yaw"] == -1.0
