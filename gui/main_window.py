@@ -323,6 +323,15 @@ class MainWindow(QMainWindow):
             Qt.Key.Key_D: ("gripper_yaw", +1.0, "D"),
             Qt.Key.Key_A: ("gripper_yaw", -1.0, "A"),
         }
+        self._gripper_key_pitch = 0.0
+        self._gripper_key_yaw = 0.0
+        self._gripper_key_ramp_rate = 1.25
+        self._gripper_key_release_rate = 2.0
+        self._gripper_key_last_update = time.monotonic()
+        self._gripper_key_timer = QTimer(self)
+        self._gripper_key_timer.setInterval(33)
+        self._gripper_key_timer.timeout.connect(self._update_gripper_keyboard_axes)
+        self._gripper_key_timer.start()
 
         self.pilot_svc = PilotPublisherService(
             endpoint=PILOT_PUB_ENDPOINT,
@@ -432,9 +441,13 @@ class MainWindow(QMainWindow):
         self._task_windows: list[QWidget] = []
 
 
-    def _sync_gripper_keyboard_axes(self) -> None:
-        pitch = 0.0
-        yaw = 0.0
+    def _gripper_keyboard_targets(self) -> tuple[float, float]:
+        # Latch the keyboard-commanded wrist position when no key is held,
+        # so releasing W/A/S/D keeps the wrist where it is instead of
+        # springing back toward center. Holding a key again continues ramping
+        # from the current commanded value.
+        pitch = self._gripper_key_pitch
+        yaw = self._gripper_key_yaw
         if "W" in self._gripper_keys_down and "S" not in self._gripper_keys_down:
             pitch = 1.0
         elif "S" in self._gripper_keys_down and "W" not in self._gripper_keys_down:
@@ -443,10 +456,31 @@ class MainWindow(QMainWindow):
             yaw = 1.0
         elif "A" in self._gripper_keys_down and "D" not in self._gripper_keys_down:
             yaw = -1.0
+        return pitch, yaw
+
+    @staticmethod
+    def _approach_axis(current: float, target: float, max_step: float) -> float:
+        if current < target:
+            return min(target, current + max_step)
+        if current > target:
+            return max(target, current - max_step)
+        return current
+
+    def _update_gripper_keyboard_axes(self) -> None:
+        target_pitch, target_yaw = self._gripper_keyboard_targets()
+        now = time.monotonic()
+        dt = max(0.0, min(0.1, now - self._gripper_key_last_update))
+        self._gripper_key_last_update = now
+
+        pitch_rate = self._gripper_key_ramp_rate if abs(target_pitch) > abs(self._gripper_key_pitch) else self._gripper_key_release_rate
+        yaw_rate = self._gripper_key_ramp_rate if abs(target_yaw) > abs(self._gripper_key_yaw) else self._gripper_key_release_rate
+
+        self._gripper_key_pitch = self._approach_axis(self._gripper_key_pitch, target_pitch, pitch_rate * dt)
+        self._gripper_key_yaw = self._approach_axis(self._gripper_key_yaw, target_yaw, yaw_rate * dt)
 
         try:
-            self.pilot_svc.set_aux_axis("gripper_pitch", pitch)
-            self.pilot_svc.set_aux_axis("gripper_yaw", yaw)
+            self.pilot_svc.set_aux_axis("gripper_pitch", self._gripper_key_pitch)
+            self.pilot_svc.set_aux_axis("gripper_yaw", self._gripper_key_yaw)
         except Exception:
             pass
 
@@ -463,7 +497,8 @@ class MainWindow(QMainWindow):
                         self._gripper_keys_down.add(label)
                     else:
                         self._gripper_keys_down.discard(label)
-                    self._sync_gripper_keyboard_axes()
+                    self._gripper_key_last_update = time.monotonic()
+                    self._update_gripper_keyboard_axes()
                     return False
         except Exception:
             pass
