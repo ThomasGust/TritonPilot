@@ -122,3 +122,14 @@ def test_aux_axes_are_embedded_in_frame(monkeypatch):
 
     assert frame.aux["gripper_pitch"] == 1.0
     assert frame.aux["gripper_yaw"] == -1.0
+
+
+def test_t200_wrist_gain_is_exposed_in_modes(monkeypatch):
+    monkeypatch.setattr("input.pilot_service.time.sleep", lambda *_args, **_kwargs: None)
+
+    svc = PilotPublisherService(endpoint="inproc://t200_gain_test", rate_hz=30.0, deadzone=0.0, debug=False)
+    start_gain = svc.current_t200_wrist_gain()
+
+    assert "t200_wrist_gain" in svc.current_modes()
+    assert svc.adjust_t200_wrist_gain(-svc.t200_wrist_gain_step()) is True
+    assert svc.current_t200_wrist_gain() < start_gain

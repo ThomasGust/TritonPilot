@@ -94,6 +94,10 @@ class PilotPublisherService:
             PILOT_MAX_GAIN_STEP,
             REVERSE_MODE_DEFAULT,
             REVERSE_TOGGLE_BUTTON,
+            T200_WRIST_GAIN_DEFAULT,
+            T200_WRIST_GAIN_MIN,
+            T200_WRIST_GAIN_MAX,
+            T200_WRIST_GAIN_STEP,
         )
 
         self._depth_hold_toggle_button = str(DEPTH_HOLD_TOGGLE_BUTTON or "rstick").strip().lower()
@@ -110,10 +114,21 @@ class PilotPublisherService:
         self._max_gain_step = max(0.0, float(PILOT_MAX_GAIN_STEP))
         self._max_gain = max(self._max_gain_min, min(self._max_gain_max, float(PILOT_MAX_GAIN_DEFAULT)))
 
+        self._t200_wrist_gain_min = float(T200_WRIST_GAIN_MIN)
+        self._t200_wrist_gain_max = float(T200_WRIST_GAIN_MAX)
+        if self._t200_wrist_gain_max < self._t200_wrist_gain_min:
+            self._t200_wrist_gain_min, self._t200_wrist_gain_max = self._t200_wrist_gain_max, self._t200_wrist_gain_min
+        self._t200_wrist_gain_step = max(0.0, float(T200_WRIST_GAIN_STEP))
+        self._t200_wrist_gain = max(
+            self._t200_wrist_gain_min,
+            min(self._t200_wrist_gain_max, float(T200_WRIST_GAIN_DEFAULT)),
+        )
+
         self._modes = {
             "depth_hold": bool(DEPTH_HOLD_DEFAULT),
             "max_gain": float(self._max_gain),
             "reverse": bool(REVERSE_MODE_DEFAULT),
+            "t200_wrist_gain": float(self._t200_wrist_gain),
         }
         self._prev_buttons: Optional[PilotButtons] = None
 
@@ -162,6 +177,37 @@ class PilotPublisherService:
             changed = abs(new_val - prev) > 1e-9
             self._max_gain = float(new_val)
             self._modes["max_gain"] = float(self._max_gain)
+        return changed
+
+    def _adjust_t200_wrist_gain(self, delta: float) -> bool:
+        """Adjust the pilot-side T200 wrist gain cap."""
+        try:
+            step = float(delta)
+        except Exception:
+            step = 0.0
+        if step == 0.0:
+            return False
+        with self._mode_lock:
+            prev = float(self._t200_wrist_gain)
+            new_val = prev + step
+            new_val = max(float(self._t200_wrist_gain_min), min(float(self._t200_wrist_gain_max), float(new_val)))
+            new_val = round(new_val, 2)
+            changed = abs(new_val - prev) > 1e-9
+            self._t200_wrist_gain = float(new_val)
+            self._modes["t200_wrist_gain"] = float(self._t200_wrist_gain)
+        return changed
+
+    def current_t200_wrist_gain(self) -> float:
+        with self._mode_lock:
+            return float(self._t200_wrist_gain)
+
+    def t200_wrist_gain_step(self) -> float:
+        return float(self._t200_wrist_gain_step)
+
+    def adjust_t200_wrist_gain(self, delta: float) -> bool:
+        changed = self._adjust_t200_wrist_gain(delta)
+        if changed:
+            self._emit_status(self._status_payload(controller="connected"))
         return changed
 
 

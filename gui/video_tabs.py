@@ -25,7 +25,7 @@ class _VideoPane(QFrame):
         self.setProperty("active", False)
         self.setFrameShape(QFrame.Shape.NoFrame)
         self.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.setToolTip("Click to make this the active pane for B/X, snapshots, and recording.")
+        self.setToolTip("Click to make this the active pane for controller snapshots and recording.")
 
         self._layout = QVBoxLayout(self)
         self._layout.setContentsMargins(0, 0, 0, 0)
@@ -80,7 +80,7 @@ class VideoTabs(QWidget):
         self._containers: dict[str, QWidget] = {}
         self._widgets: dict[str, VideoWidget | None] = {}
         self._pane_streams: list[str | None] = [None, None, None, None]
-        self._pane_count: int = 1
+        self._pane_count: int = 4
         self._active_pane_index: int = 0
         self._warmup_index: int = 0
         self._warmup_timer = QTimer(self)
@@ -187,11 +187,11 @@ class VideoTabs(QWidget):
         return 0
 
     def _load_preferences(self) -> None:
-        saved_count = self._settings.value("video/layout_count", 1)
+        saved_count = self._settings.value("video/layout_count", 4)
         try:
             self._pane_count = self._allowed_layout_count(int(saved_count))
         except Exception:
-            self._pane_count = 1
+            self._pane_count = 4
 
         for idx in range(len(self._pane_streams)):
             raw = self._settings.value(f"video/pane_stream_{idx}", None)

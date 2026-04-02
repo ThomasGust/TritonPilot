@@ -206,6 +206,9 @@ class VideoWidget(QWidget):
     def water_correction_enabled(self) -> bool:
         return bool(self._correction_enabled)
 
+    def is_recording(self) -> bool:
+        return self._rec is not None
+
     # --- connection / recovery ---
     def _schedule_retry(self, delay_s: float):
         self._next_retry_ts = time.time() + max(0.0, float(delay_s))
@@ -365,6 +368,10 @@ class VideoWidget(QWidget):
 
         Returns the output path (mp4 file when available; otherwise a frames directory).
         """
+        if self._rec is not None:
+            target = self._rec.target
+            return str(target) if target is not None else str(Path(out_dir or "recordings") / f"{self.stream_name}.mp4")
+
         if out_dir is None:
             out_dir = str(Path("recordings"))
         Path(out_dir).mkdir(parents=True, exist_ok=True)

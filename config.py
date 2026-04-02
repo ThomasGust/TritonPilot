@@ -137,6 +137,14 @@ PILOT_MAX_GAIN_MIN = float(os.environ.get("TRITON_PILOT_MAX_GAIN_MIN", "0.05"))
 PILOT_MAX_GAIN_MAX = float(os.environ.get("TRITON_PILOT_MAX_GAIN_MAX", "1.0"))
 PILOT_MAX_GAIN_STEP = float(os.environ.get("TRITON_PILOT_MAX_GAIN_STEP", "0.05"))
 
+# Pilot-adjustable gain for the T200-powered wrist motor. This is transmitted
+# separately from the main vehicle max gain so the manipulator can be tuned
+# independently when the ROV-side controller chooses to honor it.
+T200_WRIST_GAIN_DEFAULT = float(os.environ.get("TRITON_T200_WRIST_GAIN_DEFAULT", "1.0"))
+T200_WRIST_GAIN_MIN = float(os.environ.get("TRITON_T200_WRIST_GAIN_MIN", "0.10"))
+T200_WRIST_GAIN_MAX = float(os.environ.get("TRITON_T200_WRIST_GAIN_MAX", "1.0"))
+T200_WRIST_GAIN_STEP = float(os.environ.get("TRITON_T200_WRIST_GAIN_STEP", "0.05"))
+
 
 # These are for TOPSIDE display/interaction only (they don't change onboard behavior
 # unless you also update rov_config.py on the ROV side). They are used to show the

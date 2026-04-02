@@ -291,22 +291,29 @@ class MainWindow(QMainWindow):
         self._last_pilot_msg: dict = {}
 
         # 1) pilot publisher (xbox -> ROV)
-        self._gripper_keys_down: set[str] = set()
-        self._gripper_keymap = {
+        # These keyboard controls drive the two-axis servo wrist. We keep the
+        # legacy wire keys ("gripper_pitch"/"gripper_yaw") for compatibility
+        # with the ROV-side controller until that side is renamed too.
+        self._servo_wrist_keys_down: set[str] = set()
+        self._servo_wrist_keymap = {
             Qt.Key.Key_W: ("gripper_pitch", +1.0, "W"),
             Qt.Key.Key_S: ("gripper_pitch", -1.0, "S"),
             Qt.Key.Key_D: ("gripper_yaw", +1.0, "D"),
             Qt.Key.Key_A: ("gripper_yaw", -1.0, "A"),
         }
-        self._gripper_key_pitch = 0.0
-        self._gripper_key_yaw = 0.0
-        self._gripper_key_ramp_rate = 1.25
-        self._gripper_key_release_rate = 2.0
-        self._gripper_key_last_update = time.monotonic()
-        self._gripper_key_timer = QTimer(self)
-        self._gripper_key_timer.setInterval(33)
-        self._gripper_key_timer.timeout.connect(self._update_gripper_keyboard_axes)
-        self._gripper_key_timer.start()
+        self._servo_wrist_pitch = 0.0
+        self._servo_wrist_yaw = 0.0
+        self._servo_wrist_ramp_rate = 1.25
+        self._servo_wrist_release_rate = 2.0
+        self._servo_wrist_last_update = time.monotonic()
+        self._t200_wrist_gain_shortcuts = {
+            Qt.Key.Key_BracketLeft: -1.0,
+            Qt.Key.Key_BracketRight: +1.0,
+        }
+        self._servo_wrist_timer = QTimer(self)
+        self._servo_wrist_timer.setInterval(33)
+        self._servo_wrist_timer.timeout.connect(self._update_servo_wrist_keyboard_axes)
+        self._servo_wrist_timer.start()
 
         self.pilot_svc = PilotPublisherService(
             endpoint=PILOT_PUB_ENDPOINT,
@@ -353,6 +360,7 @@ class MainWindow(QMainWindow):
                 stream_names = self.cam_mgr.list_available()
                 if stream_names:
                     self.video_panel = VideoTabs(self.cam_mgr, stream_names=stream_names)
+                    self.video_panel.set_layout_count(4)
                     self._reverse_camera_name = self._select_reverse_stream_name(stream_names)
                     self.video_panel.selectionChanged.connect(self._on_video_tab_changed)
                 else:
@@ -406,20 +414,20 @@ class MainWindow(QMainWindow):
         self._task_windows: list[QWidget] = []
 
 
-    def _gripper_keyboard_targets(self) -> tuple[float, float]:
-        # Latch the keyboard-commanded wrist position when no key is held,
+    def _servo_wrist_keyboard_targets(self) -> tuple[float, float]:
+        # Latch the keyboard-commanded servo wrist position when no key is held,
         # so releasing W/A/S/D keeps the wrist where it is instead of
         # springing back toward center. Holding a key again continues ramping
         # from the current commanded value.
-        pitch = self._gripper_key_pitch
-        yaw = self._gripper_key_yaw
-        if "W" in self._gripper_keys_down and "S" not in self._gripper_keys_down:
+        pitch = self._servo_wrist_pitch
+        yaw = self._servo_wrist_yaw
+        if "W" in self._servo_wrist_keys_down and "S" not in self._servo_wrist_keys_down:
             pitch = 1.0
-        elif "S" in self._gripper_keys_down and "W" not in self._gripper_keys_down:
+        elif "S" in self._servo_wrist_keys_down and "W" not in self._servo_wrist_keys_down:
             pitch = -1.0
-        if "D" in self._gripper_keys_down and "A" not in self._gripper_keys_down:
+        if "D" in self._servo_wrist_keys_down and "A" not in self._servo_wrist_keys_down:
             yaw = 1.0
-        elif "A" in self._gripper_keys_down and "D" not in self._gripper_keys_down:
+        elif "A" in self._servo_wrist_keys_down and "D" not in self._servo_wrist_keys_down:
             yaw = -1.0
         return pitch, yaw
 
@@ -431,23 +439,39 @@ class MainWindow(QMainWindow):
             return max(target, current - max_step)
         return current
 
-    def _update_gripper_keyboard_axes(self) -> None:
-        target_pitch, target_yaw = self._gripper_keyboard_targets()
+    def _update_servo_wrist_keyboard_axes(self) -> None:
+        target_pitch, target_yaw = self._servo_wrist_keyboard_targets()
         now = time.monotonic()
-        dt = max(0.0, min(0.1, now - self._gripper_key_last_update))
-        self._gripper_key_last_update = now
+        dt = max(0.0, min(0.1, now - self._servo_wrist_last_update))
+        self._servo_wrist_last_update = now
 
-        pitch_rate = self._gripper_key_ramp_rate if abs(target_pitch) > abs(self._gripper_key_pitch) else self._gripper_key_release_rate
-        yaw_rate = self._gripper_key_ramp_rate if abs(target_yaw) > abs(self._gripper_key_yaw) else self._gripper_key_release_rate
+        pitch_rate = self._servo_wrist_ramp_rate if abs(target_pitch) > abs(self._servo_wrist_pitch) else self._servo_wrist_release_rate
+        yaw_rate = self._servo_wrist_ramp_rate if abs(target_yaw) > abs(self._servo_wrist_yaw) else self._servo_wrist_release_rate
 
-        self._gripper_key_pitch = self._approach_axis(self._gripper_key_pitch, target_pitch, pitch_rate * dt)
-        self._gripper_key_yaw = self._approach_axis(self._gripper_key_yaw, target_yaw, yaw_rate * dt)
+        self._servo_wrist_pitch = self._approach_axis(self._servo_wrist_pitch, target_pitch, pitch_rate * dt)
+        self._servo_wrist_yaw = self._approach_axis(self._servo_wrist_yaw, target_yaw, yaw_rate * dt)
 
         try:
-            self.pilot_svc.set_aux_axis("gripper_pitch", self._gripper_key_pitch)
-            self.pilot_svc.set_aux_axis("gripper_yaw", self._gripper_key_yaw)
+            self.pilot_svc.set_aux_axis("gripper_pitch", self._servo_wrist_pitch)
+            self.pilot_svc.set_aux_axis("gripper_yaw", self._servo_wrist_yaw)
         except Exception:
             pass
+
+    def _adjust_t200_wrist_gain_from_keyboard(self, direction: float) -> None:
+        try:
+            step = float(self.pilot_svc.t200_wrist_gain_step()) * float(direction)
+        except Exception:
+            step = 0.0
+        if step == 0.0:
+            return
+        try:
+            changed = bool(self.pilot_svc.adjust_t200_wrist_gain(step))
+            gain = float(self.pilot_svc.current_t200_wrist_gain())
+        except Exception:
+            return
+        if changed:
+            pct = int(round(max(0.0, min(1.0, gain)) * 100.0))
+            self.statusBar().showMessage(f"T200 wrist gain: {pct}%  |  keys: [ / ]", 3000)
 
     def eventFilter(self, obj, event):
         try:
@@ -455,15 +479,20 @@ class MainWindow(QMainWindow):
             if et in (QEvent.Type.KeyPress, QEvent.Type.KeyRelease):
                 if hasattr(event, "isAutoRepeat") and event.isAutoRepeat():
                     return False
-                entry = self._gripper_keymap.get(event.key())
+                entry = self._servo_wrist_keymap.get(event.key())
                 if entry is not None:
                     _axis_name, _axis_value, label = entry
                     if et == QEvent.Type.KeyPress:
-                        self._gripper_keys_down.add(label)
+                        self._servo_wrist_keys_down.add(label)
                     else:
-                        self._gripper_keys_down.discard(label)
-                    self._gripper_key_last_update = time.monotonic()
-                    self._update_gripper_keyboard_axes()
+                        self._servo_wrist_keys_down.discard(label)
+                    self._servo_wrist_last_update = time.monotonic()
+                    self._update_servo_wrist_keyboard_axes()
+                    return False
+                if et == QEvent.Type.KeyPress:
+                    direction = self._t200_wrist_gain_shortcuts.get(event.key())
+                    if direction is not None:
+                        self._adjust_t200_wrist_gain_from_keyboard(direction)
                     return False
         except Exception:
             pass
@@ -494,17 +523,15 @@ class MainWindow(QMainWindow):
         except Exception:
             pass
 
-        # Camera tab switching (local UI only):
-        #   B -> next stream (to the right)
-        #   X -> previous stream (to the left)
+        # Controller-local video actions on the active pane:
+        #   X -> snapshot
+        #   B -> start/stop recording
         try:
             edges = (msg or {}).get("edges", {}) or {}
-            if self.video_panel is not None:
-                if edges.get("b") == "down":
-                    self.video_panel.next_stream()
-                if edges.get("x") == "down":
-                    self.video_panel.prev_stream()
-
+            if edges.get("x") == "down":
+                self._save_snapshot()
+            if edges.get("b") == "down":
+                self._toggle_video_recording()
         except Exception:
             pass
 
@@ -605,16 +632,8 @@ class MainWindow(QMainWindow):
         state = (status or {}).get('controller', 'unknown')
         if state == 'connected':
             name = (status or {}).get('name') or 'controller'
-            mg = (status or {}).get('max_gain', None)
             reverse_tag = " [REV]" if self._reverse_enabled else ""
-            if mg is None:
-                self._set_status(self._ctrl_lbl, f"Controller: OK ({name}){reverse_tag}")
-            else:
-                try:
-                    pct = int(round(max(0.0, min(1.0, float(mg))) * 100.0))
-                    self._set_status(self._ctrl_lbl, f"Controller: OK ({name}) [{pct}%]{reverse_tag}")
-                except Exception:
-                    self._set_status(self._ctrl_lbl, f"Controller: OK ({name}){reverse_tag}")
+            self._set_status(self._ctrl_lbl, f"Controller: OK ({name}){reverse_tag}")
         elif state == 'disconnected':
             err = (status or {}).get('error') or 'not connected'
             self._set_status(self._ctrl_lbl, f"Controller: - ({err})")
@@ -1275,3 +1294,41 @@ class MainWindow(QMainWindow):
             return
         vw.stop_recording()
         self.statusBar().showMessage("Video recording stopped", 3000)
+
+    def _start_video_recording(self):
+        vw = self._current_video_widget()
+        if vw is None:
+            return
+        if hasattr(vw, "is_recording") and vw.is_recording():
+            self.statusBar().showMessage("Video recording already active", 3000)
+            return
+        out_dir = self._record_dir or str(StreamRecorder.make_session_dir("recordings"))
+        target = vw.start_recording(out_dir=out_dir, basename=vw.stream_name, fps=30.0)
+        if target:
+            self.statusBar().showMessage(f"Video recording started -> {target}", 5000)
+        else:
+            self.statusBar().showMessage("Could not start video recording", 3000)
+
+    def _stop_video_recording(self):
+        vw = self._current_video_widget()
+        if vw is None:
+            return
+        if hasattr(vw, "is_recording") and not vw.is_recording():
+            self.statusBar().showMessage("Video recording is not active", 3000)
+            return
+        vw.stop_recording()
+        self.statusBar().showMessage("Video recording stopped", 3000)
+
+    def _toggle_video_recording(self):
+        vw = self._current_video_widget()
+        if vw is None:
+            self.statusBar().showMessage("No active camera available for recording", 3000)
+            return
+        try:
+            is_recording = bool(vw.is_recording())
+        except Exception:
+            is_recording = False
+        if is_recording:
+            self._stop_video_recording()
+        else:
+            self._start_video_recording()
