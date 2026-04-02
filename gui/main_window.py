@@ -42,7 +42,7 @@ from recording.stream_recorder import StreamRecorder
 from gui.video_tabs import VideoTabs
 from gui.sensor_panel import SensorPanel
 from gui.instruments import InstrumentPanel
-from gui.crab_result_dialog import CrabResultDialog
+from gui.crab_detection_window import CrabDetectionWindow
 
 
 class MainWindow(QMainWindow):
@@ -1266,26 +1266,20 @@ class MainWindow(QMainWindow):
             return
 
         try:
-            from crab_detector_cv import detection_summary_text, render_detection_views
-
             frame = vw.last_frame.copy()
-            detection_result, annotated_original, annotated_unwrapped = render_detection_views(frame)
-            if detection_result is None or annotated_original is None or annotated_unwrapped is None:
-                QMessageBox.warning(self, "Crab Detection", "Could not find the board or identify any crabs in this frame.")
-                return
+            stream_name = getattr(vw, "stream_name", None) or "Current stream"
 
-            dialog = CrabResultDialog(
-                detection_summary_text(detection_result),
-                annotated_original,
-                annotated_unwrapped,
-                parent=self,
+            window = CrabDetectionWindow(parent=self)
+            summary_text = window.load_frame(
+                frame,
+                source_label=f"Captured frame from {stream_name}",
             )
-            self._task_windows.append(dialog)
-            dialog.destroyed.connect(lambda *_: self._task_windows.remove(dialog) if dialog in self._task_windows else None)
-            dialog.show()
-            dialog.raise_()
-            dialog.activateWindow()
-            self.statusBar().showMessage(detection_summary_text(detection_result), 8000)
+            self._task_windows.append(window)
+            window.destroyed.connect(lambda *_: self._task_windows.remove(window) if window in self._task_windows else None)
+            window.show()
+            window.raise_()
+            window.activateWindow()
+            self.statusBar().showMessage(summary_text, 8000)
         except Exception as e:
             QMessageBox.critical(self, "Crab Detection", f"Crab detection failed:\n{e}")
 

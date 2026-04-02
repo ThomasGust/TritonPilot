@@ -15,6 +15,7 @@ import numpy as np
 from recording.video_recorder import VideoRecorder, save_snapshot
 from video.cam import RemoteCameraManager, RemoteCv2Camera
 from video.frame_correction import WaterCorrection
+from video.frame_rotation import rotate_frame
 from config import (
     WATER_CORRECTION_ZOOM,
     WATER_CORRECTION_K1,
@@ -41,6 +42,7 @@ class _VideoWorker(QThread):
         self._latest_frame: np.ndarray | None = None
         self._latest_seq: int = 0
         self._last_taken_seq: int = 0
+        self.rotation_deg: int = int(getattr(camera, "rotation_deg", 0))
 
     def run(self):
         while self._running:
@@ -51,6 +53,11 @@ class _VideoWorker(QThread):
                 if c is not None:
                     try:
                         frame = c.apply(frame)
+                    except Exception:
+                        pass
+                if self.rotation_deg:
+                    try:
+                        frame = rotate_frame(frame, self.rotation_deg)
                     except Exception:
                         pass
                 with self._frame_lock:

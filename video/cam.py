@@ -8,6 +8,7 @@ from config import VIDEO_RPC_ENDPOINT
 from network.net_select import parse_zmq_endpoint, choose_video_receive_ip
 
 from video.gst_receiver import ReceiverProcess, RxConfig
+from video.frame_rotation import normalize_rotation_deg
 from video.rov_streams import ROVStreams  # your class above
 
 logger = logging.getLogger(__name__)
@@ -44,6 +45,7 @@ class RemoteCv2Camera:
         self.codec = codec
         self.latency_ms = latency_ms
         self.channel_order = channel_order
+        self.rotation_deg = normalize_rotation_deg(stream_opts.get("rotation_deg", 0) if stream_opts else 0)
 
         # Populated if the ROV had to perform recovery actions (e.g., USB rebind)
         self.start_messages: list[str] = []
@@ -232,7 +234,11 @@ class RemoteCameraManager:
             "bind_receiver_to_host": bool(cfg.get("bind_receiver_to_host", True)),
         }
 
-        self.stream_defs = {s["name"]: s for s in cfg.get("streams", [])}
+        self.stream_defs = {}
+        for raw_stream in cfg.get("streams", []):
+            stream = dict(raw_stream)
+            stream["rotation_deg"] = normalize_rotation_deg(stream.get("rotation_deg", 0))
+            self.stream_defs[stream["name"]] = stream
         # If a stream def omits "enabled", assume True.
         self._opened: dict[str, RemoteCv2Camera] = {}
         # Serialize open/close across background connect workers. This avoids

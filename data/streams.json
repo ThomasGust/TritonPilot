@@ -1,11 +1,12 @@
 {
   "streams": [
     {
-      "name": "Front Left Camera",
-      "device": "/dev/v4l/by-path/*1.2.4*video-index2",
+      "name": "Downward Camera",
+      "device": "/dev/v4l/by-path/*1.2.1*video-index2",
       "width": 1920,
       "height": 1080,
       "fps": 30,
+      "rotation_deg": 0,
       "video_format": "h264",
       "h264_bitrate": 8000000,
       "h264_gop": 15,
@@ -14,11 +15,12 @@
       "enabled": true
     },
     {
-      "name": "Front Right Camera",
-      "device": "/dev/v4l/by-path/*1.2.6*video-index2",
+      "name": "Back Gripper Camera",
+      "device": "/dev/v4l/by-path/*1.2.4*video-index2",
       "width": 1920,
       "height": 1080,
       "fps": 30,
+      "rotation_deg": 0,
       "video_format": "h264",
       "h264_bitrate": 8000000,
       "h264_gop": 15,
@@ -27,11 +29,12 @@
       "enabled": true
     },
     {
-      "name": "Reverse Camera",
-      "device": "/dev/v4l/by-path/*1.2.5*video-index2",
+      "name": "Primary Driver Camera",
+      "device": "/dev/v4l/by-path/*1.2.3*video-index2",
       "width": 1920,
       "height": 1080,
       "fps": 30,
+      "rotation_deg": 0,
       "video_format": "h264",
       "h264_bitrate": 8000000,
       "h264_gop": 15,
@@ -40,11 +43,12 @@
       "enabled": true
     },
     {
-      "name": "Downward Camera",
-      "device": "/dev/v4l/by-path/*1.2.7*video-index2",
+      "name": "Arm Camera",
+      "device": "/dev/v4l/by-path/*1.2.6*video-index2",
       "width": 1920,
       "height": 1080,
       "fps": 30,
+      "rotation_deg": 0,
       "video_format": "h264",
       "h264_bitrate": 8000000,
       "h264_gop": 15,
