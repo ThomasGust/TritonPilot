@@ -41,6 +41,13 @@ def apply_modern_style(app: QApplication) -> None:
     QTabBar::tab { padding: 8px 12px; margin: 2px; border-radius: 10px; }
     QTabBar::tab:selected { background: #2a2a36; }
     QStatusBar { border-top: 1px solid #2a2a32; }
+    QStatusBar QLabel[tone="alert"] {
+        color: #ffb3b3;
+        font-weight: 700;
+    }
+    QStatusBar QLabel[tone="warn"] {
+        color: #ffe6ae;
+    }
     QLabel#summaryCard {
         background: #202028;
         border: 1px solid #2f2f3a;
@@ -62,6 +69,49 @@ def apply_modern_style(app: QApplication) -> None:
     QLabel#summaryHint {
         color: #b6bac8;
         padding: 2px 4px 6px 4px;
+    }
+    QWidget#videoLayoutBar {
+        background: transparent;
+        border: none;
+        padding: 0;
+    }
+    QWidget#videoControlGroup {
+        background: transparent;
+    }
+    QLabel#videoControlLabel {
+        min-width: 18px;
+        padding: 1px 4px;
+        border-radius: 6px;
+        color: #9aa4bf;
+        background: transparent;
+        font-weight: 600;
+    }
+    QLabel#videoControlLabel[active="true"] {
+        color: #ffffff;
+        background: #335fb6;
+    }
+    QComboBox#videoLayoutCombo,
+    QComboBox#videoPaneSelector {
+        padding: 2px 6px;
+        border: 1px solid #2a2a32;
+        border-radius: 6px;
+        background: #15161d;
+    }
+    QComboBox#videoPaneSelector[active="true"] {
+        border: 1px solid #4a78d8;
+    }
+    QFrame#videoPane {
+        background: #0f1015;
+        border: none;
+        border-radius: 2px;
+    }
+    QFrame#videoPane[active="true"] {
+        border: 1px solid #4a78d8;
+        background: #0f1015;
+    }
+    QLabel#videoPanePlaceholder {
+        color: #97a0b8;
+        padding: 8px;
     }
     QTableWidget { border: 1px solid #2a2a32; border-radius: 10px; gridline-color: #2a2a32; }
     QHeaderView::section { background: #202028; padding: 6px 8px; border: none; border-bottom: 1px solid #2a2a32; }

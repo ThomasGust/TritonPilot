@@ -141,9 +141,12 @@ class VideoWidget(QWidget):
         self.label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.label.setWordWrap(True)
         self.label.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
-        self.label.setMinimumSize(320, 240)
+        self.label.setMinimumSize(160, 90)
+        self.label.setMargin(0)
 
         lay = QVBoxLayout(self)
+        lay.setContentsMargins(0, 0, 0, 0)
+        lay.setSpacing(0)
         lay.addWidget(self.label)
 
         # Out-of-water lens correction (toggleable)
@@ -337,12 +340,16 @@ class VideoWidget(QWidget):
         h, w, ch = frame.shape
         bytes_per_line = ch * w
         image = QImage(frame.data, w, h, bytes_per_line, QImage.Format.Format_BGR888)
+        dpr = max(1.0, float(self.devicePixelRatioF()))
+        target_w = max(1, int(self.label.width() * dpr))
+        target_h = max(1, int(self.label.height() * dpr))
         pix = QPixmap.fromImage(image).scaled(
-            self.label.width(),
-            self.label.height(),
+            target_w,
+            target_h,
             Qt.AspectRatioMode.KeepAspectRatio,
-            Qt.TransformationMode.FastTransformation,
+            Qt.TransformationMode.SmoothTransformation,
         )
+        pix.setDevicePixelRatio(dpr)
         self.label.setPixmap(pix)
 
     def mouseDoubleClickEvent(self, event):

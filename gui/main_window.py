@@ -15,7 +15,6 @@ from PyQt6.QtWidgets import (
     QHBoxLayout,
     QVBoxLayout,
     QLabel,
-    QSizePolicy,
     QMessageBox,
 )
 from config import (
@@ -68,18 +67,6 @@ class MainWindow(QMainWindow):
         except Exception:
             pass
 
-    def _configure_info_label(self, lbl: QLabel, min_width: int) -> None:
-        try:
-            lbl.setMinimumWidth(int(min_width))
-            lbl.setWordWrap(True)
-            lbl.setMargin(10)
-            lbl.setObjectName("summaryCard")
-            lbl.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
-            lbl.setToolTip(lbl.text())
-            lbl.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
-        except Exception:
-            pass
-
     @staticmethod
     def _stream_name_matches(name: str | None, tokens: list[str]) -> bool:
         if not name:
@@ -123,12 +110,7 @@ class MainWindow(QMainWindow):
 
     def _refresh_drive_status(self) -> None:
         direction = "REVERSE" if self._reverse_enabled else "FORWARD"
-        parts = [f"Drive: {direction}", self._depth_hold_status_text]
-        if self._reverse_enabled:
-            if self._reverse_camera_name:
-                parts.append(f"Rear cam: {self._reverse_camera_name}")
-            else:
-                parts.append("Rear cam: not found")
+        parts = [f"Mode: {direction}", self._depth_hold_status_text]
         self._set_status(self._mode_lbl, " | ".join(parts))
         self._set_status_tone(self._mode_lbl, "alert" if self._reverse_enabled else None)
 
@@ -145,6 +127,8 @@ class MainWindow(QMainWindow):
             self._set_status_tone(self._video_lbl, None)
             return
 
+        visible = self.video_panel.visible_stream_names()
+
         st = vw.status()
         state = str(st.get("state") or "-")
         if state == "playing":
@@ -155,17 +139,22 @@ class MainWindow(QMainWindow):
         else:
             state_txt = state
 
-        parts = [f"Camera: {name}", state_txt]
+        if len(visible) > 1:
+            parts = [f"Cameras: {', '.join(visible)}", f"active: {name}", state_txt]
+        else:
+            parts = [f"Camera: {name}", state_txt]
         mismatch = False
         if self._reverse_enabled:
             if self._reverse_camera_name is None:
                 parts.append("reverse mode active; no rear camera matched")
                 mismatch = True
-            elif name != self._reverse_camera_name:
-                parts.append(f"reverse mode expects {self._reverse_camera_name}")
+            elif self._reverse_camera_name not in visible:
+                parts.append(f"reverse mode expects {self._reverse_camera_name} on screen")
                 mismatch = True
+            elif name == self._reverse_camera_name:
+                parts.append("rear pane active")
             else:
-                parts.append("reverse-aligned")
+                parts.append(f"rear visible: {self._reverse_camera_name}")
 
         self._set_status(self._video_lbl, " | ".join(parts))
         self._set_status_tone(self._video_lbl, "warn" if mismatch else None)
@@ -208,7 +197,7 @@ class MainWindow(QMainWindow):
             checked = not self._reverse_enabled
         self._set_reverse_mode(bool(checked))
 
-    def _on_video_tab_changed(self, _idx: int) -> None:
+    def _on_video_tab_changed(self, *_args) -> None:
         self._refresh_video_status()
 
     def __init__(self, streams_path: str, parent=None):
@@ -227,23 +216,23 @@ class MainWindow(QMainWindow):
         self._forward_restore_stream: str | None = None
         self._depth_hold_status_text: str = "Depth Hold: OFF"
 
-        self._link_lbl = QLabel("Link: (no data)")
+        self._link_lbl = QLabel("Heartbeat: (no data)")
         self.statusBar().addPermanentWidget(self._link_lbl)
 
         self._ctrl_lbl = QLabel("Controller: (starting)")
         self.statusBar().addPermanentWidget(self._ctrl_lbl)
 
-        self._mode_lbl = QLabel("Drive: FORWARD | Depth Hold: OFF")
-        self._video_lbl = QLabel("Camera: -")
         self._depth_lbl = QLabel("Depth: -")
-        self._power_lbl = QLabel("Power: -")
+        self.statusBar().addPermanentWidget(self._depth_lbl)
+
         self._gain_lbl = QLabel("Max Gain: 100%")
-        reverse_hint = f"Reverse toggle: {REVERSE_TOGGLE_SHORTCUT}"
-        if REVERSE_TOGGLE_BUTTON:
-            reverse_hint += f" | controller: {REVERSE_TOGGLE_BUTTON}"
-        self._hint_lbl = QLabel(
-            reverse_hint + " | Camera cycle: B/X | Gain: Y/A | Depth hold: RStick | Gripper: W/S pitch, A/D yaw"
-        )
+        self.statusBar().addPermanentWidget(self._gain_lbl)
+
+        self._mode_lbl = QLabel("Mode: FORWARD | Depth Hold: OFF")
+        self.statusBar().addPermanentWidget(self._mode_lbl, 1)
+
+        self._video_lbl = QLabel("Camera: -")
+        self._power_lbl = QLabel("Power: -")
 
         # quick depth readout (from external depth sensor)
         self._last_depth_ts = 0.0
@@ -261,7 +250,6 @@ class MainWindow(QMainWindow):
 
         # network status (tether vs wifi, local route to ROV, remote link state)
         self._net_lbl = QLabel("Net: -")
-        self.statusBar().addPermanentWidget(self._net_lbl)
         self._last_net_ts = 0.0
         self._last_net: dict = {}
         self._route_cache = {"ts": 0.0, "iface": None, "src_ip": None, "is_wifi": None, "err": None}
@@ -273,33 +261,20 @@ class MainWindow(QMainWindow):
         self._netdiag_thread = threading.Thread(target=self._netdiag_probe_loop, daemon=True)
         self._netdiag_thread.start()
 
-        # Keep the status bar compact; use the top summary strip for the verbose bits.
+        # Keep the piloting status bar compact and focused on the essentials.
         for _lbl, _w in [
             (self._link_lbl, 230),
             (self._ctrl_lbl, 220),
-            (self._net_lbl, 320),
+            (self._depth_lbl, 190),
+            (self._gain_lbl, 150),
+            (self._mode_lbl, 320),
         ]:
             try:
                 _lbl.setMinimumWidth(int(_w))
-                _lbl.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
                 _lbl.setToolTip(_lbl.text())
                 _lbl.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
             except Exception:
                 pass
-        for _lbl, _w in [
-            (self._mode_lbl, 280),
-            (self._video_lbl, 320),
-            (self._depth_lbl, 190),
-            (self._power_lbl, 220),
-            (self._gain_lbl, 150),
-        ]:
-            self._configure_info_label(_lbl, _w)
-        try:
-            self._hint_lbl.setWordWrap(True)
-            self._hint_lbl.setObjectName("summaryHint")
-            self._hint_lbl.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
-        except Exception:
-            pass
 
         self._link_timer = QTimer(self)
         self._link_timer.timeout.connect(self._update_link_status)
@@ -379,7 +354,7 @@ class MainWindow(QMainWindow):
                 if stream_names:
                     self.video_panel = VideoTabs(self.cam_mgr, stream_names=stream_names)
                     self._reverse_camera_name = self._select_reverse_stream_name(stream_names)
-                    self.video_panel.tabs.currentChanged.connect(self._on_video_tab_changed)
+                    self.video_panel.selectionChanged.connect(self._on_video_tab_changed)
                 else:
                     self.statusBar().showMessage("No enabled video streams in streams.json", 8000)
         except Exception as e:
@@ -393,31 +368,21 @@ class MainWindow(QMainWindow):
         root.setContentsMargins(8, 8, 8, 8)
         root.setSpacing(8)
 
-        summary = QWidget()
-        summary_lay = QHBoxLayout(summary)
-        summary_lay.setContentsMargins(0, 0, 0, 0)
-        summary_lay.setSpacing(8)
-        summary_lay.addWidget(self._mode_lbl, 3)
-        summary_lay.addWidget(self._video_lbl, 3)
-        summary_lay.addWidget(self._depth_lbl, 2)
-        summary_lay.addWidget(self._power_lbl, 2)
-        summary_lay.addWidget(self._gain_lbl, 1)
-        root.addWidget(summary, 0)
-        root.addWidget(self._hint_lbl, 0)
-
         outer = QHBoxLayout()
         outer.setContentsMargins(0, 0, 0, 0)
         outer.setSpacing(8)
         if self.video_panel is not None:
-            outer.addWidget(self.video_panel, 2)
-
-        # Right column: sensor table
-        right_col = QWidget()
-        right_lay = QVBoxLayout(right_col)
-        right_lay.setContentsMargins(0, 0, 0, 0)
-        right_lay.addWidget(self.instrument_panel, 0)
-        right_lay.addWidget(self.sensor_panel, 3)
-        outer.addWidget(right_col, 1)
+            outer.addWidget(self.video_panel, 1)
+        else:
+            # Keep the sensor/instrument widgets alive for data processing, but
+            # only surface them when video is unavailable so the main piloting
+            # view stays focused on cameras.
+            right_col = QWidget()
+            right_lay = QVBoxLayout(right_col)
+            right_lay.setContentsMargins(0, 0, 0, 0)
+            right_lay.addWidget(self.instrument_panel, 0)
+            right_lay.addWidget(self.sensor_panel, 3)
+            outer.addWidget(right_col, 1)
         root.addLayout(outer, 1)
 
         self.setCentralWidget(central)
@@ -812,7 +777,7 @@ class MainWindow(QMainWindow):
 
         self._link_state_last = status
 
-        parts = [f"Link: {status}"]
+        parts = [f"Heartbeat: {status}"]
         if hb_age is not None:
             armed = bool(self._last_hb.get("armed", False))
             pilot_age = self._last_hb.get("pilot_age", None)
@@ -1127,6 +1092,13 @@ class MainWindow(QMainWindow):
             3000,
         )
 
+    def _set_video_layout(self, pane_count: int) -> None:
+        if self.video_panel is None:
+            return
+        self.video_panel.set_layout_count(pane_count)
+        labels = {1: "single-camera", 2: "stacked dual-camera", 4: "quad-camera"}
+        self.statusBar().showMessage(f"Video layout set to {labels.get(int(pane_count), 'custom')} view", 3000)
+
     def _make_menu(self):
         bar = self.menuBar()
         file_menu = bar.addMenu("&File")
@@ -1154,6 +1126,12 @@ class MainWindow(QMainWindow):
         )
         water_act.toggled.connect(self._toggle_water_correction)
         view_menu.addAction(water_act)
+
+        layout_menu = view_menu.addMenu("Camera Layout")
+        for label, pane_count in [("Single Camera", 1), ("Stacked Dual Camera", 2), ("Quad Camera", 4)]:
+            act = QAction(label, self)
+            act.triggered.connect(lambda _checked=False, panes=pane_count: self._set_video_layout(panes))
+            layout_menu.addAction(act)
 
         crab_act = QAction("Crab Detection", self)
         crab_act.setToolTip("Capture the current stream frame and open side-by-side crab identification views.")
