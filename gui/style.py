@@ -113,6 +113,66 @@ def apply_modern_style(app: QApplication) -> None:
         color: #97a0b8;
         padding: 8px;
     }
+    QFrame#managementSectionCard {
+        border: 1px solid #2a2a32;
+        border-radius: 12px;
+        background: #16161b;
+    }
+    QLabel#managementSectionTitle {
+        font-size: 14px;
+        font-weight: 700;
+    }
+    QLabel#managementSectionSubtitle {
+        color: #b6bac8;
+    }
+    QLabel#managementMetaValue {
+        color: #d7dbe8;
+    }
+    QLabel#managementPill {
+        border-radius: 10px;
+        padding: 3px 10px;
+        font-weight: 700;
+        background: #2c3648;
+    }
+    QLabel#managementPill[tone="ok"] {
+        color: #d9ffea;
+        background: #204530;
+        border: 1px solid #2f7a4f;
+    }
+    QLabel#managementPill[tone="error"] {
+        color: #ffd9d9;
+        background: #4a2424;
+        border: 1px solid #995252;
+    }
+    QLabel#managementFeedback {
+        border-radius: 10px;
+        padding: 8px 10px;
+        background: #202028;
+        border: 1px solid #2f2f3a;
+    }
+    QLabel#managementFeedback[tone="ok"] {
+        color: #d9ffea;
+        background: #1f3526;
+        border: 1px solid #2f7a4f;
+    }
+    QLabel#managementFeedback[tone="error"] {
+        color: #ffd9d9;
+        background: #402222;
+        border: 1px solid #995252;
+    }
+    QLabel#managementFeedback[tone="info"] {
+        color: #dbe6ff;
+        background: #1f2c42;
+        border: 1px solid #4468aa;
+    }
+    QLabel#managementRestartBanner {
+        color: #ffe6ae;
+        background: #332b1d;
+        border: 1px solid #a07e34;
+        border-radius: 10px;
+        padding: 8px 10px;
+        font-weight: 700;
+    }
     QTableWidget { border: 1px solid #2a2a32; border-radius: 10px; gridline-color: #2a2a32; }
     QHeaderView::section { background: #202028; padding: 6px 8px; border: none; border-bottom: 1px solid #2a2a32; }
     QLabel { color: #ebebeb; }

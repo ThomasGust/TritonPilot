@@ -440,11 +440,17 @@ class VideoTabs(QWidget):
         idx = max(0, min(self._active_pane_index, visible_count - 1))
         return self._pane_streams[idx]
 
+    def layout_count(self) -> int:
+        return int(self._pane_count)
+
     def current_video_widget(self) -> VideoWidget | None:
         name = self.current_stream_name()
         if name is None:
             return None
         return self._widgets.get(name)
+
+    def set_layout_controls_enabled(self, enabled: bool) -> None:
+        self._layout_combo.setEnabled(bool(enabled))
 
     def has_stream(self, name: str | None) -> bool:
         if not name:

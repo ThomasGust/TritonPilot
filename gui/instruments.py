@@ -360,3 +360,100 @@ class InstrumentPanel(QWidget):
             except Exception:
                 pass
             return
+
+
+class HoldTestPanel(QWidget):
+    """Focused attitude/depth panel for stabilization and hold testing."""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+
+        title = QLabel("Hold Test")
+        title_font = QFont(title.font())
+        title_font.setBold(True)
+        title_font.setPointSize(max(12, title_font.pointSize() + 1))
+        title.setFont(title_font)
+
+        subtitle = QLabel("Single-camera piloting page with live attitude and depth telemetry.")
+        subtitle.setWordWrap(True)
+        subtitle.setStyleSheet("color: #b6bac8;")
+
+        self.att_card = _Card("Attitude")
+        self.attitude = AttitudeHorizonWidget()
+        self.attitude.setMinimumHeight(220)
+        self.att_card.body.addWidget(self.attitude)
+
+        self.depth_card = _Card("Depth")
+        self.depth_gauge = VerticalGaugeWidget(label="Depth", unit="m", vmin=0.0, vmax=30.0)
+        self.depth_readout = QLabel("Depth: -")
+        depth_font = QFont(self.depth_readout.font())
+        depth_font.setBold(True)
+        depth_font.setPointSize(max(13, depth_font.pointSize() + 2))
+        self.depth_readout.setFont(depth_font)
+        self.depth_readout.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.depth_meta = QLabel("-")
+        self.depth_meta.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.depth_meta.setWordWrap(True)
+        self.depth_card.body.addWidget(self.depth_gauge)
+        self.depth_card.body.addWidget(self.depth_readout)
+        self.depth_card.body.addWidget(self.depth_meta)
+
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(0, 0, 0, 0)
+        lay.setSpacing(8)
+        lay.addWidget(title)
+        lay.addWidget(subtitle)
+        lay.addWidget(self.att_card)
+        lay.addWidget(self.depth_card)
+        lay.addStretch(1)
+
+    def update_from_sensor(self, msg: dict) -> None:
+        typ = (msg or {}).get("type")
+        if typ == "attitude":
+            try:
+                rpy = (msg or {}).get("rpy_deg") or {}
+                health = (msg or {}).get("health") or {}
+                self.attitude.set_attitude(
+                    float(rpy.get("roll", 0.0) or 0.0),
+                    float(rpy.get("pitch", 0.0) or 0.0),
+                    None if rpy.get("yaw") is None else float(rpy.get("yaw") or 0.0),
+                    mode=str(health.get("mode", "-")),
+                    mag_qual=(None if health.get("mag_qual") is None else float(health.get("mag_qual"))),
+                )
+            except Exception:
+                pass
+            return
+
+        if typ != "external_depth":
+            return
+
+        try:
+            sensor = str((msg or {}).get("sensor", "depth"))
+            if (msg or {}).get("error"):
+                self.depth_gauge.set_value(None, state_text="ERR")
+                self.depth_readout.setText(f"Depth: {sensor} (ERR)")
+                self.depth_meta.setText(str((msg or {}).get("error")))
+                return
+
+            depth = (msg or {}).get("depth_m")
+            temp = (msg or {}).get("temperature_c")
+            pressure = (msg or {}).get("pressure_mbar")
+
+            self.depth_gauge.set_value(
+                None if depth is None else float(depth),
+                secondary=(f"{float(temp):.1f} C" if temp is not None else ""),
+            )
+
+            if depth is None:
+                self.depth_readout.setText(f"Depth: {sensor} -")
+            else:
+                self.depth_readout.setText(f"Depth: {sensor} {float(depth):.2f} m")
+
+            meta: list[str] = []
+            if pressure is not None:
+                meta.append(f"{float(pressure):.0f} mbar")
+            if temp is not None:
+                meta.append(f"{float(temp):.1f} C")
+            self.depth_meta.setText(" | ".join(meta) if meta else "-")
+        except Exception:
+            pass

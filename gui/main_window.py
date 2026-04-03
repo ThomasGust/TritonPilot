@@ -16,10 +16,13 @@ from PyQt6.QtWidgets import (
     QVBoxLayout,
     QLabel,
     QMessageBox,
+    QStackedWidget,
+    QTabBar,
 )
 from config import (
     PILOT_PUB_ENDPOINT,
     SENSOR_SUB_ENDPOINT,
+    MANAGEMENT_RPC_ENDPOINT,
     CONTROLLER_DEADZONE,
     CONTROLLER_INDEX,
     CONTROLLER_DEBUG,
@@ -40,8 +43,9 @@ from video.cam import RemoteCameraManager
 from recording.stream_recorder import StreamRecorder
 from gui.video_tabs import VideoTabs
 from gui.sensor_panel import SensorPanel
-from gui.instruments import InstrumentPanel
+from gui.instruments import InstrumentPanel, HoldTestPanel
 from gui.crab_detection_window import CrabDetectionWindow
+from gui.management_page import ManagementPage
 
 
 class MainWindow(QMainWindow):
@@ -200,6 +204,88 @@ class MainWindow(QMainWindow):
     def _on_video_tab_changed(self, *_args) -> None:
         self._refresh_video_status()
 
+    def _make_center_placeholder(self, text: str) -> QLabel:
+        lbl = QLabel(text)
+        lbl.setObjectName("videoPanePlaceholder")
+        lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        lbl.setWordWrap(True)
+        return lbl
+
+    def _attach_shared_video_panel(self, target_layout: QVBoxLayout | None) -> None:
+        if self.video_panel is None or target_layout is None:
+            return
+        try:
+            self.video_panel.setParent(None)
+        except Exception:
+            pass
+        target_layout.addWidget(self.video_panel, 1)
+
+    def _on_page_tab_changed(self, index: int) -> None:
+        index = int(index)
+        if index == 1:
+            self._set_center_page("hold_test")
+        elif index == 2:
+            self._set_center_page("management")
+        else:
+            self._set_center_page("pilot")
+
+    def _set_center_page(self, page_name: str, *, announce: bool = True) -> None:
+        page_name = str(page_name)
+        if page_name not in {"pilot", "hold_test", "management"}:
+            page_name = "pilot"
+        if page_name == getattr(self, "_active_page_name", "pilot"):
+            return
+
+        if page_name == "hold_test":
+            if self.video_panel is not None:
+                if self._active_page_name == "pilot":
+                    self._pilot_layout_count_restore = int(self.video_panel.layout_count())
+                self.video_panel.set_layout_controls_enabled(False)
+                self.video_panel.set_layout_count(1)
+                self._attach_shared_video_panel(self._hold_test_video_host_layout)
+            self._page_stack.setCurrentWidget(self._hold_test_page)
+        elif page_name == "management":
+            if self.video_panel is not None:
+                if self._active_page_name == "pilot":
+                    self._pilot_layout_count_restore = int(self.video_panel.layout_count())
+                try:
+                    self.video_panel.setParent(None)
+                except Exception:
+                    pass
+            self._page_stack.setCurrentWidget(self._management_page)
+            try:
+                self._management_page.refresh_state()
+            except Exception:
+                pass
+        else:
+            if self.video_panel is not None:
+                self.video_panel.set_layout_controls_enabled(True)
+                self._attach_shared_video_panel(self._pilot_video_host_layout)
+                self.video_panel.set_layout_count(int(self._pilot_layout_count_restore))
+            self._page_stack.setCurrentWidget(self._pilot_page)
+
+        self._active_page_name = page_name
+
+        prev = False
+        try:
+            prev = self._page_tabs.blockSignals(True)
+            tab_index = {"pilot": 0, "hold_test": 1, "management": 2}.get(page_name, 0)
+            self._page_tabs.setCurrentIndex(tab_index)
+        finally:
+            try:
+                self._page_tabs.blockSignals(prev)
+            except Exception:
+                pass
+
+        self._refresh_video_status()
+        if announce:
+            label = {
+                "pilot": "Pilot",
+                "hold_test": "Hold Test",
+                "management": "Vehicle Setup",
+            }.get(page_name, "Pilot")
+            self.statusBar().showMessage(f"Switched to {label} page", 3000)
+
     def __init__(self, streams_path: str, parent=None):
         super().__init__(parent)
         self.setWindowTitle("ROV Topside (PyQt6)")
@@ -334,6 +420,8 @@ class MainWindow(QMainWindow):
         # 2) sensor subscriber (ROV -> topside)
         self.sensor_panel = SensorPanel()
         self.instrument_panel = InstrumentPanel()
+        self.hold_test_panel = HoldTestPanel()
+        self.hold_test_panel.setMinimumWidth(320)
         self._sensor_ui_pending: dict[tuple[str, str], dict] = {}
         self._sensor_ui_pending_order: list[tuple[str, str]] = []
         self._sensor_ui_max_batch = 32
@@ -370,17 +458,39 @@ class MainWindow(QMainWindow):
             self.video_panel = None
             self.statusBar().showMessage(f"Video init failed (continuing without video): {e}", 12000)
 
+        self._pilot_layout_count_restore = 4
+        if self.video_panel is not None:
+            self._pilot_layout_count_restore = int(self.video_panel.layout_count())
+        self._active_page_name = ""
+
         # layout
         central = QWidget()
         root = QVBoxLayout(central)
         root.setContentsMargins(8, 8, 8, 8)
         root.setSpacing(8)
 
-        outer = QHBoxLayout()
-        outer.setContentsMargins(0, 0, 0, 0)
-        outer.setSpacing(8)
+        self._page_tabs = QTabBar()
+        self._page_tabs.setDocumentMode(True)
+        self._page_tabs.setExpanding(False)
+        self._page_tabs.addTab("Pilot")
+        self._page_tabs.addTab("Hold Test")
+        self._page_tabs.addTab("Vehicle Setup")
+        self._page_tabs.currentChanged.connect(self._on_page_tab_changed)
+        root.addWidget(self._page_tabs, 0)
+
+        self._page_stack = QStackedWidget()
+        root.addWidget(self._page_stack, 1)
+
+        self._pilot_page = QWidget()
+        pilot_outer = QHBoxLayout(self._pilot_page)
+        pilot_outer.setContentsMargins(0, 0, 0, 0)
+        pilot_outer.setSpacing(8)
+        self._pilot_video_host = QWidget()
+        self._pilot_video_host_layout = QVBoxLayout(self._pilot_video_host)
+        self._pilot_video_host_layout.setContentsMargins(0, 0, 0, 0)
+        self._pilot_video_host_layout.setSpacing(0)
         if self.video_panel is not None:
-            outer.addWidget(self.video_panel, 1)
+            pilot_outer.addWidget(self._pilot_video_host, 1)
         else:
             # Keep the sensor/instrument widgets alive for data processing, but
             # only surface them when video is unavailable so the main piloting
@@ -390,12 +500,38 @@ class MainWindow(QMainWindow):
             right_lay.setContentsMargins(0, 0, 0, 0)
             right_lay.addWidget(self.instrument_panel, 0)
             right_lay.addWidget(self.sensor_panel, 3)
-            outer.addWidget(right_col, 1)
-        root.addLayout(outer, 1)
+            pilot_outer.addWidget(right_col, 1)
+        self._page_stack.addWidget(self._pilot_page)
+
+        self._hold_test_page = QWidget()
+        hold_outer = QHBoxLayout(self._hold_test_page)
+        hold_outer.setContentsMargins(0, 0, 0, 0)
+        hold_outer.setSpacing(8)
+        self._hold_test_video_host = QWidget()
+        self._hold_test_video_host_layout = QVBoxLayout(self._hold_test_video_host)
+        self._hold_test_video_host_layout.setContentsMargins(0, 0, 0, 0)
+        self._hold_test_video_host_layout.setSpacing(0)
+        if self.video_panel is not None:
+            hold_outer.addWidget(self._hold_test_video_host, 3)
+        else:
+            self._hold_test_video_host_layout.addWidget(
+                self._make_center_placeholder("Video unavailable.\nThe Hold Test instruments will still follow telemetry."),
+                1,
+            )
+            hold_outer.addWidget(self._hold_test_video_host, 3)
+        hold_outer.addWidget(self.hold_test_panel, 1)
+        self._page_stack.addWidget(self._hold_test_page)
+
+        self._management_page = ManagementPage(endpoint=MANAGEMENT_RPC_ENDPOINT)
+        self._page_stack.addWidget(self._management_page)
+
+        if self.video_panel is not None:
+            self._attach_shared_video_panel(self._pilot_video_host_layout)
 
         self.setCentralWidget(central)
 
         self._make_menu()
+        self._set_center_page("pilot", announce=False)
         self._sync_reverse_action()
         self._refresh_drive_status()
         self._refresh_video_status()
@@ -737,6 +873,10 @@ class MainWindow(QMainWindow):
                 except Exception:
                     pass
                 try:
+                    self.hold_test_panel.update_from_sensor(msg)
+                except Exception:
+                    pass
+                try:
                     self.sensor_panel.upsert_sensor(msg)
                 except Exception:
                     pass
@@ -808,6 +948,10 @@ class MainWindow(QMainWindow):
             if self._hb_period_ema_s is not None:
                 parts.append(f"hb~{(1.0/max(1e-3,float(self._hb_period_ema_s))):.1f}Hz")
             parts.append("ARMED" if armed else "disarmed")
+            parts.append(
+                f"gripper_pitch={self._servo_wrist_pitch:+.2f} "
+                f"gripper_yaw={self._servo_wrist_yaw:+.2f}"
+            )
         elif sensor_age is not None:
             parts.append(f"sensor_age={sensor_age:.2f}s")
 
@@ -1114,6 +1258,22 @@ class MainWindow(QMainWindow):
     def _set_video_layout(self, pane_count: int) -> None:
         if self.video_panel is None:
             return
+        if self._active_page_name == "hold_test":
+            try:
+                pane_count = int(pane_count)
+            except Exception:
+                pane_count = 1
+            if pane_count in (1, 2, 4):
+                self._pilot_layout_count_restore = pane_count
+            self.video_panel.set_layout_controls_enabled(False)
+            self.video_panel.set_layout_count(1)
+            labels = {1: "single-camera", 2: "stacked dual-camera", 4: "quad-camera"}
+            target_label = labels.get(int(self._pilot_layout_count_restore), "custom")
+            self.statusBar().showMessage(
+                f"Hold Test stays single-camera. Pilot page layout saved as {target_label}.",
+                3500,
+            )
+            return
         self.video_panel.set_layout_count(pane_count)
         labels = {1: "single-camera", 2: "stacked dual-camera", 4: "quad-camera"}
         self.statusBar().showMessage(f"Video layout set to {labels.get(int(pane_count), 'custom')} view", 3000)
@@ -1207,6 +1367,10 @@ class MainWindow(QMainWindow):
             pass
         try:
             self.pilot_svc.stop()
+        except Exception:
+            pass
+        try:
+            self._management_page.shutdown()
         except Exception:
             pass
         if self.video_panel is not None:
