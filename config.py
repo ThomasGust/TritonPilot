@@ -97,6 +97,13 @@ CONTROLLER_WIN_BUTTONS = _parse_int_list_env("TRITON_CONTROLLER_WIN_BUTTONS", []
 DEPTH_HOLD_TOGGLE_BUTTON = os.environ.get("TRITON_DEPTH_HOLD_TOGGLE", "rstick").strip().lower()
 DEPTH_HOLD_DEFAULT = os.environ.get("TRITON_DEPTH_HOLD_DEFAULT", "0").strip().lower() in ("1", "true", "yes")
 
+# Attitude hold is also toggled topside and transmitted in PilotFrame.modes.
+# For current testing we keep this on a keyboard shortcut in the GUI (`L`) and
+# leave the controller-side button unbound by default.
+ATTITUDE_HOLD_TOGGLE_BUTTON = os.environ.get("TRITON_ATTITUDE_HOLD_TOGGLE", "").strip().lower()
+ATTITUDE_HOLD_DEFAULT = os.environ.get("TRITON_ATTITUDE_HOLD_DEFAULT", "0").strip().lower() in ("1", "true", "yes")
+ATTITUDE_HOLD_TOGGLE_SHORTCUT = os.environ.get("TRITON_ATTITUDE_HOLD_SHORTCUT", "L").strip() or "L"
+
 # Reverse drive mode rotates the pilot's horizontal-plane commands by 180
 # degrees so the controls still match when the operator swaps to a rear camera.
 # By default we expose this from the GUI/menu with the `R` shortcut and keep the
@@ -153,6 +160,7 @@ T200_WRIST_GAIN_STEP = float(os.environ.get("TRITON_T200_WRIST_GAIN_STEP", "0.05
 DEPTH_HOLD_WALK_DEADBAND = float(os.environ.get("TRITON_DEPTH_HOLD_WALK_DEADBAND", "0.08"))
 DEPTH_HOLD_WALK_RATE_MPS = float(os.environ.get("TRITON_DEPTH_HOLD_WALK_RATE_MPS", "0.60"))
 DEPTH_HOLD_SENSOR_STALE_S = float(os.environ.get("TRITON_DEPTH_HOLD_SENSOR_STALE_S", "2.0"))
+ATTITUDE_HOLD_SENSOR_STALE_S = float(os.environ.get("TRITON_ATTITUDE_HOLD_SENSOR_STALE_S", "1.0"))
 
 
 # ---------------------------------------------------------------------------

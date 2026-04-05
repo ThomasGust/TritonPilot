@@ -86,6 +86,8 @@ class PilotPublisherService:
 
         # --- modes / toggles ----------------------------------------------
         from config import (
+            ATTITUDE_HOLD_DEFAULT,
+            ATTITUDE_HOLD_TOGGLE_BUTTON,
             DEPTH_HOLD_TOGGLE_BUTTON,
             DEPTH_HOLD_DEFAULT,
             PILOT_MAX_GAIN_DEFAULT,
@@ -101,6 +103,7 @@ class PilotPublisherService:
         )
 
         self._depth_hold_toggle_button = str(DEPTH_HOLD_TOGGLE_BUTTON or "rstick").strip().lower()
+        self._attitude_hold_toggle_button = str(ATTITUDE_HOLD_TOGGLE_BUTTON or "").strip().lower()
         self._reverse_toggle_button = str(REVERSE_TOGGLE_BUTTON or "").strip().lower()
         self._mode_lock = threading.Lock()
 
@@ -126,6 +129,7 @@ class PilotPublisherService:
 
         self._modes = {
             "depth_hold": bool(DEPTH_HOLD_DEFAULT),
+            "attitude_hold": bool(ATTITUDE_HOLD_DEFAULT),
             "max_gain": float(self._max_gain),
             "reverse": bool(REVERSE_MODE_DEFAULT),
             "t200_wrist_gain": float(self._t200_wrist_gain),
@@ -267,15 +271,35 @@ class PilotPublisherService:
         self.set_reverse_enabled(new_state)
         return new_state
 
-    def _set_depth_hold_enabled(self, enabled: bool) -> bool:
+    def set_depth_hold_enabled(self, enabled: bool) -> bool:
         enabled = bool(enabled)
         with self._mode_lock:
             prev = bool(self._modes.get("depth_hold", False))
             self._modes["depth_hold"] = enabled
-        return prev != enabled
+        changed = prev != enabled
+        if changed:
+            self._emit_status(self._status_payload(controller="connected"))
+        return changed
 
-    def _toggle_depth_hold(self) -> bool:
-        return self._set_depth_hold_enabled(not bool(self.current_modes().get("depth_hold", False)))
+    def toggle_depth_hold(self) -> bool:
+        new_state = not bool(self.current_modes().get("depth_hold", False))
+        self.set_depth_hold_enabled(new_state)
+        return new_state
+
+    def set_attitude_hold_enabled(self, enabled: bool) -> bool:
+        enabled = bool(enabled)
+        with self._mode_lock:
+            prev = bool(self._modes.get("attitude_hold", False))
+            self._modes["attitude_hold"] = enabled
+        changed = prev != enabled
+        if changed:
+            self._emit_status(self._status_payload(controller="connected"))
+        return changed
+
+    def toggle_attitude_hold(self) -> bool:
+        new_state = not bool(self.current_modes().get("attitude_hold", False))
+        self.set_attitude_hold_enabled(new_state)
+        return new_state
 
     def _status_payload(self, controller: str | None = None, error: str | None = None) -> dict:
         state = str(controller or (self._last_status or {}).get("controller") or ("connected" if self._controller is not None else "unknown"))
@@ -474,8 +498,10 @@ class PilotPublisherService:
                     frame.edges = dict(edges)
 
                 if edges.get(self._depth_hold_toggle_button) == "down":
-                    if self._toggle_depth_hold():
-                        self._emit_status(self._status_payload(controller="connected"))
+                    self.toggle_depth_hold()
+
+                if self._attitude_hold_toggle_button and edges.get(self._attitude_hold_toggle_button) == "down":
+                    self.toggle_attitude_hold()
 
                 if self._reverse_toggle_button and edges.get(self._reverse_toggle_button) == "down":
                     self.toggle_reverse_enabled()

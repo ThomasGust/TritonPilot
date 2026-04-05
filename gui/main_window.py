@@ -20,6 +20,8 @@ from PyQt6.QtWidgets import (
     QTabBar,
 )
 from config import (
+    ATTITUDE_HOLD_TOGGLE_SHORTCUT,
+    ATTITUDE_HOLD_SENSOR_STALE_S,
     PILOT_PUB_ENDPOINT,
     SENSOR_SUB_ENDPOINT,
     MANAGEMENT_RPC_ENDPOINT,
@@ -114,7 +116,7 @@ class MainWindow(QMainWindow):
 
     def _refresh_drive_status(self) -> None:
         direction = "REVERSE" if self._reverse_enabled else "FORWARD"
-        parts = [f"Mode: {direction}", self._depth_hold_status_text]
+        parts = [f"Mode: {direction}", self._depth_hold_status_text, self._attitude_hold_status_text]
         self._set_status(self._mode_lbl, " | ".join(parts))
         self._set_status_tone(self._mode_lbl, "alert" if self._reverse_enabled else None)
 
@@ -313,6 +315,7 @@ class MainWindow(QMainWindow):
         self._reverse_camera_name: str | None = None
         self._forward_restore_stream: str | None = None
         self._depth_hold_status_text: str = "Depth Hold: OFF"
+        self._attitude_hold_status_text: str = "Att Hold: OFF"
 
         self._link_lbl = QLabel("Heartbeat: (no data)")
         self.statusBar().addPermanentWidget(self._link_lbl)
@@ -326,7 +329,7 @@ class MainWindow(QMainWindow):
         self._gain_lbl = QLabel("Max Gain: 100%")
         self.statusBar().addPermanentWidget(self._gain_lbl)
 
-        self._mode_lbl = QLabel("Mode: FORWARD | Depth Hold: OFF")
+        self._mode_lbl = QLabel("Mode: FORWARD | Depth Hold: OFF | Att Hold: OFF")
         self.statusBar().addPermanentWidget(self._mode_lbl, 1)
 
         self._video_lbl = QLabel("Camera: -")
@@ -387,6 +390,8 @@ class MainWindow(QMainWindow):
         self._last_ctrl_status: dict = {'controller': 'unknown'}
         self._last_pilot_msg_ts: float = 0.0
         self._last_pilot_msg: dict = {}
+        self._last_attitude_ts: float = 0.0
+        self._last_attitude: dict = {}
 
         # 1) pilot publisher (xbox -> ROV)
         # These keyboard controls drive the two-axis servo wrist. We keep the
@@ -408,6 +413,7 @@ class MainWindow(QMainWindow):
             Qt.Key.Key_BracketLeft: -1.0,
             Qt.Key.Key_BracketRight: +1.0,
         }
+        self._attitude_hold_shortcut_text = str(ATTITUDE_HOLD_TOGGLE_SHORTCUT or "L").strip() or "L"
         self._servo_wrist_timer = QTimer(self)
         self._servo_wrist_timer.setInterval(33)
         self._servo_wrist_timer.timeout.connect(self._update_servo_wrist_keyboard_axes)
@@ -539,7 +545,7 @@ class MainWindow(QMainWindow):
         self._attitude_page = self.attitude_inspector_page
         self._page_stack.addWidget(self._attitude_page)
 
-        self._management_page = ManagementPage(endpoint=MANAGEMENT_RPC_ENDPOINT)
+        self._management_page = ManagementPage(endpoint=MANAGEMENT_RPC_ENDPOINT, pilot_svc=self.pilot_svc)
         self._page_stack.addWidget(self._management_page)
 
         if self.video_panel is not None:
@@ -626,6 +632,16 @@ class MainWindow(QMainWindow):
             pct = int(round(max(0.0, min(1.0, gain)) * 100.0))
             self.statusBar().showMessage(f"T200 wrist gain: {pct}%  |  keys: [ / ]", 3000)
 
+    def _toggle_attitude_hold_from_keyboard(self) -> None:
+        try:
+            enabled = bool(self.pilot_svc.toggle_attitude_hold())
+        except Exception:
+            return
+        self.statusBar().showMessage(
+            f"Attitude hold {'ON' if enabled else 'OFF'}  |  key: {self._attitude_hold_shortcut_text.upper()}",
+            3000,
+        )
+
     def eventFilter(self, obj, event):
         try:
             et = event.type()
@@ -643,6 +659,13 @@ class MainWindow(QMainWindow):
                     self._update_servo_wrist_keyboard_axes()
                     return False
                 if et == QEvent.Type.KeyPress:
+                    try:
+                        shortcut_text = self._attitude_hold_shortcut_text.upper()
+                    except Exception:
+                        shortcut_text = "L"
+                    if event.text().upper() == shortcut_text:
+                        self._toggle_attitude_hold_from_keyboard()
+                        return False
                     direction = self._t200_wrist_gain_shortcuts.get(event.key())
                     if direction is not None:
                         self._adjust_t200_wrist_gain_from_keyboard(direction)
@@ -694,6 +717,7 @@ class MainWindow(QMainWindow):
         try:
             modes = (msg or {}).get("modes", {}) or {}
             dh = bool(modes.get("depth_hold", False))
+            ah = bool(modes.get("attitude_hold", False))
             reverse = bool(modes.get("reverse", False))
             if reverse != self._reverse_enabled:
                 self._reverse_enabled = reverse
@@ -770,8 +794,32 @@ class MainWindow(QMainWindow):
                 self._depth_hold_status_text = s
             else:
                 self._depth_hold_status_text = "Depth Hold: OFF"
+
+            if ah:
+                att_stale = (time.time() - float(self._last_attitude_ts)) > float(ATTITUDE_HOLD_SENSOR_STALE_S)
+                rpy = ((self._last_attitude or {}).get("rpy_deg") or {})
+                pitch = rpy.get("pitch", None)
+                roll = rpy.get("roll", None)
+                pr_bits: list[str] = []
+                try:
+                    if pitch is not None:
+                        pr_bits.append(f"p {float(pitch):+.1f}")
+                except Exception:
+                    pass
+                try:
+                    if roll is not None:
+                        pr_bits.append(f"r {float(roll):+.1f}")
+                except Exception:
+                    pass
+                details = " ".join(pr_bits) if pr_bits else "telemetry -"
+                self._attitude_hold_status_text = f"Att Hold: {details}"
+                if att_stale:
+                    self._attitude_hold_status_text += " [ATT STALE]"
+            else:
+                self._attitude_hold_status_text = "Att Hold: OFF"
         except Exception:
             self._depth_hold_status_text = "Depth Hold: -"
+            self._attitude_hold_status_text = "Att Hold: -"
         self._refresh_drive_status()
         self._refresh_video_status()
 
@@ -816,6 +864,10 @@ class MainWindow(QMainWindow):
             self._last_net = msg
         else:
             self._last_sensor_ts = time.time()
+
+            if typ == "attitude":
+                self._last_attitude_ts = time.time()
+                self._last_attitude = dict(msg or {})
 
             # Update a compact depth readout in the status bar.
             if typ == "external_depth":

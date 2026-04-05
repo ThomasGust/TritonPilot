@@ -133,3 +133,23 @@ def test_t200_wrist_gain_is_exposed_in_modes(monkeypatch):
     assert "t200_wrist_gain" in svc.current_modes()
     assert svc.adjust_t200_wrist_gain(-svc.t200_wrist_gain_step()) is True
     assert svc.current_t200_wrist_gain() < start_gain
+
+
+def test_hold_modes_are_exposed_and_toggleable(monkeypatch):
+    monkeypatch.setattr("input.pilot_service.time.sleep", lambda *_args, **_kwargs: None)
+
+    svc = PilotPublisherService(endpoint="inproc://hold_mode_test", rate_hz=30.0, deadzone=0.0, debug=False)
+
+    assert "depth_hold" in svc.current_modes()
+    assert "attitude_hold" in svc.current_modes()
+    assert svc.current_modes()["depth_hold"] is False
+    assert svc.current_modes()["attitude_hold"] is False
+
+    assert svc.toggle_depth_hold() is True
+    assert svc.current_modes()["depth_hold"] is True
+
+    assert svc.toggle_attitude_hold() is True
+    assert svc.current_modes()["attitude_hold"] is True
+
+    assert svc.set_attitude_hold_enabled(False) is True
+    assert svc.current_modes()["attitude_hold"] is False
