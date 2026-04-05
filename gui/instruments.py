@@ -524,6 +524,33 @@ class AttitudeInspectorPage(QWidget):
         self.history_chart = AttitudeHistoryChartWidget(window_seconds=20.0)
         self.history_card.body.addWidget(self.history_chart)
 
+        self.mag_card = _Card("Mag Diagnostics")
+        mag_grid = QGridLayout()
+        mag_grid.setContentsMargins(0, 0, 0, 0)
+        mag_grid.setHorizontalSpacing(12)
+        mag_grid.setVerticalSpacing(4)
+        self._mag_labels: dict[str, QLabel] = {}
+        for row, (label_text, key) in enumerate(
+            (
+                ("Selected Source", "selected_source"),
+                ("Yaw Source", "yaw_source"),
+                ("AK Heading", "ak_heading"),
+                ("MMC Heading", "mmc_heading"),
+                ("Heading Delta", "heading_delta"),
+                ("Vector Angle", "body_angle"),
+                ("AK Norm", "ak_norm"),
+                ("MMC Norm", "mmc_norm"),
+            )
+        ):
+            label = QLabel(label_text)
+            label.setStyleSheet("color: #b6bac8;")
+            value = QLabel("-")
+            value.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+            mag_grid.addWidget(label, row, 0)
+            mag_grid.addWidget(value, row, 1)
+            self._mag_labels[key] = value
+        self.mag_card.body.addLayout(mag_grid)
+
         self.record_card = _Card("Recorder")
         controls = QHBoxLayout()
         controls.setContentsMargins(0, 0, 0, 0)
@@ -549,6 +576,7 @@ class AttitudeInspectorPage(QWidget):
         lay.addWidget(subtitle)
         lay.addWidget(self.record_card)
         lay.addWidget(self.att_card)
+        lay.addWidget(self.mag_card)
         lay.addWidget(self.history_card, 1)
 
     def _toggle_recording(self) -> None:
@@ -593,6 +621,31 @@ class AttitudeInspectorPage(QWidget):
     def shutdown(self) -> None:
         self._stop_recording()
 
+    @staticmethod
+    def _fmt_diag_num(value, unit: str = "", *, decimals: int = 1) -> str:
+        try:
+            text = f"{float(value):.{int(decimals)}f}"
+        except Exception:
+            return "-"
+        if unit:
+            return f"{text} {unit}"
+        return text
+
+    def _update_mag_debug(self, msg: dict) -> None:
+        health = (msg or {}).get("health") or {}
+        mag_debug = (msg or {}).get("mag_debug") or {}
+        ak = mag_debug.get("ak09915") or {}
+        mmc = mag_debug.get("mmc5983") or {}
+
+        self._mag_labels["selected_source"].setText(str(mag_debug.get("selected_source", "-")))
+        self._mag_labels["yaw_source"].setText(str(health.get("yaw_source", "-")))
+        self._mag_labels["ak_heading"].setText(self._fmt_diag_num(ak.get("heading_deg"), "deg"))
+        self._mag_labels["mmc_heading"].setText(self._fmt_diag_num(mmc.get("heading_deg"), "deg"))
+        self._mag_labels["heading_delta"].setText(self._fmt_diag_num(mag_debug.get("heading_delta_deg"), "deg"))
+        self._mag_labels["body_angle"].setText(self._fmt_diag_num(mag_debug.get("body_angle_deg"), "deg"))
+        self._mag_labels["ak_norm"].setText(self._fmt_diag_num(ak.get("norm_uT"), "uT"))
+        self._mag_labels["mmc_norm"].setText(self._fmt_diag_num(mmc.get("norm_uT"), "uT"))
+
     def update_from_sensor(self, msg: dict) -> None:
         if (msg or {}).get("type") != "attitude":
             return
@@ -608,6 +661,7 @@ class AttitudeInspectorPage(QWidget):
 
             self.attitude.set_attitude(roll, pitch, yaw, mode=mode, mag_qual=mag_qual)
             self.history_chart.add_sample(now, roll, pitch, yaw)
+            self._update_mag_debug(msg)
 
             if self._record_fh is not None:
                 elapsed = 0.0 if self._record_started_ts is None else max(0.0, now - self._record_started_ts)
