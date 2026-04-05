@@ -67,6 +67,58 @@ def test_remote_camera_manager_normalizes_rotation_from_config():
     assert mgr.stream_defs["Test Camera"]["rotation_deg"] == 270
 
 
+def test_remote_camera_manager_uses_default_pane_order_for_available_streams():
+    cfg = json.dumps(
+        {
+            "default_pane_order": ["Arm Camera", "Primary Camera", "Disabled Camera"],
+            "streams": [
+                {
+                    "name": "Primary Camera",
+                    "device": "/dev/video0",
+                    "width": 640,
+                    "height": 480,
+                    "fps": 30,
+                    "enabled": True,
+                },
+                {
+                    "name": "Downward Camera",
+                    "device": "/dev/video1",
+                    "width": 640,
+                    "height": 480,
+                    "fps": 30,
+                    "enabled": True,
+                },
+                {
+                    "name": "Arm Camera",
+                    "device": "/dev/video2",
+                    "width": 640,
+                    "height": 480,
+                    "fps": 30,
+                    "enabled": True,
+                },
+                {
+                    "name": "Disabled Camera",
+                    "device": "/dev/video3",
+                    "width": 640,
+                    "height": 480,
+                    "fps": 30,
+                    "enabled": False,
+                },
+            ]
+        }
+    )
+
+    with patch(
+        "builtins.open",
+        side_effect=lambda path, mode="r", *args, **kwargs: (
+            io.StringIO(cfg) if path == "ordered_streams.json" else REAL_OPEN(path, mode, *args, **kwargs)
+        ),
+    ):
+        mgr = RemoteCameraManager("ordered_streams.json")
+
+    assert mgr.list_available() == ["Arm Camera", "Primary Camera", "Downward Camera"]
+
+
 def test_remote_camera_manager_rejects_invalid_rotation():
     cfg = json.dumps(
         {

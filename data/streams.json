@@ -1,8 +1,14 @@
 {
+  "default_pane_order": [
+    "Primary Camera",
+    "Back Gripper Camera",
+    "Arm Camera",
+    "Downward Camera"
+  ],
   "streams": [
     {
-      "name": "Downward Camera",
-      "device": "/dev/v4l/by-path/*1.2.1*video-index2",
+      "name": "Primary Camera",
+      "device": "/dev/v4l/by-path/*1.2.3*video-index2",
       "width": 1920,
       "height": 1080,
       "fps": 30,
@@ -11,10 +17,10 @@
       "h264_bitrate": 8000000,
       "h264_gop": 15,
       "latency_ms": 25,
-      "port": 5000,
+      "port": 5001,
       "enabled": true
     },
-    {
+        {
       "name": "Back Gripper Camera",
       "device": "/dev/v4l/by-path/*1.2.4*video-index2",
       "width": 1920,
@@ -28,9 +34,9 @@
       "port": 5003,
       "enabled": true
     },
-    {
-      "name": "Primary Driver Camera",
-      "device": "/dev/v4l/by-path/*1.2.3*video-index2",
+        {
+      "name": "Downward Camera",
+      "device": "/dev/v4l/by-path/*1.2.1*video-index2",
       "width": 1920,
       "height": 1080,
       "fps": 30,
@@ -39,7 +45,7 @@
       "h264_bitrate": 8000000,
       "h264_gop": 15,
       "latency_ms": 25,
-      "port": 5001,
+      "port": 5000,
       "enabled": true
     },
     {

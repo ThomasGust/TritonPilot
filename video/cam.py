@@ -239,6 +239,12 @@ class RemoteCameraManager:
             stream = dict(raw_stream)
             stream["rotation_deg"] = normalize_rotation_deg(stream.get("rotation_deg", 0))
             self.stream_defs[stream["name"]] = stream
+        requested_pane_order = cfg.get("default_pane_order", []) or []
+        self.default_pane_order = [
+            str(name).strip()
+            for name in requested_pane_order
+            if str(name).strip() in self.stream_defs
+        ]
         # If a stream def omits "enabled", assume True.
         self._opened: dict[str, RemoteCv2Camera] = {}
         # Serialize open/close across background connect workers. This avoids
@@ -246,11 +252,20 @@ class RemoteCameraManager:
         self._mgr_lock = threading.RLock()
 
     def list_available(self):
-        names = []
-        for name, s in self.stream_defs.items():
-            if s.get('enabled', True):
-                names.append(name)
-        return names
+        enabled_names = [
+            name
+            for name, s in self.stream_defs.items()
+            if s.get('enabled', True)
+        ]
+        ordered_names = [
+            name
+            for name in self.default_pane_order
+            if name in enabled_names
+        ]
+        for name in enabled_names:
+            if name not in ordered_names:
+                ordered_names.append(name)
+        return ordered_names
 
     def open(self, name: str) -> RemoteCv2Camera:
         with self._mgr_lock:

@@ -109,6 +109,22 @@ def apply_modern_style(app: QApplication) -> None:
         border: 1px solid #4a78d8;
         background: #0f1015;
     }
+    QLabel#videoRecordBadge {
+        color: #fff4f4;
+        background: rgba(158, 28, 28, 224);
+        border: 1px solid rgba(255, 132, 132, 210);
+        border-radius: 12px;
+        padding: 4px 10px;
+        font-weight: 700;
+    }
+    QLabel#videoSnapshotBadge {
+        color: #f7fbff;
+        background: rgba(39, 72, 118, 224);
+        border: 1px solid rgba(140, 188, 255, 210);
+        border-radius: 12px;
+        padding: 4px 10px;
+        font-weight: 700;
+    }
     QLabel#videoPanePlaceholder {
         color: #97a0b8;
         padding: 8px;

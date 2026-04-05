@@ -112,6 +112,7 @@ class VideoWidget(QWidget):
         super().__init__(parent)
         self.manager = manager
         self.stream_name = stream_name
+        self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
 
         self.camera: RemoteCv2Camera | None = None
         self.worker: _VideoWorker | None = None
@@ -122,6 +123,10 @@ class VideoWidget(QWidget):
         self.frame_buffer: deque[np.ndarray] = deque(maxlen=1)
         self._connected_ts: float = 0.0
         self._rec: VideoRecorder | None = None
+        self._record_started_ts: float | None = None
+        self._snapshot_indicator_until_ts: float = 0.0
+        self._snapshot_indicator_text: str = "SNAP"
+        self._snapshot_indicator_duration_s: float = 1.2
 
         # state
         self._state: str = "waiting"  # waiting|connecting|playing|stalled
@@ -149,6 +154,16 @@ class VideoWidget(QWidget):
         lay.setSpacing(0)
         lay.addWidget(self.label)
 
+        self._record_badge = QLabel("REC 00:00", self)
+        self._record_badge.setObjectName("videoRecordBadge")
+        self._record_badge.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
+        self._record_badge.hide()
+
+        self._snapshot_badge = QLabel(self._snapshot_indicator_text, self)
+        self._snapshot_badge.setObjectName("videoSnapshotBadge")
+        self._snapshot_badge.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
+        self._snapshot_badge.hide()
+
         # Out-of-water lens correction (toggleable)
         self._correction: WaterCorrection | None = None
         self._correction_enabled: bool = False
@@ -159,6 +174,7 @@ class VideoWidget(QWidget):
 
         # kick off first attempt immediately (avoid waiting for the next timer tick)
         self._start_connect()
+        self._refresh_capture_indicators()
 
     def _show_message(self, msg: str, *, clear_pixmap: bool | None = None) -> None:
         """Show status text reliably.
@@ -208,6 +224,53 @@ class VideoWidget(QWidget):
 
     def is_recording(self) -> bool:
         return self._rec is not None
+
+    def _format_elapsed(self, elapsed_s: float) -> str:
+        elapsed_s = max(0, int(elapsed_s))
+        minutes, seconds = divmod(elapsed_s, 60)
+        hours, minutes = divmod(minutes, 60)
+        if hours > 0:
+            return f"{hours:d}:{minutes:02d}:{seconds:02d}"
+        return f"{minutes:02d}:{seconds:02d}"
+
+    def _layout_capture_badges(self) -> None:
+        margin = 10
+        for badge, x_mode in (
+            (self._record_badge, "left"),
+            (self._snapshot_badge, "right"),
+        ):
+            if not badge.isVisible():
+                continue
+            badge.adjustSize()
+            y = margin
+            if x_mode == "left":
+                x = margin
+            else:
+                x = max(margin, self.width() - badge.width() - margin)
+            badge.move(x, y)
+            badge.raise_()
+
+    def _refresh_capture_indicators(self) -> None:
+        now = time.time()
+
+        if self._record_started_ts is not None and self._rec is not None:
+            self._record_badge.setText(f"REC {self._format_elapsed(now - self._record_started_ts)}")
+            self._record_badge.show()
+        else:
+            self._record_badge.hide()
+
+        if self._snapshot_indicator_until_ts > now:
+            self._snapshot_badge.setText(self._snapshot_indicator_text)
+            self._snapshot_badge.show()
+        else:
+            self._snapshot_badge.hide()
+
+        self._layout_capture_badges()
+
+    def _flash_snapshot_indicator(self, text: str = "SNAP") -> None:
+        self._snapshot_indicator_text = str(text or "SNAP")
+        self._snapshot_indicator_until_ts = time.time() + self._snapshot_indicator_duration_s
+        self._refresh_capture_indicators()
 
     # --- connection / recovery ---
     def _schedule_retry(self, delay_s: float):
@@ -320,6 +383,8 @@ class VideoWidget(QWidget):
             if now >= self._next_retry_ts:
                 self._start_connect()
 
+        self._refresh_capture_indicators()
+
     # --- frames ---
     def _on_frame(self, frame: np.ndarray):
         self.last_frame = frame
@@ -362,6 +427,7 @@ class VideoWidget(QWidget):
         except Exception:
             pass
         super().mouseDoubleClickEvent(event)
+
     # --- recording / snapshot ---
     def start_recording(self, out_dir: str | None = None, basename: str | None = None, fps: float = 30.0) -> str:
         """Start recording the currently displayed stream.
@@ -385,6 +451,8 @@ class VideoWidget(QWidget):
 
         self._rec = VideoRecorder(out_file, fps=fps)
         target = self._rec.start()
+        self._record_started_ts = time.time()
+        self._refresh_capture_indicators()
         return str(target)
 
     def stop_recording(self) -> None:
@@ -393,6 +461,8 @@ class VideoWidget(QWidget):
                 self._rec.stop()
             finally:
                 self._rec = None
+                self._record_started_ts = None
+                self._refresh_capture_indicators()
 
     def save_snapshot(self, out_dir: str | None = None, basename: str | None = None) -> str | None:
         """Save the most recent frame as a PNG. Returns path or None if no frame yet."""
@@ -413,7 +483,10 @@ class VideoWidget(QWidget):
         except Exception:
             return None
 
-        return str(out_path) if out_path.exists() else None
+        if out_path.exists():
+            self._flash_snapshot_indicator("SNAP")
+            return str(out_path)
+        return None
 
 
     # --- lifecycle ---
@@ -457,6 +530,8 @@ class VideoWidget(QWidget):
                 # keep whatever error text we already set
                 pass
 
+        self._refresh_capture_indicators()
+
     def closeEvent(self, event):
         try:
             self._tick_timer.stop()
@@ -464,3 +539,7 @@ class VideoWidget(QWidget):
             pass
         self.shutdown(release_only=True)
         super().closeEvent(event)
+
+    def resizeEvent(self, event) -> None:
+        super().resizeEvent(event)
+        self._layout_capture_badges()
