@@ -13,7 +13,7 @@ from network.zmq_hotplug import apply_hotplug_opts
 class ROVManagementRPC:
     """Small REQ/REP client for the ROV management service."""
 
-    def __init__(self, endpoint: str = MANAGEMENT_RPC_ENDPOINT, timeout_ms: int = 3000):
+    def __init__(self, endpoint: str = MANAGEMENT_RPC_ENDPOINT, timeout_ms: int = 8000):
         self.ctx = zmq.Context.instance()
         self.endpoint = str(endpoint)
         self.timeout_ms = int(timeout_ms)
@@ -97,7 +97,7 @@ class ManagementRpcService:
         endpoint: str = MANAGEMENT_RPC_ENDPOINT,
         on_result: Optional[Callable[[dict], None]] = None,
         *,
-        timeout_ms: int = 3000,
+        timeout_ms: int = 8000,
     ):
         self.endpoint = str(endpoint)
         self.on_result = on_result
