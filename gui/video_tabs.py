@@ -74,6 +74,9 @@ class VideoTabs(QWidget):
         super().__init__(parent)
         self.manager = manager
         self.stream_names = list(stream_names)
+        configured_order = list(getattr(manager, "default_pane_order", []) or [])
+        self._config_default_pane_order = [name for name in configured_order if name in self.stream_names]
+        self._config_order_locked = bool(self._config_default_pane_order)
         self._water_correction_enabled: bool = False
         self._settings = QSettings("TritonPilot", "ROVTopside")
 
@@ -193,10 +196,15 @@ class VideoTabs(QWidget):
         except Exception:
             self._pane_count = 4
 
-        for idx in range(len(self._pane_streams)):
-            raw = self._settings.value(f"video/pane_stream_{idx}", None)
-            name = str(raw).strip() if raw is not None else ""
-            self._pane_streams[idx] = name if name in self.stream_names else None
+        if self._config_order_locked:
+            seeded = list(self._config_default_pane_order)
+            for idx in range(len(self._pane_streams)):
+                self._pane_streams[idx] = seeded[idx] if idx < len(seeded) else None
+        else:
+            for idx in range(len(self._pane_streams)):
+                raw = self._settings.value(f"video/pane_stream_{idx}", None)
+                name = str(raw).strip() if raw is not None else ""
+                self._pane_streams[idx] = name if name in self.stream_names else None
 
         try:
             self._active_pane_index = max(0, min(3, int(self._settings.value("video/active_pane", 0))))
