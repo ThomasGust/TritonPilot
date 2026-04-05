@@ -17,6 +17,7 @@ from PyQt6.QtWidgets import (
     QHBoxLayout,
     QPushButton,
     QProgressBar,
+    QScrollArea,
     QSizePolicy,
 )
 from network.management_rpc import ManagementRpcService
@@ -821,6 +822,7 @@ class HoldTestPanel(QWidget):
         self._runtime_request_pending = False
         self._svc = ManagementRpcService(endpoint=self._endpoint, on_result=self._on_rpc_result_from_thread)
         self._svc.start()
+        self.setMinimumWidth(520)
 
         title = QLabel("Hold Test")
         title_font = QFont(title.font())
@@ -888,7 +890,9 @@ class HoldTestPanel(QWidget):
                 ("Depth Debug", "runtime_depth_debug"),
                 ("Attitude Hold Runtime", "runtime_attitude_hold"),
                 ("Attitude Sensor", "runtime_attitude_sensor"),
-                ("Attitude Debug", "runtime_attitude_debug"),
+                ("Attitude Targets", "runtime_attitude_target"),
+                ("Pitch Axis Debug", "runtime_attitude_pitch_debug"),
+                ("Roll Axis Debug", "runtime_attitude_roll_debug"),
             ]
         ):
             label = QLabel(label_text)
@@ -919,7 +923,8 @@ class HoldTestPanel(QWidget):
         self.depth_card.body.addWidget(self.depth_readout)
         self.depth_card.body.addWidget(self.depth_meta)
 
-        lay = QVBoxLayout(self)
+        content = QWidget()
+        lay = QVBoxLayout(content)
         lay.setContentsMargins(0, 0, 0, 0)
         lay.setSpacing(8)
         lay.addWidget(title)
@@ -929,6 +934,17 @@ class HoldTestPanel(QWidget):
         lay.addWidget(self.att_card)
         lay.addWidget(self.depth_card)
         lay.addStretch(1)
+
+        scroll = QScrollArea(self)
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.Shape.NoFrame)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        scroll.setWidget(content)
+
+        root = QVBoxLayout(self)
+        root.setContentsMargins(0, 0, 0, 0)
+        root.setSpacing(0)
+        root.addWidget(scroll)
 
         self.rpc_result_sig.connect(self._handle_rpc_result)
         self._runtime_timer = QTimer(self)
@@ -1043,7 +1059,13 @@ class HoldTestPanel(QWidget):
             )
         )
         self._runtime_labels["runtime_attitude_sensor"].setText(self._format_attitude_sensor(attitude_sensor))
-        self._runtime_labels["runtime_attitude_debug"].setText(self._format_attitude_debug(attitude_status))
+        self._runtime_labels["runtime_attitude_target"].setText(self._format_attitude_targets(attitude_hold))
+        self._runtime_labels["runtime_attitude_pitch_debug"].setText(
+            self._format_attitude_axis_debug(dict(attitude_status.get("pitch") or {}))
+        )
+        self._runtime_labels["runtime_attitude_roll_debug"].setText(
+            self._format_attitude_axis_debug(dict(attitude_status.get("roll") or {}))
+        )
 
     @staticmethod
     def _fmt_bool(value) -> str:
@@ -1123,25 +1145,28 @@ class HoldTestPanel(QWidget):
         sample_age = sensor.get("sample_age_s")
         if sample_age is not None:
             parts.append(f"sample age {self._fmt_num(sample_age, 's', decimals=2)}")
+        stream_age = sensor.get("stream_age_s")
+        if stream_age is not None:
+            parts.append(f"stream age {self._fmt_num(stream_age, 's', decimals=2)}")
         return " | ".join(parts) if parts else "-"
 
-    def _format_attitude_debug(self, status: dict) -> str:
-        pitch = dict(status.get("pitch") or {})
-        roll = dict(status.get("roll") or {})
+    def _format_attitude_axis_debug(self, axis_state: dict) -> str:
         parts: list[str] = []
-        for axis_name, axis_state in (("pitch", pitch), ("roll", roll)):
-            axis_parts: list[str] = []
-            for label, key, unit, decimals in (
-                ("angle", "angle_f_deg", "deg", 1),
-                ("target", "target_deg", "deg", 1),
-                ("error", "error_deg", "deg", 1),
-                ("out", "u_out", "", 3),
-            ):
-                text = self._fmt_num(axis_state.get(key), unit, decimals=decimals)
-                if text != "-":
-                    axis_parts.append(f"{label} {text}")
-            if axis_parts:
-                parts.append(f"{axis_name}: " + ", ".join(axis_parts))
+        for label, key, unit, decimals in (
+            ("angle", "angle_f_deg", "deg", 1),
+            ("target", "target_deg", "deg", 1),
+            ("raw err", "raw_error_deg", "deg", 1),
+            ("error", "error_deg", "deg", 1),
+            ("rate", "da_dps", "deg/s", 1),
+            ("out", "u_out", "", 3),
+        ):
+            text = self._fmt_num(axis_state.get(key), unit, decimals=decimals)
+            if text != "-":
+                parts.append(f"{label} {text}")
+        if axis_state.get("within_deadband") is True:
+            parts.append("deadband yes")
+        elif axis_state.get("within_deadband") is False:
+            parts.append("deadband no")
         return " | ".join(parts) if parts else "-"
 
     def _format_attitude_targets(self, hold_state: dict) -> str:
