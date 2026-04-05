@@ -20,7 +20,6 @@ from PyQt6.QtWidgets import (
     QTabBar,
 )
 from config import (
-    ATTITUDE_HOLD_TOGGLE_SHORTCUT,
     ATTITUDE_HOLD_SENSOR_STALE_S,
     PILOT_PUB_ENDPOINT,
     SENSOR_SUB_ENDPOINT,
@@ -35,6 +34,8 @@ from config import (
     DEPTH_HOLD_SENSOR_STALE_S,
     REVERSE_CAMERA_KEYWORDS,
     REVERSE_CAMERA_NAMES,
+    LIGHTS_TOGGLE_EDGE,
+    LIGHTS_TOGGLE_SHORTCUT,
     REVERSE_TOGGLE_BUTTON,
     REVERSE_TOGGLE_SHORTCUT,
 )
@@ -413,7 +414,8 @@ class MainWindow(QMainWindow):
             Qt.Key.Key_BracketLeft: -1.0,
             Qt.Key.Key_BracketRight: +1.0,
         }
-        self._attitude_hold_shortcut_text = str(ATTITUDE_HOLD_TOGGLE_SHORTCUT or "L").strip() or "L"
+        self._lights_toggle_shortcut_text = str(LIGHTS_TOGGLE_SHORTCUT or "L").strip() or "L"
+        self._lights_toggle_edge = str(LIGHTS_TOGGLE_EDGE or "lights").strip().lower() or "lights"
         self._servo_wrist_timer = QTimer(self)
         self._servo_wrist_timer.setInterval(33)
         self._servo_wrist_timer.timeout.connect(self._update_servo_wrist_keyboard_axes)
@@ -438,7 +440,7 @@ class MainWindow(QMainWindow):
         # 2) sensor subscriber (ROV -> topside)
         self.sensor_panel = SensorPanel()
         self.instrument_panel = InstrumentPanel()
-        self.hold_test_panel = HoldTestPanel()
+        self.hold_test_panel = HoldTestPanel(pilot_svc=self.pilot_svc, endpoint=MANAGEMENT_RPC_ENDPOINT)
         self.attitude_inspector_page = AttitudeInspectorPage()
         self.hold_test_panel.setMinimumWidth(320)
         self._sensor_ui_pending: dict[tuple[str, str], dict] = {}
@@ -545,7 +547,7 @@ class MainWindow(QMainWindow):
         self._attitude_page = self.attitude_inspector_page
         self._page_stack.addWidget(self._attitude_page)
 
-        self._management_page = ManagementPage(endpoint=MANAGEMENT_RPC_ENDPOINT, pilot_svc=self.pilot_svc)
+        self._management_page = ManagementPage(endpoint=MANAGEMENT_RPC_ENDPOINT)
         self._page_stack.addWidget(self._management_page)
 
         if self.video_panel is not None:
@@ -632,13 +634,13 @@ class MainWindow(QMainWindow):
             pct = int(round(max(0.0, min(1.0, gain)) * 100.0))
             self.statusBar().showMessage(f"T200 wrist gain: {pct}%  |  keys: [ / ]", 3000)
 
-    def _toggle_attitude_hold_from_keyboard(self) -> None:
+    def _toggle_lights_from_keyboard(self) -> None:
         try:
-            enabled = bool(self.pilot_svc.toggle_attitude_hold())
+            self.pilot_svc.queue_edge(self._lights_toggle_edge)
         except Exception:
             return
         self.statusBar().showMessage(
-            f"Attitude hold {'ON' if enabled else 'OFF'}  |  key: {self._attitude_hold_shortcut_text.upper()}",
+            f"Lights toggle sent  |  key: {self._lights_toggle_shortcut_text.upper()}",
             3000,
         )
 
@@ -660,11 +662,11 @@ class MainWindow(QMainWindow):
                     return False
                 if et == QEvent.Type.KeyPress:
                     try:
-                        shortcut_text = self._attitude_hold_shortcut_text.upper()
+                        shortcut_text = self._lights_toggle_shortcut_text.upper()
                     except Exception:
                         shortcut_text = "L"
                     if event.text().upper() == shortcut_text:
-                        self._toggle_attitude_hold_from_keyboard()
+                        self._toggle_lights_from_keyboard()
                         return False
                     direction = self._t200_wrist_gain_shortcuts.get(event.key())
                     if direction is not None:
@@ -1444,6 +1446,10 @@ class MainWindow(QMainWindow):
             pass
         try:
             self._management_page.shutdown()
+        except Exception:
+            pass
+        try:
+            self.hold_test_panel.shutdown()
         except Exception:
             pass
         try:

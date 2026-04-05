@@ -98,11 +98,15 @@ DEPTH_HOLD_TOGGLE_BUTTON = os.environ.get("TRITON_DEPTH_HOLD_TOGGLE", "rstick").
 DEPTH_HOLD_DEFAULT = os.environ.get("TRITON_DEPTH_HOLD_DEFAULT", "0").strip().lower() in ("1", "true", "yes")
 
 # Attitude hold is also toggled topside and transmitted in PilotFrame.modes.
-# For current testing we keep this on a keyboard shortcut in the GUI (`L`) and
-# leave the controller-side button unbound by default.
-ATTITUDE_HOLD_TOGGLE_BUTTON = os.environ.get("TRITON_ATTITUDE_HOLD_TOGGLE", "").strip().lower()
+# Default button: press down the LEFT stick (lstick) so both hold modes share
+# the same topside pathway.
+ATTITUDE_HOLD_TOGGLE_BUTTON = os.environ.get("TRITON_ATTITUDE_HOLD_TOGGLE", "lstick").strip().lower()
 ATTITUDE_HOLD_DEFAULT = os.environ.get("TRITON_ATTITUDE_HOLD_DEFAULT", "0").strip().lower() in ("1", "true", "yes")
-ATTITUDE_HOLD_TOGGLE_SHORTCUT = os.environ.get("TRITON_ATTITUDE_HOLD_SHORTCUT", "L").strip() or "L"
+
+# Lights are toggled from the pilot keyboard. The GUI queues a synthetic edge
+# on the next PilotFrame so TritonOS can keep using its normal button-edge path.
+LIGHTS_TOGGLE_SHORTCUT = os.environ.get("TRITON_LIGHTS_TOGGLE_SHORTCUT", "L").strip() or "L"
+LIGHTS_TOGGLE_EDGE = os.environ.get("TRITON_LIGHTS_TOGGLE_EDGE", "lights").strip().lower() or "lights"
 
 # Reverse drive mode rotates the pilot's horizontal-plane commands by 180
 # degrees so the controls still match when the operator swaps to a rear camera.

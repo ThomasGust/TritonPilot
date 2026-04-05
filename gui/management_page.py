@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import time
-from typing import Any
 
 from PyQt6.QtCore import QTimer, Qt, pyqtSignal
 from PyQt6.QtWidgets import (
@@ -19,7 +18,7 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 
-from config import ATTITUDE_HOLD_TOGGLE_SHORTCUT, MANAGEMENT_RPC_ENDPOINT
+from config import MANAGEMENT_RPC_ENDPOINT
 from network.management_rpc import ManagementRpcService
 
 
@@ -99,10 +98,9 @@ class _SectionCard(QFrame):
 class ManagementPage(QWidget):
     rpc_result_sig = pyqtSignal(dict)
 
-    def __init__(self, endpoint: str = MANAGEMENT_RPC_ENDPOINT, pilot_svc: Any | None = None, parent=None):
+    def __init__(self, endpoint: str = MANAGEMENT_RPC_ENDPOINT, parent=None):
         super().__init__(parent)
         self.endpoint = str(endpoint)
-        self._pilot_svc = pilot_svc
         self._svc = ManagementRpcService(endpoint=self.endpoint, on_result=self._on_rpc_result_from_thread)
         self._svc.start()
 
@@ -110,20 +108,13 @@ class ManagementPage(QWidget):
         self._config_keys_present: set[str] = set()
         self._pending_requests: dict[int, dict] = {}
         self._last_state: dict = {}
-        self._last_runtime: dict = {}
         self._last_refresh_ts: float = 0.0
 
         self._config_spins: dict[str, QDoubleSpinBox] = {}
         self._status_labels: dict[str, QLabel] = {}
-        self._runtime_labels: dict[str, QLabel] = {}
 
         self._build_ui()
-        self._update_local_hold_controls()
         self.rpc_result_sig.connect(self._handle_rpc_result)
-        self._runtime_timer = QTimer(self)
-        self._runtime_timer.setInterval(500)
-        self._runtime_timer.timeout.connect(self._poll_runtime_state)
-        self._runtime_timer.start()
         QTimer.singleShot(0, self.refresh_state)
 
     def shutdown(self) -> None:
@@ -135,18 +126,6 @@ class ManagementPage(QWidget):
             {},
             allow_busy=allow_busy,
             request_meta={"show_refresh_feedback": bool(show_feedback)},
-        )
-
-    def _poll_runtime_state(self) -> None:
-        if not self.isVisible():
-            return
-        self._update_local_hold_controls()
-        if "get_hold_status" not in self._available_commands:
-            return
-        self._queue_request(
-            "get_hold_status",
-            {},
-            request_meta={"runtime_poll": True},
         )
 
     def _build_ui(self) -> None:
@@ -231,76 +210,6 @@ class ManagementPage(QWidget):
             self._status_labels[key] = value
         status_card.body.addLayout(status_grid)
         root.addWidget(status_card)
-
-        hold_control_card = _SectionCard(
-            "Pilot Hold Controls",
-            "These toggles act on the live pilot stream from topside. Use them to engage the onboard depth and attitude hold controllers without editing ROV config.",
-        )
-        hold_button_row = QHBoxLayout()
-        hold_button_row.setSpacing(8)
-        self.depth_hold_toggle_btn = QPushButton("Toggle Depth Hold")
-        self.depth_hold_toggle_btn.clicked.connect(self._toggle_depth_hold)
-        self.attitude_hold_toggle_btn = QPushButton("Toggle Attitude Hold")
-        self.attitude_hold_toggle_btn.clicked.connect(self._toggle_attitude_hold)
-        hold_button_row.addWidget(self.depth_hold_toggle_btn)
-        hold_button_row.addWidget(self.attitude_hold_toggle_btn)
-        hold_button_row.addStretch(1)
-        hold_control_card.body.addLayout(hold_button_row)
-
-        hold_status_row = QGridLayout()
-        hold_status_row.setHorizontalSpacing(12)
-        hold_status_row.setVerticalSpacing(8)
-        hold_status_items = [
-            ("Depth Hold Mode", "pilot_depth_hold"),
-            ("Attitude Hold Mode", "pilot_attitude_hold"),
-        ]
-        for row, (label_text, key) in enumerate(hold_status_items):
-            label = QLabel(label_text)
-            value = QLabel("-")
-            value.setObjectName("managementMetaValue")
-            value.setWordWrap(True)
-            hold_status_row.addWidget(label, row, 0)
-            hold_status_row.addWidget(value, row, 1)
-            self._runtime_labels[key] = value
-        hold_control_card.body.addLayout(hold_status_row)
-
-        shortcut_hint = QLabel(
-            f"Temporary keyboard shortcut: {ATTITUDE_HOLD_TOGGLE_SHORTCUT.upper()} toggles attitude hold. "
-            "Depth hold keeps its existing controller interaction path."
-        )
-        shortcut_hint.setWordWrap(True)
-        shortcut_hint.setObjectName("managementSectionSubtitle")
-        hold_control_card.body.addWidget(shortcut_hint)
-        root.addWidget(hold_control_card)
-
-        runtime_card = _SectionCard(
-            "Hold Runtime / Debug",
-            "Live controller state from TritonOS. This is useful for checking whether the hold is enabled, whether telemetry is stale, and what target/error/output the controller is using.",
-        )
-        runtime_grid = QGridLayout()
-        runtime_grid.setHorizontalSpacing(12)
-        runtime_grid.setVerticalSpacing(8)
-        runtime_items = [
-            ("Control Loop", "runtime_loop"),
-            ("Armed", "runtime_armed"),
-            ("Depth Hold Runtime", "runtime_depth_hold"),
-            ("Depth Sensor", "runtime_depth_sensor"),
-            ("Depth Debug", "runtime_depth_debug"),
-            ("Attitude Hold Runtime", "runtime_attitude_hold"),
-            ("Attitude Sensor", "runtime_attitude_sensor"),
-            ("Attitude Debug", "runtime_attitude_debug"),
-        ]
-        for row, (label_text, key) in enumerate(runtime_items):
-            label = QLabel(label_text)
-            value = QLabel("-")
-            value.setObjectName("managementMetaValue")
-            value.setWordWrap(True)
-            value.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
-            runtime_grid.addWidget(label, row, 0)
-            runtime_grid.addWidget(value, row, 1)
-            self._runtime_labels[key] = value
-        runtime_card.body.addLayout(runtime_grid)
-        root.addWidget(runtime_card)
 
         depth_card = _SectionCard(
             "Depth Reference",
@@ -409,8 +318,6 @@ class ManagementPage(QWidget):
                 self._apply_state(dict(result.get("data") or {}))
                 if request_meta.get("show_refresh_feedback"):
                     self._set_feedback("Management state refreshed from ROV.", tone="info")
-            elif cmd == "get_hold_status":
-                self._apply_runtime_state(dict(result.get("data") or {}))
             else:
                 self._handle_mutation_success(cmd, dict(result.get("data") or {}))
                 if request_meta.get("refresh_after_success"):
@@ -420,10 +327,6 @@ class ManagementPage(QWidget):
             err = str(result.get("error") or "unknown error")
             if cmd == "get_state":
                 self._set_feedback(f"Could not refresh management state: {err}", tone="error")
-            elif cmd == "get_hold_status":
-                self._apply_runtime_state({})
-                if not request_meta.get("runtime_poll"):
-                    self._set_feedback(f"Could not refresh hold status: {err}", tone="error")
             else:
                 self._set_feedback(f"{self._command_label(cmd)} failed: {err}", tone="error")
 
@@ -434,7 +337,6 @@ class ManagementPage(QWidget):
         self._last_refresh_ts = time.time()
         config = dict(self._last_state.get("config") or {})
         refs = dict(self._last_state.get("references") or {})
-        runtime = dict(self._last_state.get("runtime") or {})
         self._config_keys_present = {str(key) for key in config.keys()}
 
         self._available_commands = {str(cmd) for cmd in (self._last_state.get("commands") or [])}
@@ -458,8 +360,6 @@ class ManagementPage(QWidget):
         self._status_labels["flat_mount_loaded"].setText("yes" if refs.get("mount_loaded") else "no")
         commands_text = ", ".join(sorted(self._available_commands)) if self._available_commands else "-"
         self._status_labels["commands"].setText(commands_text)
-        self._apply_runtime_state(runtime)
-        self._update_local_hold_controls()
 
         sensor_offset_present = "EXTERNAL_DEPTH_SENSOR_TO_TOP_M" in self._config_keys_present
         self.depth_sensor_to_top_spin.setToolTip(
@@ -488,95 +388,6 @@ class ManagementPage(QWidget):
                 self._set_spin_value(spin, config.get(key))
 
         self._sync_action_state()
-
-    def _apply_runtime_state(self, runtime: dict) -> None:
-        self._last_runtime = dict(runtime or {})
-        depth_hold = dict(self._last_runtime.get("depth_hold") or {})
-        depth_status = dict(depth_hold.get("status") or {})
-        depth_sensor = dict(depth_hold.get("sensor") or {})
-        attitude_hold = dict(self._last_runtime.get("attitude_hold") or {})
-        attitude_status = dict(attitude_hold.get("status") or {})
-        attitude_sensor = dict(attitude_hold.get("sensor") or {})
-
-        self._runtime_labels["runtime_loop"].setText(
-            "available" if self._last_runtime.get("control_loop_available") else "unavailable"
-        )
-        self._runtime_labels["runtime_armed"].setText("yes" if self._last_runtime.get("armed") else "no")
-        self._runtime_labels["runtime_depth_hold"].setText(
-            self._format_hold_runtime(
-                available=depth_hold.get("available"),
-                sensor_available=depth_hold.get("sensor_available"),
-                enabled_cmd=depth_status.get("enabled_cmd"),
-                active=depth_status.get("active"),
-                reason=depth_status.get("reason"),
-                target_text=self._fmt_num(depth_hold.get("target_m"), "m", decimals=2),
-                status_age_s=depth_hold.get("status_age_s"),
-            )
-        )
-        self._runtime_labels["runtime_depth_sensor"].setText(
-            self._format_depth_sensor(depth_sensor)
-        )
-        self._runtime_labels["runtime_depth_debug"].setText(
-            self._format_depth_debug(depth_status)
-        )
-        self._runtime_labels["runtime_attitude_hold"].setText(
-            self._format_hold_runtime(
-                available=attitude_hold.get("available"),
-                sensor_available=attitude_hold.get("sensor_available"),
-                enabled_cmd=attitude_status.get("enabled_cmd"),
-                active=attitude_status.get("active"),
-                reason=attitude_status.get("reason"),
-                target_text=self._format_attitude_targets(attitude_hold),
-                status_age_s=attitude_hold.get("status_age_s"),
-            )
-        )
-        self._runtime_labels["runtime_attitude_sensor"].setText(
-            self._format_attitude_sensor(attitude_sensor)
-        )
-        self._runtime_labels["runtime_attitude_debug"].setText(
-            self._format_attitude_debug(attitude_status)
-        )
-        self._update_local_hold_controls()
-
-    def _update_local_hold_controls(self) -> None:
-        modes = {}
-        if self._pilot_svc is not None and hasattr(self._pilot_svc, "current_modes"):
-            try:
-                modes = dict(self._pilot_svc.current_modes() or {})
-            except Exception:
-                modes = {}
-
-        self._runtime_labels["pilot_depth_hold"].setText("ON" if modes.get("depth_hold") else "OFF")
-        self._runtime_labels["pilot_attitude_hold"].setText(
-            f"{'ON' if modes.get('attitude_hold') else 'OFF'} | key {ATTITUDE_HOLD_TOGGLE_SHORTCUT.upper()}"
-        )
-
-    def _toggle_depth_hold(self) -> None:
-        if self._pilot_svc is None or not hasattr(self._pilot_svc, "toggle_depth_hold"):
-            self._set_feedback("Pilot hold controls are unavailable in this page context.", tone="error")
-            return
-        try:
-            enabled = bool(self._pilot_svc.toggle_depth_hold())
-        except Exception as exc:
-            self._set_feedback(f"Could not toggle depth hold: {exc}", tone="error")
-            return
-        self._update_local_hold_controls()
-        self._set_feedback(f"Depth hold {'enabled' if enabled else 'disabled'} from topside.", tone="ok")
-
-    def _toggle_attitude_hold(self) -> None:
-        if self._pilot_svc is None or not hasattr(self._pilot_svc, "toggle_attitude_hold"):
-            self._set_feedback("Pilot hold controls are unavailable in this page context.", tone="error")
-            return
-        try:
-            enabled = bool(self._pilot_svc.toggle_attitude_hold())
-        except Exception as exc:
-            self._set_feedback(f"Could not toggle attitude hold: {exc}", tone="error")
-            return
-        self._update_local_hold_controls()
-        self._set_feedback(
-            f"Attitude hold {'enabled' if enabled else 'disabled'} from topside. Keyboard shortcut: {ATTITUDE_HOLD_TOGGLE_SHORTCUT.upper()}.",
-            tone="ok",
-        )
 
     def _handle_mutation_success(self, cmd: str, data: dict) -> None:
         if data.get("restart_required"):
@@ -619,19 +430,12 @@ class ManagementPage(QWidget):
         has_state = bool(self._last_state)
         can_set_config = "set_config" in self._available_commands
         sensor_offset_present = "EXTERNAL_DEPTH_SENSOR_TO_TOP_M" in self._config_keys_present
-        has_pilot_hold_controls = (
-            self._pilot_svc is not None
-            and hasattr(self._pilot_svc, "toggle_depth_hold")
-            and hasattr(self._pilot_svc, "toggle_attitude_hold")
-        )
 
         self.refresh_btn.setEnabled(not busy)
         self.save_sensor_offset_btn.setEnabled((not busy) and can_set_config and sensor_offset_present)
         self.save_surface_btn.setEnabled((not busy) and ("set_surface_reference" in self._available_commands))
         self.capture_surface_btn.setEnabled((not busy) and ("capture_surface_reference" in self._available_commands))
         self.capture_flat_btn.setEnabled((not busy) and ("capture_flat_reference" in self._available_commands))
-        self.depth_hold_toggle_btn.setEnabled(bool(has_pilot_hold_controls))
-        self.attitude_hold_toggle_btn.setEnabled(bool(has_pilot_hold_controls))
 
         has_enabled_config_field = any(spin.isEnabled() for spin in self._config_spins.values())
         self.save_config_btn.setEnabled((not busy) and can_set_config and has_enabled_config_field)

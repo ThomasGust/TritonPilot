@@ -124,6 +124,24 @@ def test_aux_axes_are_embedded_in_frame(monkeypatch):
     assert frame.aux["gripper_yaw"] == -1.0
 
 
+def test_synthetic_edges_are_embedded_in_frame(monkeypatch):
+    monkeypatch.setattr("input.pilot_service.time.sleep", lambda *_args, **_kwargs: None)
+
+    svc = PilotPublisherService(endpoint="inproc://edge_test", rate_hz=30.0, deadzone=0.0, debug=False)
+    svc.queue_edge("lights")
+
+    snap = ControllerSnapshot(
+        lx=0.0, ly=0.0, rx=0.0, ry=0.0, lt=0.0, rt=0.0,
+        dpad=(0, 0),
+        a=False, b=False, x=False, y=False, lb=False, rb=False,
+        win=False, menu=False, lstick=False, rstick=False,
+    )
+    frame = svc._build_frame(11.0, snap)
+
+    assert frame.edges["lights"] == "down"
+    assert svc._build_frame(12.0, snap).edges == {}
+
+
 def test_t200_wrist_gain_is_exposed_in_modes(monkeypatch):
     monkeypatch.setattr("input.pilot_service.time.sleep", lambda *_args, **_kwargs: None)
 

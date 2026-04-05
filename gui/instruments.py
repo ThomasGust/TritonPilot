@@ -6,7 +6,7 @@ from collections import deque
 from pathlib import Path
 from typing import Optional
 
-from PyQt6.QtCore import Qt, QPointF, QRectF
+from PyQt6.QtCore import Qt, QPointF, QRectF, QTimer, pyqtSignal
 from PyQt6.QtGui import QColor, QFont, QPainter, QPainterPath, QPen
 from PyQt6.QtWidgets import (
     QWidget,
@@ -19,6 +19,7 @@ from PyQt6.QtWidgets import (
     QProgressBar,
     QSizePolicy,
 )
+from network.management_rpc import ManagementRpcService
 from recording.stream_recorder import StreamRecorder
 
 
@@ -806,8 +807,20 @@ class InstrumentPanel(QWidget):
 class HoldTestPanel(QWidget):
     """Focused attitude/depth panel for stabilization and hold testing."""
 
-    def __init__(self, parent=None):
+    rpc_result_sig = pyqtSignal(dict)
+
+    def __init__(self, pilot_svc=None, endpoint: str | None = None, parent=None):
         super().__init__(parent)
+
+        from config import LIGHTS_TOGGLE_SHORTCUT, MANAGEMENT_RPC_ENDPOINT
+
+        self._pilot_svc = pilot_svc
+        self._endpoint = str(endpoint or MANAGEMENT_RPC_ENDPOINT)
+        self._lights_shortcut_text = str(LIGHTS_TOGGLE_SHORTCUT or "L").strip() or "L"
+        self._runtime_labels: dict[str, QLabel] = {}
+        self._runtime_request_pending = False
+        self._svc = ManagementRpcService(endpoint=self._endpoint, on_result=self._on_rpc_result_from_thread)
+        self._svc.start()
 
         title = QLabel("Hold Test")
         title_font = QFont(title.font())
@@ -815,9 +828,76 @@ class HoldTestPanel(QWidget):
         title_font.setPointSize(max(12, title_font.pointSize() + 1))
         title.setFont(title_font)
 
-        subtitle = QLabel("Single-camera piloting page with live attitude and depth telemetry.")
+        subtitle = QLabel(
+            "Single-camera piloting page with hold controls, runtime telemetry, and live attitude/depth instruments."
+        )
         subtitle.setWordWrap(True)
         subtitle.setStyleSheet("color: #b6bac8;")
+
+        self.control_card = _Card("Hold Controls")
+        self.feedback_label = QLabel("Use this page to engage hold modes and verify the onboard controllers.")
+        self.feedback_label.setWordWrap(True)
+        self.feedback_label.setStyleSheet("color: #b6bac8;")
+        self.control_card.body.addWidget(self.feedback_label)
+
+        button_row = QHBoxLayout()
+        button_row.setSpacing(6)
+        self.depth_hold_toggle_btn = QPushButton("Toggle Depth Hold")
+        self.depth_hold_toggle_btn.clicked.connect(self._toggle_depth_hold)
+        self.attitude_hold_toggle_btn = QPushButton("Toggle Attitude Hold")
+        self.attitude_hold_toggle_btn.clicked.connect(self._toggle_attitude_hold)
+        button_row.addWidget(self.depth_hold_toggle_btn)
+        button_row.addWidget(self.attitude_hold_toggle_btn)
+        self.control_card.body.addLayout(button_row)
+
+        control_grid = QGridLayout()
+        control_grid.setHorizontalSpacing(10)
+        control_grid.setVerticalSpacing(6)
+        for row, (label_text, key) in enumerate(
+            [
+                ("Pilot Depth Hold", "pilot_depth_hold"),
+                ("Pilot Attitude Hold", "pilot_attitude_hold"),
+                ("Runtime RPC", "runtime_rpc"),
+            ]
+        ):
+            label = QLabel(label_text)
+            value = QLabel("-")
+            value.setWordWrap(True)
+            control_grid.addWidget(label, row, 0)
+            control_grid.addWidget(value, row, 1)
+            self._runtime_labels[key] = value
+        self.control_card.body.addLayout(control_grid)
+
+        shortcut_hint = QLabel(
+            f"R3 toggles depth hold, L3 toggles attitude hold, and {self._lights_shortcut_text.upper()} toggles lights."
+        )
+        shortcut_hint.setWordWrap(True)
+        shortcut_hint.setStyleSheet("color: #8f96aa;")
+        self.control_card.body.addWidget(shortcut_hint)
+
+        self.runtime_card = _Card("Hold Runtime")
+        runtime_grid = QGridLayout()
+        runtime_grid.setHorizontalSpacing(10)
+        runtime_grid.setVerticalSpacing(6)
+        for row, (label_text, key) in enumerate(
+            [
+                ("Control Loop", "runtime_loop"),
+                ("Armed", "runtime_armed"),
+                ("Depth Hold Runtime", "runtime_depth_hold"),
+                ("Depth Sensor", "runtime_depth_sensor"),
+                ("Depth Debug", "runtime_depth_debug"),
+                ("Attitude Hold Runtime", "runtime_attitude_hold"),
+                ("Attitude Sensor", "runtime_attitude_sensor"),
+                ("Attitude Debug", "runtime_attitude_debug"),
+            ]
+        ):
+            label = QLabel(label_text)
+            value = QLabel("-")
+            value.setWordWrap(True)
+            runtime_grid.addWidget(label, row, 0)
+            runtime_grid.addWidget(value, row, 1)
+            self._runtime_labels[key] = value
+        self.runtime_card.body.addLayout(runtime_grid)
 
         self.att_card = _Card("Attitude")
         self.attitude = AttitudeHorizonWidget()
@@ -844,9 +924,235 @@ class HoldTestPanel(QWidget):
         lay.setSpacing(8)
         lay.addWidget(title)
         lay.addWidget(subtitle)
+        lay.addWidget(self.control_card)
+        lay.addWidget(self.runtime_card)
         lay.addWidget(self.att_card)
         lay.addWidget(self.depth_card)
         lay.addStretch(1)
+
+        self.rpc_result_sig.connect(self._handle_rpc_result)
+        self._runtime_timer = QTimer(self)
+        self._runtime_timer.setInterval(500)
+        self._runtime_timer.timeout.connect(self._poll_runtime_state)
+        self._runtime_timer.start()
+        self._sync_local_hold_controls()
+        QTimer.singleShot(0, self._poll_runtime_state)
+
+    def shutdown(self) -> None:
+        self._runtime_timer.stop()
+        self._svc.stop()
+
+    def _on_rpc_result_from_thread(self, result: dict) -> None:
+        self.rpc_result_sig.emit(result)
+
+    def _poll_runtime_state(self) -> None:
+        self._sync_local_hold_controls()
+        if not self.isVisible() or self._runtime_request_pending:
+            return
+        self._runtime_request_pending = True
+        self._svc.request("get_hold_status", {})
+
+    def _handle_rpc_result(self, result: dict) -> None:
+        self._runtime_request_pending = False
+        if result.get("ok"):
+            self._runtime_labels["runtime_rpc"].setText(f"Connected | {self._endpoint}")
+            self._apply_runtime_state(dict(result.get("data") or {}))
+            return
+        self._runtime_labels["runtime_rpc"].setText(f"Disconnected | {self._endpoint}")
+        self._apply_runtime_state({})
+
+    def _sync_local_hold_controls(self) -> None:
+        modes = {}
+        if self._pilot_svc is not None and hasattr(self._pilot_svc, "current_modes"):
+            try:
+                modes = dict(self._pilot_svc.current_modes() or {})
+            except Exception:
+                modes = {}
+        self._runtime_labels["pilot_depth_hold"].setText("ON" if modes.get("depth_hold") else "OFF")
+        self._runtime_labels["pilot_attitude_hold"].setText("ON" if modes.get("attitude_hold") else "OFF")
+        has_controls = (
+            self._pilot_svc is not None
+            and hasattr(self._pilot_svc, "toggle_depth_hold")
+            and hasattr(self._pilot_svc, "toggle_attitude_hold")
+        )
+        self.depth_hold_toggle_btn.setEnabled(bool(has_controls))
+        self.attitude_hold_toggle_btn.setEnabled(bool(has_controls))
+
+    def _toggle_depth_hold(self) -> None:
+        if self._pilot_svc is None or not hasattr(self._pilot_svc, "toggle_depth_hold"):
+            self._set_feedback("Depth hold control is unavailable from this page.", tone="#ff8d8d")
+            return
+        try:
+            enabled = bool(self._pilot_svc.toggle_depth_hold())
+        except Exception as exc:
+            self._set_feedback(f"Could not toggle depth hold: {exc}", tone="#ff8d8d")
+            return
+        self._sync_local_hold_controls()
+        self._set_feedback(f"Depth hold {'enabled' if enabled else 'disabled'} from topside.", tone="#9be89b")
+
+    def _toggle_attitude_hold(self) -> None:
+        if self._pilot_svc is None or not hasattr(self._pilot_svc, "toggle_attitude_hold"):
+            self._set_feedback("Attitude hold control is unavailable from this page.", tone="#ff8d8d")
+            return
+        try:
+            enabled = bool(self._pilot_svc.toggle_attitude_hold())
+        except Exception as exc:
+            self._set_feedback(f"Could not toggle attitude hold: {exc}", tone="#ff8d8d")
+            return
+        self._sync_local_hold_controls()
+        self._set_feedback(f"Attitude hold {'enabled' if enabled else 'disabled'} from topside.", tone="#9be89b")
+
+    def _set_feedback(self, text: str, *, tone: str) -> None:
+        self.feedback_label.setText(str(text))
+        self.feedback_label.setStyleSheet(f"color: {tone};")
+
+    def _apply_runtime_state(self, runtime: dict) -> None:
+        depth_hold = dict(runtime.get("depth_hold") or {})
+        depth_status = dict(depth_hold.get("status") or {})
+        depth_sensor = dict(depth_hold.get("sensor") or {})
+        attitude_hold = dict(runtime.get("attitude_hold") or {})
+        attitude_status = dict(attitude_hold.get("status") or {})
+        attitude_sensor = dict(attitude_hold.get("sensor") or {})
+
+        self._runtime_labels["runtime_loop"].setText(
+            "available" if runtime.get("control_loop_available") else "unavailable"
+        )
+        self._runtime_labels["runtime_armed"].setText("yes" if runtime.get("armed") else "no")
+        self._runtime_labels["runtime_depth_hold"].setText(
+            self._format_hold_runtime(
+                available=depth_hold.get("available"),
+                sensor_available=depth_hold.get("sensor_available"),
+                enabled_cmd=depth_status.get("enabled_cmd"),
+                active=depth_status.get("active"),
+                reason=depth_status.get("reason"),
+                target_text=self._fmt_num(depth_hold.get("target_m"), "m", decimals=2),
+                status_age_s=depth_hold.get("status_age_s"),
+            )
+        )
+        self._runtime_labels["runtime_depth_sensor"].setText(self._format_depth_sensor(depth_sensor))
+        self._runtime_labels["runtime_depth_debug"].setText(self._format_depth_debug(depth_status))
+        self._runtime_labels["runtime_attitude_hold"].setText(
+            self._format_hold_runtime(
+                available=attitude_hold.get("available"),
+                sensor_available=attitude_hold.get("sensor_available"),
+                enabled_cmd=attitude_status.get("enabled_cmd"),
+                active=attitude_status.get("active"),
+                reason=attitude_status.get("reason"),
+                target_text=self._format_attitude_targets(attitude_hold),
+                status_age_s=attitude_hold.get("status_age_s"),
+            )
+        )
+        self._runtime_labels["runtime_attitude_sensor"].setText(self._format_attitude_sensor(attitude_sensor))
+        self._runtime_labels["runtime_attitude_debug"].setText(self._format_attitude_debug(attitude_status))
+
+    @staticmethod
+    def _fmt_bool(value) -> str:
+        if value is None:
+            return "-"
+        return "yes" if bool(value) else "no"
+
+    @staticmethod
+    def _fmt_num(value, unit: str = "", *, decimals: int = 3) -> str:
+        try:
+            text = f"{float(value):.{int(decimals)}f}"
+        except Exception:
+            return "-"
+        if unit:
+            return f"{text} {unit}"
+        return text
+
+    def _format_hold_runtime(
+        self,
+        *,
+        available,
+        sensor_available,
+        enabled_cmd,
+        active,
+        reason,
+        target_text: str,
+        status_age_s,
+    ) -> str:
+        parts = [
+            f"available {self._fmt_bool(available)}",
+            f"sensor {self._fmt_bool(sensor_available)}",
+            f"enabled_cmd {self._fmt_bool(enabled_cmd)}",
+            f"active {self._fmt_bool(active)}",
+        ]
+        if reason:
+            parts.append(f"reason {reason}")
+        if target_text and target_text != "-":
+            parts.append(f"target {target_text}")
+        if status_age_s is not None:
+            parts.append(f"status age {self._fmt_num(status_age_s, 's', decimals=2)}")
+        return " | ".join(parts)
+
+    def _format_depth_sensor(self, sensor: dict) -> str:
+        parts: list[str] = []
+        depth_text = self._fmt_num(sensor.get("depth_m"), "m", decimals=2)
+        if depth_text != "-":
+            parts.append(f"depth {depth_text}")
+        if sensor.get("sensor_name"):
+            parts.append(str(sensor.get("sensor_name")))
+        sample_age = sensor.get("sample_age_s")
+        if sample_age is not None:
+            parts.append(f"sample age {self._fmt_num(sample_age, 's', decimals=2)}")
+        stream_age = sensor.get("stream_age_s")
+        if stream_age is not None:
+            parts.append(f"stream age {self._fmt_num(stream_age, 's', decimals=2)}")
+        return " | ".join(parts) if parts else "-"
+
+    def _format_depth_debug(self, status: dict) -> str:
+        parts: list[str] = []
+        for label, key, unit, decimals in (
+            ("depth_f", "depth_f_m", "m", 2),
+            ("error", "error_m", "m", 3),
+            ("dz", "dz_mps", "m/s", 3),
+            ("out", "u_out", "", 3),
+        ):
+            text = self._fmt_num(status.get(key), unit, decimals=decimals)
+            if text != "-":
+                parts.append(f"{label} {text}")
+        return " | ".join(parts) if parts else "-"
+
+    def _format_attitude_sensor(self, sensor: dict) -> str:
+        parts: list[str] = []
+        for label, key in (("pitch", "pitch_deg"), ("roll", "roll_deg"), ("yaw", "yaw_deg")):
+            text = self._fmt_num(sensor.get(key), "deg", decimals=1)
+            if text != "-":
+                parts.append(f"{label} {text}")
+        sample_age = sensor.get("sample_age_s")
+        if sample_age is not None:
+            parts.append(f"sample age {self._fmt_num(sample_age, 's', decimals=2)}")
+        return " | ".join(parts) if parts else "-"
+
+    def _format_attitude_debug(self, status: dict) -> str:
+        pitch = dict(status.get("pitch") or {})
+        roll = dict(status.get("roll") or {})
+        parts: list[str] = []
+        for axis_name, axis_state in (("pitch", pitch), ("roll", roll)):
+            axis_parts: list[str] = []
+            for label, key, unit, decimals in (
+                ("angle", "angle_f_deg", "deg", 1),
+                ("target", "target_deg", "deg", 1),
+                ("error", "error_deg", "deg", 1),
+                ("out", "u_out", "", 3),
+            ):
+                text = self._fmt_num(axis_state.get(key), unit, decimals=decimals)
+                if text != "-":
+                    axis_parts.append(f"{label} {text}")
+            if axis_parts:
+                parts.append(f"{axis_name}: " + ", ".join(axis_parts))
+        return " | ".join(parts) if parts else "-"
+
+    def _format_attitude_targets(self, hold_state: dict) -> str:
+        pitch_text = self._fmt_num(hold_state.get("target_pitch_deg"), "deg", decimals=1)
+        roll_text = self._fmt_num(hold_state.get("target_roll_deg"), "deg", decimals=1)
+        parts: list[str] = []
+        if pitch_text != "-":
+            parts.append(f"p {pitch_text}")
+        if roll_text != "-":
+            parts.append(f"r {roll_text}")
+        return " | ".join(parts)
 
     def update_from_sensor(self, msg: dict) -> None:
         typ = (msg or {}).get("type")

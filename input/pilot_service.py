@@ -139,6 +139,8 @@ class PilotPublisherService:
         # External/GUI-provided auxiliary controls (e.g. keyboard-controlled manipulator axes).
         self._aux_lock = threading.Lock()
         self._aux_axes: dict[str, float] = {}
+        self._edge_lock = threading.Lock()
+        self._pending_edges: list[tuple[str, str]] = []
 
         # Controller is created inside the run loop thread
         self._controller: Optional[GamepadSource] = None
@@ -248,6 +250,24 @@ class PilotPublisherService:
     def get_aux_axes(self) -> dict[str, float]:
         with self._aux_lock:
             return dict(self._aux_axes)
+
+    def queue_edge(self, name: str, state: str = "down") -> None:
+        key = str(name or "").strip().lower()
+        edge_state = str(state or "").strip().lower()
+        if not key or not edge_state:
+            return
+        with self._edge_lock:
+            self._pending_edges.append((key, edge_state))
+
+    def _drain_pending_edges(self) -> dict[str, str]:
+        with self._edge_lock:
+            items = list(self._pending_edges)
+            self._pending_edges.clear()
+        edges: dict[str, str] = {}
+        for key, edge_state in items:
+            if key and edge_state:
+                edges[str(key)] = str(edge_state)
+        return edges
 
     def current_modes(self) -> dict:
         with self._mode_lock:
@@ -431,6 +451,7 @@ class PilotPublisherService:
             dpad=snap.dpad,
         )
         frame.aux = self.get_aux_axes()
+        frame.edges = self._drain_pending_edges()
         if bool(self.current_modes().get("reverse", False)):
             # Rear camera view is rotated 180 degrees in the horizontal plane.
             # Flip surge, sway, and yaw so the operator's inputs stay aligned
@@ -493,8 +514,10 @@ class PilotPublisherService:
                 frame = self._build_frame(t0, snap)
 
                 # Compute edges + handle local mode toggles.
-                edges = self._compute_edges(self._prev_buttons, frame.buttons)
-                if edges:
+                edges = dict(frame.edges or {})
+                controller_edges = self._compute_edges(self._prev_buttons, frame.buttons)
+                if controller_edges:
+                    edges.update(controller_edges)
                     frame.edges = dict(edges)
 
                 if edges.get(self._depth_hold_toggle_button) == "down":
