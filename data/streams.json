@@ -2,8 +2,8 @@
   "default_pane_order": [
     "Primary Camera",
     "Back Gripper Camera",
-    "Arm Camera",
-    "Downward Camera"
+    "Downward Camera",
+    "Arm Camera"
   ],
   "streams": [
     {
