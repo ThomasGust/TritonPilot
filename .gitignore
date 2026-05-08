@@ -1,5 +1,8 @@
 __pycache__/
 *.pyc
 results/*
+analysis/results/*
 practice/*
+analysis/practice/*
 .venv/*
+recordings/*

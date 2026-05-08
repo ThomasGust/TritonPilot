@@ -40,6 +40,23 @@ def apply_modern_style(app: QApplication) -> None:
     QTabWidget::pane { border: 1px solid #2a2a32; border-radius: 10px; }
     QTabBar::tab { padding: 8px 12px; margin: 2px; border-radius: 10px; }
     QTabBar::tab:selected { background: #2a2a36; }
+    QPushButton#armDisarmButton {
+        padding: 6px 12px;
+        border-radius: 8px;
+        border: 1px solid #4b5265;
+        background: #202733;
+        color: #f0f4ff;
+        font-weight: 700;
+    }
+    QPushButton#armDisarmButton:hover {
+        border: 1px solid #7d8eb3;
+        background: #283242;
+    }
+    QPushButton#armDisarmButton[armed="true"] {
+        color: #ffd9d9;
+        background: #482525;
+        border: 1px solid #b65a5a;
+    }
     QStatusBar { border-top: 1px solid #2a2a32; }
     QStatusBar QLabel[tone="alert"] {
         color: #ffb3b3;
@@ -69,6 +86,32 @@ def apply_modern_style(app: QApplication) -> None:
     QLabel#summaryHint {
         color: #b6bac8;
         padding: 2px 4px 6px 4px;
+    }
+    QWidget#crabVideoControls {
+        background: #202028;
+        border: 1px solid #2f2f3a;
+        border-radius: 8px;
+        padding: 6px;
+    }
+    QWidget#crabVideoControls QPushButton {
+        padding: 5px 10px;
+    }
+    QWidget#crabVideoControls QDoubleSpinBox {
+        padding: 3px 6px;
+        border: 1px solid #343442;
+        border-radius: 6px;
+        background: #15161d;
+    }
+    QWidget#crabVideoControls QSlider::groove:horizontal {
+        height: 6px;
+        border-radius: 3px;
+        background: #303342;
+    }
+    QWidget#crabVideoControls QSlider::handle:horizontal {
+        width: 16px;
+        margin: -5px 0;
+        border-radius: 8px;
+        background: #5f8cff;
     }
     QWidget#videoLayoutBar {
         background: transparent;

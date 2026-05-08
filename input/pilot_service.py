@@ -90,6 +90,8 @@ class PilotPublisherService:
             ATTITUDE_HOLD_TOGGLE_BUTTON,
             DEPTH_HOLD_TOGGLE_BUTTON,
             DEPTH_HOLD_DEFAULT,
+            LIGHTS_TOGGLE_BUTTON,
+            LIGHTS_TOGGLE_EDGE,
             PILOT_MAX_GAIN_DEFAULT,
             PILOT_MAX_GAIN_MIN,
             PILOT_MAX_GAIN_MAX,
@@ -104,6 +106,8 @@ class PilotPublisherService:
 
         self._depth_hold_toggle_button = str(DEPTH_HOLD_TOGGLE_BUTTON or "rstick").strip().lower()
         self._attitude_hold_toggle_button = str(ATTITUDE_HOLD_TOGGLE_BUTTON or "").strip().lower()
+        self._lights_toggle_button = str(LIGHTS_TOGGLE_BUTTON or "").strip().lower()
+        self._lights_toggle_edge = str(LIGHTS_TOGGLE_EDGE or "lights").strip().lower() or "lights"
         self._reverse_toggle_button = str(REVERSE_TOGGLE_BUTTON or "").strip().lower()
         self._mode_lock = threading.Lock()
 
@@ -291,6 +295,26 @@ class PilotPublisherService:
         self.set_reverse_enabled(new_state)
         return new_state
 
+    def _handle_mode_edges(self, edges: dict[str, str]) -> None:
+        if edges.get(self._depth_hold_toggle_button) == "down":
+            self.toggle_depth_hold()
+
+        if self._attitude_hold_toggle_button and edges.get(self._attitude_hold_toggle_button) == "down":
+            self.toggle_attitude_hold()
+
+        if self._lights_toggle_button and edges.get(self._lights_toggle_button) == "down":
+            edges[self._lights_toggle_edge] = "down"
+
+        if self._reverse_toggle_button and edges.get(self._reverse_toggle_button) == "down":
+            self.toggle_reverse_enabled()
+
+        if edges.get("y") == "down":
+            if self._adjust_max_gain(+self._max_gain_step):
+                self._emit_status(self._status_payload(controller="connected"))
+        if edges.get("a") == "down":
+            if self._adjust_max_gain(-self._max_gain_step):
+                self._emit_status(self._status_payload(controller="connected"))
+
     def set_depth_hold_enabled(self, enabled: bool) -> bool:
         enabled = bool(enabled)
         with self._mode_lock:
@@ -424,7 +448,15 @@ class PilotPublisherService:
         )
         return ctrl
 
-    def _build_frame(self, t0: float, snap: ControllerSnapshot) -> PilotFrame:
+    @staticmethod
+    def _apply_reverse_axes(frame: PilotFrame) -> None:
+        # Rear camera view is rotated 180 degrees in the horizontal plane.
+        # Flip surge and sway so translation follows the rear view. Yaw remains
+        # in the vehicle's normal left/right direction.
+        frame.axes.lx = -frame.axes.lx
+        frame.axes.ly = -frame.axes.ly
+
+    def _build_frame(self, t0: float, snap: ControllerSnapshot, *, apply_reverse: bool = True) -> PilotFrame:
         frame = PilotFrame(
             seq=self.seq,
             ts=t0,
@@ -452,13 +484,8 @@ class PilotPublisherService:
         )
         frame.aux = self.get_aux_axes()
         frame.edges = self._drain_pending_edges()
-        if bool(self.current_modes().get("reverse", False)):
-            # Rear camera view is rotated 180 degrees in the horizontal plane.
-            # Flip surge, sway, and yaw so the operator's inputs stay aligned
-            # with what is on screen.
-            frame.axes.lx = -frame.axes.lx
-            frame.axes.ly = -frame.axes.ly
-            frame.axes.rx = -frame.axes.rx
+        if apply_reverse and bool(self.current_modes().get("reverse", False)):
+            self._apply_reverse_axes(frame)
         return frame
 
     def _run_loop(self):
@@ -511,33 +538,21 @@ class PilotPublisherService:
                     self._controller.healthcheck()
 
                 snap: ControllerSnapshot = self._controller.read_once()
-                frame = self._build_frame(t0, snap)
+                frame = self._build_frame(t0, snap, apply_reverse=False)
 
                 # Compute edges + handle local mode toggles.
                 edges = dict(frame.edges or {})
                 controller_edges = self._compute_edges(self._prev_buttons, frame.buttons)
                 if controller_edges:
                     edges.update(controller_edges)
-                    frame.edges = dict(edges)
 
-                if edges.get(self._depth_hold_toggle_button) == "down":
-                    self.toggle_depth_hold()
-
-                if self._attitude_hold_toggle_button and edges.get(self._attitude_hold_toggle_button) == "down":
-                    self.toggle_attitude_hold()
-
-                if self._reverse_toggle_button and edges.get(self._reverse_toggle_button) == "down":
-                    self.toggle_reverse_enabled()
-
-                if edges.get("y") == "down":
-                    if self._adjust_max_gain(+self._max_gain_step):
-                        self._emit_status(self._status_payload(controller="connected"))
-                if edges.get("a") == "down":
-                    if self._adjust_max_gain(-self._max_gain_step):
-                        self._emit_status(self._status_payload(controller="connected"))
+                self._handle_mode_edges(edges)
+                frame.edges = dict(edges)
 
                 # Always include the latest local mode values on the wire.
                 frame.modes = self.current_modes()
+                if bool(frame.modes.get("reverse", False)):
+                    self._apply_reverse_axes(frame)
                 self._prev_buttons = frame.buttons
 
                 self.seq += 1

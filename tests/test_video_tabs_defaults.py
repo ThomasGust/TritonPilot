@@ -88,3 +88,62 @@ def test_video_tabs_prefers_configured_default_pane_order_over_saved_assignments
         tabs.close()
         tabs.deleteLater()
         app.processEvents()
+
+
+def test_video_tabs_reverse_layout_spans_rear_camera_without_saving(monkeypatch):
+    app = _app()
+    fake_settings = _FakeSettings({"video/layout_count": 4})
+    monkeypatch.setattr("gui.video_tabs.QSettings", lambda *args, **kwargs: fake_settings)
+    monkeypatch.setattr("gui.video_tabs.VideoWidget", _DummyVideoWidget)
+
+    tabs = VideoTabs(
+        _DummyManager(
+            default_pane_order=[
+                "Primary Camera",
+                "Back Gripper Camera",
+                "Downward Camera",
+                "Arm Camera",
+            ]
+        ),
+        stream_names=[
+            "Primary Camera",
+            "Back Gripper Camera",
+            "Downward Camera",
+            "Arm Camera",
+        ],
+    )
+    try:
+        app.processEvents()
+        snapshot = tabs.layout_snapshot()
+
+        tabs.apply_temporary_layout(
+            3,
+            ["Back Gripper Camera", "Downward Camera", "Arm Camera"],
+            active_name="Back Gripper Camera",
+        )
+        app.processEvents()
+
+        assert tabs.layout_count() == 3
+        assert tabs.visible_stream_names() == [
+            "Back Gripper Camera",
+            "Downward Camera",
+            "Arm Camera",
+        ]
+        assert tabs.current_stream_name() == "Back Gripper Camera"
+        assert tabs._grid.getItemPosition(0) == (0, 0, 2, 1)
+        assert fake_settings.value("video/layout_count") == 4
+
+        tabs.restore_layout_snapshot(snapshot)
+        app.processEvents()
+
+        assert tabs.layout_count() == 4
+        assert tabs.visible_stream_names() == [
+            "Primary Camera",
+            "Back Gripper Camera",
+            "Downward Camera",
+            "Arm Camera",
+        ]
+    finally:
+        tabs.close()
+        tabs.deleteLater()
+        app.processEvents()

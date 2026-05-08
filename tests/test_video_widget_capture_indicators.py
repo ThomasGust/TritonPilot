@@ -90,3 +90,34 @@ def test_video_widget_shows_record_and_snapshot_indicators(monkeypatch, tmp_path
         widget.close()
         widget.deleteLater()
         app.processEvents()
+
+
+def test_video_widget_default_capture_names_are_flat_with_camera_and_time(monkeypatch, tmp_path):
+    app = _app()
+    monkeypatch.setattr("gui.video_widget.VideoRecorder", _FakeRecorder)
+    monkeypatch.setattr("gui.video_widget.VideoWidget._start_connect", lambda self: None)
+    monkeypatch.setattr(
+        "gui.video_widget.timestamped_camera_stem",
+        lambda camera_name, purpose=None: f"20260508-170000_{str(camera_name).replace(' ', '_')}_{purpose}",
+    )
+
+    def _fake_save_snapshot(frame, out_path):
+        Path(out_path).parent.mkdir(parents=True, exist_ok=True)
+        Path(out_path).touch()
+
+    monkeypatch.setattr("gui.video_widget.save_snapshot", _fake_save_snapshot)
+
+    widget = VideoWidget(_DummyManager(), "Primary Camera")
+    widget.last_frame = np.zeros((32, 32, 3), dtype=np.uint8)
+    try:
+        target = Path(widget.start_recording(out_dir=str(tmp_path), fps=24.0))
+        snap_path = Path(widget.save_snapshot(out_dir=str(tmp_path)))
+
+        assert target.parent == tmp_path
+        assert target.name == "20260508-170000_Primary_Camera_video.mp4"
+        assert snap_path.parent == tmp_path
+        assert snap_path.name == "20260508-170000_Primary_Camera_snapshot.png"
+    finally:
+        widget.close()
+        widget.deleteLater()
+        app.processEvents()

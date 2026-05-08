@@ -64,7 +64,7 @@ def test_pilot_publisher_sends_frames(monkeypatch):
     assert msgs[1]["seq"] > msgs[0]["seq"]
 
 
-def test_reverse_mode_flips_horizontal_axes(monkeypatch):
+def test_reverse_mode_flips_translation_axes_but_keeps_yaw_direction(monkeypatch):
     monkeypatch.setattr("input.pilot_service.time.sleep", lambda *_args, **_kwargs: None)
 
     svc = PilotPublisherService(endpoint="inproc://reverse_test", rate_hz=30.0, deadzone=0.0, debug=False)
@@ -98,11 +98,37 @@ def test_reverse_mode_flips_horizontal_axes(monkeypatch):
     rev = svc._build_frame(124.0, snap)
     assert rev.axes.lx == -0.25
     assert rev.axes.ly == 0.75
-    assert rev.axes.rx == -0.5
+    assert rev.axes.rx == 0.5
     assert rev.axes.ry == -0.2
     assert rev.axes.lt == 0.1
     assert rev.axes.rt == 0.9
     assert svc.current_modes()["reverse"] is True
+
+
+def test_left_bumper_is_default_reverse_toggle(monkeypatch):
+    monkeypatch.setattr("input.pilot_service.time.sleep", lambda *_args, **_kwargs: None)
+
+    svc = PilotPublisherService(endpoint="inproc://reverse_lb_test", rate_hz=30.0, deadzone=0.0, debug=False)
+
+    assert svc._reverse_toggle_button == "lb"
+    svc._handle_mode_edges({"lb": "down"})
+    assert svc.current_modes()["reverse"] is True
+    svc._handle_mode_edges({"lb": "down"})
+    assert svc.current_modes()["reverse"] is False
+
+
+def test_left_stick_defaults_to_lights_not_attitude_hold(monkeypatch):
+    monkeypatch.setattr("input.pilot_service.time.sleep", lambda *_args, **_kwargs: None)
+
+    svc = PilotPublisherService(endpoint="inproc://lstick_lights_test", rate_hz=30.0, deadzone=0.0, debug=False)
+
+    edges = {"lstick": "down"}
+    svc._handle_mode_edges(edges)
+
+    assert svc._attitude_hold_toggle_button == ""
+    assert svc._lights_toggle_button == "lstick"
+    assert edges["lights"] == "down"
+    assert svc.current_modes()["attitude_hold"] is False
 
 
 def test_aux_axes_are_embedded_in_frame(monkeypatch):

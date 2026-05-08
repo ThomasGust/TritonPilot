@@ -67,6 +67,7 @@ class VideoTabs(QWidget):
     LAYOUT_OPTIONS: tuple[tuple[str, int], ...] = (
         ("Single", 1),
         ("Stacked", 2),
+        ("Reverse", 3),
         ("Quad", 4),
     )
 
@@ -96,9 +97,9 @@ class VideoTabs(QWidget):
             self._layout_combo.addItem(label, count)
         self._layout_combo.currentIndexChanged.connect(self._on_layout_changed)
 
-        controls = QWidget()
-        controls.setObjectName("videoLayoutBar")
-        controls_lay = QHBoxLayout(controls)
+        self._controls_bar = QWidget()
+        self._controls_bar.setObjectName("videoLayoutBar")
+        controls_lay = QHBoxLayout(self._controls_bar)
         controls_lay.setContentsMargins(4, 2, 4, 2)
         controls_lay.setSpacing(6)
         controls_lay.addWidget(QLabel("View"), 0)
@@ -146,7 +147,7 @@ class VideoTabs(QWidget):
         outer = QVBoxLayout(self)
         outer.setContentsMargins(0, 0, 0, 0)
         outer.setSpacing(4)
-        outer.addWidget(controls, 0)
+        outer.addWidget(self._controls_bar, 0)
         outer.addLayout(self._grid, 1)
 
         for name in self.stream_names:
@@ -174,6 +175,8 @@ class VideoTabs(QWidget):
     def _allowed_layout_count(self, requested: int | None) -> int:
         if requested == 4:
             return 4
+        if requested == 3:
+            return 3
         if requested == 2:
             return 2
         return 1
@@ -246,9 +249,10 @@ class VideoTabs(QWidget):
             self._grid.takeAt(0)
 
         positions = {
-            1: [(0, 0)],
-            2: [(0, 0), (1, 0)],
-            4: [(0, 0), (0, 1), (1, 0), (1, 1)],
+            1: [(0, 0, 1, 1)],
+            2: [(0, 0, 1, 1), (1, 0, 1, 1)],
+            3: [(0, 0, 2, 1), (0, 1, 1, 1), (1, 1, 1, 1)],
+            4: [(0, 0, 1, 1), (0, 1, 1, 1), (1, 0, 1, 1), (1, 1, 1, 1)],
         }.get(visible_count, [])
 
         for idx in range(4):
@@ -259,10 +263,16 @@ class VideoTabs(QWidget):
         for col in range(2):
             self._grid.setColumnStretch(col, 0)
 
-        for idx, (row, col) in enumerate(positions):
-            self._grid.addWidget(self._panes[idx], row, col)
+        for idx, (row, col, row_span, col_span) in enumerate(positions):
+            self._grid.addWidget(self._panes[idx], row, col, row_span, col_span)
             self._grid.setRowStretch(row, 1)
             self._grid.setColumnStretch(col, 1)
+            if row_span > 1:
+                for spanned_row in range(row + 1, row + row_span):
+                    self._grid.setRowStretch(spanned_row, 1)
+            if col_span > 1:
+                for spanned_col in range(col + 1, col + col_span):
+                    self._grid.setColumnStretch(spanned_col, 1)
 
     def _refresh_layout(self, *, save: bool, emit: bool) -> None:
         self._pane_streams = self._normalized_assignments()
@@ -426,11 +436,11 @@ class VideoTabs(QWidget):
         for name in self.visible_stream_names():
             self._ensure_stream_started(name)
 
-    def set_active_pane(self, pane_index: int) -> bool:
+    def set_active_pane(self, pane_index: int, *, save: bool = True, emit: bool = True) -> bool:
         if pane_index < 0 or pane_index >= self._visible_pane_count():
             return False
         self._active_pane_index = pane_index
-        self._refresh_layout(save=True, emit=True)
+        self._refresh_layout(save=save, emit=emit)
         return True
 
     def visible_stream_names(self) -> list[str]:
@@ -451,6 +461,60 @@ class VideoTabs(QWidget):
     def layout_count(self) -> int:
         return int(self._pane_count)
 
+    def layout_snapshot(self) -> dict:
+        return {
+            "pane_count": int(self._pane_count),
+            "active_pane_index": int(self._active_pane_index),
+            "pane_streams": list(self._pane_streams),
+        }
+
+    def restore_layout_snapshot(self, snapshot: dict | None, *, save: bool = False, emit: bool = True) -> None:
+        if not isinstance(snapshot, dict):
+            return
+        try:
+            self._pane_count = self._allowed_layout_count(int(snapshot.get("pane_count", self._pane_count)))
+        except Exception:
+            self._pane_count = self._allowed_layout_count(self._pane_count)
+        streams = list(snapshot.get("pane_streams", []) or [])
+        for idx in range(len(self._pane_streams)):
+            name = streams[idx] if idx < len(streams) else None
+            self._pane_streams[idx] = name if name in self.stream_names else None
+        try:
+            self._active_pane_index = int(snapshot.get("active_pane_index", self._active_pane_index))
+        except Exception:
+            pass
+        self._refresh_layout(save=save, emit=emit)
+        for name in self.visible_stream_names():
+            self._ensure_stream_started(name)
+
+    def apply_temporary_layout(
+        self,
+        pane_count: int,
+        pane_streams: list[str],
+        *,
+        active_name: str | None = None,
+        emit: bool = True,
+    ) -> None:
+        self._pane_count = self._allowed_layout_count(int(pane_count))
+        unique: list[str] = []
+        for name in pane_streams:
+            if name in self.stream_names and name not in unique:
+                unique.append(name)
+        for name in self.stream_names:
+            if len(unique) >= len(self._pane_streams):
+                break
+            if name not in unique:
+                unique.append(name)
+        for idx in range(len(self._pane_streams)):
+            self._pane_streams[idx] = unique[idx] if idx < len(unique) else None
+        if active_name in unique:
+            self._active_pane_index = unique.index(active_name)
+        else:
+            self._active_pane_index = 0
+        self._refresh_layout(save=False, emit=emit)
+        for name in self.visible_stream_names():
+            self._ensure_stream_started(name)
+
     def current_video_widget(self) -> VideoWidget | None:
         name = self.current_stream_name()
         if name is None:
@@ -460,21 +524,24 @@ class VideoTabs(QWidget):
     def set_layout_controls_enabled(self, enabled: bool) -> None:
         self._layout_combo.setEnabled(bool(enabled))
 
+    def set_layout_controls_visible(self, visible: bool) -> None:
+        self._controls_bar.setVisible(bool(visible))
+
     def has_stream(self, name: str | None) -> bool:
         if not name:
             return False
         return name in self.stream_names
 
-    def set_current_stream(self, name: str) -> bool:
+    def set_current_stream(self, name: str, *, save: bool = True, emit: bool = True) -> bool:
         if name not in self.stream_names:
             return False
 
         visible_count = self._visible_pane_count()
         for idx in range(visible_count):
             if self._pane_streams[idx] == name:
-                return self.set_active_pane(idx)
+                return self.set_active_pane(idx, save=save, emit=emit)
 
-        return self._assign_stream_to_pane(self._active_pane_index, name, save=True, emit=True)
+        return self._assign_stream_to_pane(self._active_pane_index, name, save=save, emit=emit)
 
     def save_snapshot(self, out_dir: str | None = None, basename: str | None = None) -> str | None:
         vw = self.current_video_widget()

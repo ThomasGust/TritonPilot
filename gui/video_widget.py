@@ -13,6 +13,8 @@ from PyQt6.QtWidgets import QWidget, QLabel, QVBoxLayout, QSizePolicy
 import numpy as np
 
 from recording.video_recorder import VideoRecorder, save_snapshot
+from recording.save_location import DEFAULT_RECORDINGS_DIR
+from recording.capture_paths import timestamped_camera_stem, unique_capture_path
 from video.cam import RemoteCameraManager, RemoteCv2Camera
 from video.frame_correction import WaterCorrection
 from video.frame_rotation import rotate_frame
@@ -436,18 +438,18 @@ class VideoWidget(QWidget):
         """
         if self._rec is not None:
             target = self._rec.target
-            return str(target) if target is not None else str(Path(out_dir or "recordings") / f"{self.stream_name}.mp4")
+            return str(target) if target is not None else str(Path(out_dir or DEFAULT_RECORDINGS_DIR) / f"{self.stream_name}.mp4")
 
         if out_dir is None:
-            out_dir = str(Path("recordings"))
+            out_dir = str(DEFAULT_RECORDINGS_DIR)
         Path(out_dir).mkdir(parents=True, exist_ok=True)
 
         if basename is None:
-            base = f"{self.stream_name}_{time.strftime('%Y%m%d-%H%M%S')}"
+            base = timestamped_camera_stem(self.stream_name, "video")
         else:
             base = Path(basename).stem or self.stream_name
 
-        out_file = Path(out_dir) / f"{base}.mp4"
+        out_file = unique_capture_path(out_dir, base, ".mp4")
 
         self._rec = VideoRecorder(out_file, fps=fps)
         target = self._rec.start()
@@ -469,15 +471,15 @@ class VideoWidget(QWidget):
         if self.last_frame is None:
             return None
         if out_dir is None:
-            out_dir = str(Path("recordings"))
+            out_dir = str(DEFAULT_RECORDINGS_DIR)
         Path(out_dir).mkdir(parents=True, exist_ok=True)
 
         if basename is None:
-            base = f"{self.stream_name}_{time.strftime('%Y%m%d-%H%M%S')}"
+            base = timestamped_camera_stem(self.stream_name, "snapshot")
         else:
             base = Path(basename).stem or self.stream_name
 
-        out_path = Path(out_dir) / f"{base}.png"
+        out_path = unique_capture_path(out_dir, base, ".png")
         try:
             save_snapshot(self.last_frame, out_path)
         except Exception:

@@ -97,24 +97,29 @@ CONTROLLER_WIN_BUTTONS = _parse_int_list_env("TRITON_CONTROLLER_WIN_BUTTONS", []
 DEPTH_HOLD_TOGGLE_BUTTON = os.environ.get("TRITON_DEPTH_HOLD_TOGGLE", "rstick").strip().lower()
 DEPTH_HOLD_DEFAULT = os.environ.get("TRITON_DEPTH_HOLD_DEFAULT", "0").strip().lower() in ("1", "true", "yes")
 
-# Attitude hold is also toggled topside and transmitted in PilotFrame.modes.
-# Default button: press down the LEFT stick (lstick) so both hold modes share
-# the same topside pathway.
-ATTITUDE_HOLD_TOGGLE_BUTTON = os.environ.get("TRITON_ATTITUDE_HOLD_TOGGLE", "lstick").strip().lower()
+# Attitude hold is still available from the hold-test UI/API, but its controller
+# shortcut defaults to unbound so L3 can be used for lights.
+ATTITUDE_HOLD_TOGGLE_BUTTON = os.environ.get("TRITON_ATTITUDE_HOLD_TOGGLE", "").strip().lower()
 ATTITUDE_HOLD_DEFAULT = os.environ.get("TRITON_ATTITUDE_HOLD_DEFAULT", "0").strip().lower() in ("1", "true", "yes")
 
-# Lights are toggled from the pilot keyboard. The GUI queues a synthetic edge
-# on the next PilotFrame so TritonOS can keep using its normal button-edge path.
+# Lights are toggled by sending TritonOS its normal synthetic button edge.
+# Default controls: keyboard L or controller L3.
 LIGHTS_TOGGLE_SHORTCUT = os.environ.get("TRITON_LIGHTS_TOGGLE_SHORTCUT", "L").strip() or "L"
+LIGHTS_TOGGLE_BUTTON = os.environ.get("TRITON_LIGHTS_TOGGLE_BUTTON", "lstick").strip().lower()
 LIGHTS_TOGGLE_EDGE = os.environ.get("TRITON_LIGHTS_TOGGLE_EDGE", "lights").strip().lower() or "lights"
 
-# Reverse drive mode rotates the pilot's horizontal-plane commands by 180
-# degrees so the controls still match when the operator swaps to a rear camera.
-# By default we expose this from the GUI/menu with the `R` shortcut and keep the
-# controller-side toggle unbound so we do not accidentally reuse a button that
-# already has a safety- or payload-related meaning on the ROV side.
+# Arm/disarm is sent as TritonOS' normal controller menu/start edge. The laptop
+# keyboard shortcut gives the pilot a backup when that hardware button fails.
+ARM_DISARM_TOGGLE_SHORTCUT = os.environ.get("TRITON_ARM_DISARM_SHORTCUT", "O").strip() or "O"
+ARM_DISARM_TOGGLE_EDGE = os.environ.get("TRITON_ARM_DISARM_EDGE", "menu").strip().lower() or "menu"
+
+# Reverse drive mode rotates the pilot's translation commands by 180 degrees
+# so surge/sway still match when the operator swaps to a rear camera. Yaw keeps
+# its normal left/right sign.
+# By default this is toggleable from the controller's left bumper (`lb`) and
+# from the GUI/menu with the `R` shortcut.
 REVERSE_MODE_DEFAULT = os.environ.get("TRITON_REVERSE_MODE_DEFAULT", "0").strip().lower() in ("1", "true", "yes")
-REVERSE_TOGGLE_BUTTON = os.environ.get("TRITON_REVERSE_TOGGLE", "").strip().lower()
+REVERSE_TOGGLE_BUTTON = os.environ.get("TRITON_REVERSE_TOGGLE", "lb").strip().lower()
 REVERSE_TOGGLE_SHORTCUT = os.environ.get("TRITON_REVERSE_SHORTCUT", "R").strip() or "R"
 
 
@@ -151,8 +156,8 @@ PILOT_MAX_GAIN_STEP = float(os.environ.get("TRITON_PILOT_MAX_GAIN_STEP", "0.05")
 
 # Pilot-adjustable gain for the T200-powered wrist motor. This is transmitted
 # separately from the main vehicle max gain so the manipulator can be tuned
-# independently when the ROV-side controller chooses to honor it.
-T200_WRIST_GAIN_DEFAULT = float(os.environ.get("TRITON_T200_WRIST_GAIN_DEFAULT", "1.0"))
+# independently by TritonOS.
+T200_WRIST_GAIN_DEFAULT = float(os.environ.get("TRITON_T200_WRIST_GAIN_DEFAULT", "0.50"))
 T200_WRIST_GAIN_MIN = float(os.environ.get("TRITON_T200_WRIST_GAIN_MIN", "0.10"))
 T200_WRIST_GAIN_MAX = float(os.environ.get("TRITON_T200_WRIST_GAIN_MAX", "1.0"))
 T200_WRIST_GAIN_STEP = float(os.environ.get("TRITON_T200_WRIST_GAIN_STEP", "0.05"))
@@ -161,8 +166,8 @@ T200_WRIST_GAIN_STEP = float(os.environ.get("TRITON_T200_WRIST_GAIN_STEP", "0.05
 # These are for TOPSIDE display/interaction only (they don't change onboard behavior
 # unless you also update rov_config.py on the ROV side). They are used to show the
 # estimated setpoint when using "walk target" depth hold.
-DEPTH_HOLD_WALK_DEADBAND = float(os.environ.get("TRITON_DEPTH_HOLD_WALK_DEADBAND", "0.08"))
-DEPTH_HOLD_WALK_RATE_MPS = float(os.environ.get("TRITON_DEPTH_HOLD_WALK_RATE_MPS", "0.60"))
+DEPTH_HOLD_WALK_DEADBAND = float(os.environ.get("TRITON_DEPTH_HOLD_WALK_DEADBAND", "0.10"))
+DEPTH_HOLD_WALK_RATE_MPS = float(os.environ.get("TRITON_DEPTH_HOLD_WALK_RATE_MPS", "0.45"))
 DEPTH_HOLD_SENSOR_STALE_S = float(os.environ.get("TRITON_DEPTH_HOLD_SENSOR_STALE_S", "2.0"))
 ATTITUDE_HOLD_SENSOR_STALE_S = float(os.environ.get("TRITON_ATTITUDE_HOLD_SENSOR_STALE_S", "1.0"))
 

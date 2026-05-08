@@ -1,13 +1,13 @@
 {
   "default_pane_order": [
     "Primary Camera",
-    "Back Gripper Camera",
-    "Downward Camera",
-    "Arm Camera"
+    "Aux Camera",
+    "Arm Camera",
+    "Back Gripper Camera"
   ],
   "streams": [
     {
-      "name": "Primary Camera",
+      "name": "Arm Camera",
       "device": "/dev/v4l/by-path/*1.2.3*video-index2",
       "width": 1920,
       "height": 1080,
@@ -35,8 +35,8 @@
       "enabled": true
     },
         {
-      "name": "Downward Camera",
-      "device": "/dev/v4l/by-path/*1.2.1*video-index2",
+      "name": "Primary Camera",
+      "device": "/dev/v4l/by-path/*1.2.5*video-index2",
       "width": 1920,
       "height": 1080,
       "fps": 30,
@@ -49,7 +49,7 @@
       "enabled": true
     },
     {
-      "name": "Arm Camera",
+      "name": "Aux Camera",
       "device": "/dev/v4l/by-path/*1.2.6*video-index2",
       "width": 1920,
       "height": 1080,

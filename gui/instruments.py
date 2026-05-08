@@ -4,7 +4,7 @@ import math
 import time
 from collections import deque
 from pathlib import Path
-from typing import Optional
+from typing import Callable, Optional
 
 from PyQt6.QtCore import Qt, QPointF, QRectF, QTimer, pyqtSignal
 from PyQt6.QtGui import QColor, QFont, QPainter, QPainterPath, QPen
@@ -499,11 +499,12 @@ class AttitudeHistoryChartWidget(QWidget):
 class AttitudeInspectorPage(QWidget):
     """Dedicated page for attitude inspection, charting, and CSV capture."""
 
-    def __init__(self, parent=None):
+    def __init__(self, parent=None, recording_session_provider: Callable[[], Path] | None = None):
         super().__init__(parent)
         self._record_fh = None
         self._record_path: Optional[Path] = None
         self._record_started_ts: Optional[float] = None
+        self._recording_session_provider = recording_session_provider
 
         title = QLabel("Attitude Inspector")
         title_font = QFont(title.font())
@@ -585,11 +586,19 @@ class AttitudeInspectorPage(QWidget):
         else:
             self._stop_recording()
 
+    def set_recording_session_provider(self, provider: Callable[[], Path] | None) -> None:
+        self._recording_session_provider = provider
+
+    def _make_recording_session_dir(self) -> Path:
+        if self._recording_session_provider is not None:
+            return Path(self._recording_session_provider())
+        return StreamRecorder.make_session_dir()
+
     def _start_recording(self) -> None:
         if self._record_fh is not None:
             return
         try:
-            session_dir = StreamRecorder.make_session_dir("recordings")
+            session_dir = self._make_recording_session_dir()
             target = Path(session_dir) / "attitude_timeseries.csv"
             fh = open(target, "a", buffering=1, newline="")
             fh.write("unix_time_s,elapsed_s,roll_deg,pitch_deg,yaw_deg,mode,mag_qual\n")
@@ -925,7 +934,7 @@ class HoldTestPanel(QWidget):
         self.control_card.body.addLayout(control_grid)
 
         shortcut_hint = QLabel(
-            f"R3 toggles depth hold, L3 toggles attitude hold, and {self._lights_shortcut_text.upper()} toggles lights."
+            f"R3 toggles depth hold; L3 and {self._lights_shortcut_text.upper()} toggle lights."
         )
         shortcut_hint.setWordWrap(True)
         shortcut_hint.setStyleSheet("color: #8f96aa;")

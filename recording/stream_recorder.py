@@ -10,6 +10,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, Optional
 
+from recording.save_location import DEFAULT_RECORDINGS_DIR
+
 
 @dataclass
 class RecordEvent:
@@ -32,7 +34,7 @@ class StreamRecorder:
         self._fh = None
 
     @staticmethod
-    def make_session_dir(base_dir: str | os.PathLike = "recordings") -> Path:
+    def make_session_dir(base_dir: str | os.PathLike = DEFAULT_RECORDINGS_DIR) -> Path:
         ts = time.strftime("%Y%m%d-%H%M%S")
         p = Path(base_dir) / ts
         p.mkdir(parents=True, exist_ok=True)

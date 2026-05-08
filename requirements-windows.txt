@@ -1,5 +1,7 @@
 PyQt6
+matplotlib
 pyzmq
 pygame
 numpy
 opencv-python
+scipy

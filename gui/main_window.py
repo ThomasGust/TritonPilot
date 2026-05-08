@@ -6,20 +6,26 @@ import socket
 import threading
 import time
 from collections import deque
-from PyQt6.QtCore import pyqtSignal, Qt, QTimer, QEvent
+from pathlib import Path
+
+from PyQt6.QtCore import pyqtSignal, Qt, QTimer, QEvent, QSettings
 from PyQt6.QtGui import QAction
 from PyQt6.QtWidgets import (
     QApplication,
+    QFileDialog,
     QMainWindow,
     QWidget,
     QHBoxLayout,
     QVBoxLayout,
     QLabel,
     QMessageBox,
+    QPushButton,
     QStackedWidget,
     QTabBar,
 )
 from config import (
+    ARM_DISARM_TOGGLE_EDGE,
+    ARM_DISARM_TOGGLE_SHORTCUT,
     ATTITUDE_HOLD_SENSOR_STALE_S,
     PILOT_PUB_ENDPOINT,
     SENSOR_SUB_ENDPOINT,
@@ -44,14 +50,20 @@ from input.pilot_service import PilotPublisherService
 from telemetry.sensor_service import SensorSubscriberService
 from video.cam import RemoteCameraManager
 from recording.stream_recorder import StreamRecorder
+from recording.save_location import DEFAULT_RECORDINGS_DIR, SaveLocation, is_available_directory, resolve_recordings_dir
+from recording.capture_paths import timestamped_camera_stem, unique_capture_path
 from gui.video_tabs import VideoTabs
 from gui.sensor_panel import SensorPanel
 from gui.instruments import InstrumentPanel, HoldTestPanel, AttitudeInspectorPage
-from gui.crab_detection_window import CrabDetectionWindow
+from analysis.gui.crab_detection_window import CrabDetectionWindow
+from analysis.gui.edna_analysis_window import EDNAAnalysisWindow
+from analysis.gui.iceberg_tracking_window import IcebergTrackingWindow
 from gui.management_page import ManagementPage
 
 
 class MainWindow(QMainWindow):
+    SAVE_DIR_SETTINGS_KEY = "recording/save_dir"
+
     # we'll receive sensor messages from a background thread → emit to UI thread
     sensor_msg_sig = pyqtSignal(dict)
     pilot_status_sig = pyqtSignal(dict)
@@ -91,16 +103,6 @@ class MainWindow(QMainWindow):
             if self._stream_name_matches(name, REVERSE_CAMERA_KEYWORDS):
                 return name
         return None
-
-    def _select_forward_stream_name(self) -> str | None:
-        if self.video_panel is None:
-            return None
-        if self._forward_restore_stream and self.video_panel.has_stream(self._forward_restore_stream):
-            return self._forward_restore_stream
-        for name in self.video_panel.stream_names:
-            if name != self._reverse_camera_name:
-                return name
-        return self.video_panel.current_stream_name()
 
     def _sync_reverse_action(self) -> None:
         act = getattr(self, "_reverse_act", None)
@@ -166,21 +168,6 @@ class MainWindow(QMainWindow):
         self._set_status(self._video_lbl, " | ".join(parts))
         self._set_status_tone(self._video_lbl, "warn" if mismatch else None)
 
-    def _apply_reverse_camera_selection(self) -> None:
-        if self.video_panel is None:
-            return
-
-        cur = self.video_panel.current_stream_name()
-        if self._reverse_enabled:
-            if cur and cur != self._reverse_camera_name:
-                self._forward_restore_stream = cur
-            if self._reverse_camera_name:
-                self.video_panel.set_current_stream(self._reverse_camera_name)
-        else:
-            target = self._select_forward_stream_name()
-            if target:
-                self.video_panel.set_current_stream(target)
-
     def _set_reverse_mode(self, enabled: bool, *, announce: bool = True) -> None:
         enabled = bool(enabled)
         self._reverse_enabled = enabled
@@ -189,7 +176,6 @@ class MainWindow(QMainWindow):
         except Exception:
             pass
         self._sync_reverse_action()
-        self._apply_reverse_camera_selection()
         self._refresh_drive_status()
         self._refresh_video_status()
         if announce:
@@ -202,7 +188,12 @@ class MainWindow(QMainWindow):
     def _toggle_reverse_mode(self, checked: bool | None = None) -> None:
         if checked is None:
             checked = not self._reverse_enabled
-        self._set_reverse_mode(bool(checked))
+        checked = bool(checked)
+        self._set_reverse_mode(checked)
+        if checked and getattr(self, "_page_stack", None) is not None:
+            self._set_center_page("reverse_drive", announce=False)
+        elif not checked and getattr(self, "_active_page_name", "") == "reverse_drive":
+            self._set_center_page("pilot", announce=False)
 
     def _on_video_tab_changed(self, *_args) -> None:
         self._refresh_video_status()
@@ -226,25 +217,49 @@ class MainWindow(QMainWindow):
     def _on_page_tab_changed(self, index: int) -> None:
         index = int(index)
         if index == 1:
-            self._set_center_page("hold_test")
+            self._set_center_page("reverse_drive")
         elif index == 2:
-            self._set_center_page("attitude")
+            self._set_center_page("hold_test")
         elif index == 3:
+            self._set_center_page("attitude")
+        elif index == 4:
             self._set_center_page("management")
         else:
             self._set_center_page("pilot")
 
     def _set_center_page(self, page_name: str, *, announce: bool = True) -> None:
         page_name = str(page_name)
-        if page_name not in {"pilot", "hold_test", "attitude", "management"}:
+        if page_name not in {"pilot", "reverse_drive", "hold_test", "attitude", "management"}:
             page_name = "pilot"
         if page_name == getattr(self, "_active_page_name", "pilot"):
             return
 
-        if page_name == "hold_test":
+        previous_page = getattr(self, "_active_page_name", "")
+        if previous_page == "reverse_drive" and page_name != "reverse_drive":
+            if self.video_panel is not None:
+                self._pilot_layout_count_restore = int(self.video_panel.layout_count())
+            if getattr(self, "_reverse_page_owns_mode", False):
+                self._reverse_page_owns_mode = False
+                self._set_reverse_mode(False, announce=False)
+
+        if page_name == "reverse_drive":
             if self.video_panel is not None:
                 if self._active_page_name == "pilot":
                     self._pilot_layout_count_restore = int(self.video_panel.layout_count())
+                self._attach_shared_video_panel(self._reverse_video_host_layout)
+                self.video_panel.set_layout_controls_visible(True)
+                self.video_panel.set_layout_controls_enabled(True)
+            if not self._reverse_enabled:
+                self._reverse_page_owns_mode = True
+                self._set_reverse_mode(True, announce=False)
+            else:
+                self._reverse_page_owns_mode = False
+            self._page_stack.setCurrentWidget(self._reverse_page)
+        elif page_name == "hold_test":
+            if self.video_panel is not None:
+                if self._active_page_name == "pilot":
+                    self._pilot_layout_count_restore = int(self.video_panel.layout_count())
+                self.video_panel.set_layout_controls_visible(True)
                 self.video_panel.set_layout_controls_enabled(False)
                 self.video_panel.set_layout_count(1)
                 self._attach_shared_video_panel(self._hold_test_video_host_layout)
@@ -254,6 +269,7 @@ class MainWindow(QMainWindow):
                 if self._active_page_name == "pilot":
                     self._pilot_layout_count_restore = int(self.video_panel.layout_count())
                 try:
+                    self.video_panel.set_layout_controls_visible(True)
                     self.video_panel.setParent(None)
                 except Exception:
                     pass
@@ -267,15 +283,18 @@ class MainWindow(QMainWindow):
                 if self._active_page_name == "pilot":
                     self._pilot_layout_count_restore = int(self.video_panel.layout_count())
                 try:
+                    self.video_panel.set_layout_controls_visible(True)
                     self.video_panel.setParent(None)
                 except Exception:
                     pass
             self._page_stack.setCurrentWidget(self._attitude_page)
         else:
             if self.video_panel is not None:
+                self.video_panel.set_layout_controls_visible(True)
                 self.video_panel.set_layout_controls_enabled(True)
                 self._attach_shared_video_panel(self._pilot_video_host_layout)
-                self.video_panel.set_layout_count(int(self._pilot_layout_count_restore))
+                if previous_page != "reverse_drive":
+                    self.video_panel.set_layout_count(int(self._pilot_layout_count_restore))
             self._page_stack.setCurrentWidget(self._pilot_page)
 
         self._active_page_name = page_name
@@ -283,7 +302,7 @@ class MainWindow(QMainWindow):
         prev = False
         try:
             prev = self._page_tabs.blockSignals(True)
-            tab_index = {"pilot": 0, "hold_test": 1, "attitude": 2, "management": 3}.get(page_name, 0)
+            tab_index = {"pilot": 0, "reverse_drive": 1, "hold_test": 2, "attitude": 3, "management": 4}.get(page_name, 0)
             self._page_tabs.setCurrentIndex(tab_index)
         finally:
             try:
@@ -295,6 +314,7 @@ class MainWindow(QMainWindow):
         if announce:
             label = {
                 "pilot": "Pilot",
+                "reverse_drive": "Reverse Drive",
                 "hold_test": "Hold Test",
                 "attitude": "Attitude Inspector",
                 "management": "Vehicle Setup",
@@ -314,7 +334,6 @@ class MainWindow(QMainWindow):
         self._link_state_last: str = "NO DATA"
         self._reverse_enabled: bool = False
         self._reverse_camera_name: str | None = None
-        self._forward_restore_stream: str | None = None
         self._depth_hold_status_text: str = "Depth Hold: OFF"
         self._attitude_hold_status_text: str = "Att Hold: OFF"
 
@@ -416,6 +435,8 @@ class MainWindow(QMainWindow):
         }
         self._lights_toggle_shortcut_text = str(LIGHTS_TOGGLE_SHORTCUT or "L").strip() or "L"
         self._lights_toggle_edge = str(LIGHTS_TOGGLE_EDGE or "lights").strip().lower() or "lights"
+        self._arm_disarm_shortcut_text = str(ARM_DISARM_TOGGLE_SHORTCUT or "O").strip() or "O"
+        self._arm_disarm_edge = str(ARM_DISARM_TOGGLE_EDGE or "menu").strip().lower() or "menu"
         self._servo_wrist_timer = QTimer(self)
         self._servo_wrist_timer.setInterval(33)
         self._servo_wrist_timer.timeout.connect(self._update_servo_wrist_keyboard_axes)
@@ -437,11 +458,17 @@ class MainWindow(QMainWindow):
         # optional stream recorder (pilot + sensors + heartbeat)
         self._stream_recorder: StreamRecorder | None = None
         self._record_dir: str | None = None
+        self._settings = QSettings("TritonPilot", "ROVTopside")
+        self._preferred_save_dir: str = str(self._settings.value(self.SAVE_DIR_SETTINGS_KEY, "") or "").strip()
+        self._save_dir_act: QAction | None = None
+        self._reset_save_dir_act: QAction | None = None
         # 2) sensor subscriber (ROV -> topside)
         self.sensor_panel = SensorPanel()
         self.instrument_panel = InstrumentPanel()
         self.hold_test_panel = HoldTestPanel(pilot_svc=self.pilot_svc, endpoint=MANAGEMENT_RPC_ENDPOINT)
-        self.attitude_inspector_page = AttitudeInspectorPage()
+        self.attitude_inspector_page = AttitudeInspectorPage(
+            recording_session_provider=lambda: self._make_recording_session_dir()[0]
+        )
         self.hold_test_panel.setMinimumWidth(320)
         self._sensor_ui_pending: dict[tuple[str, str], dict] = {}
         self._sensor_ui_pending_order: list[tuple[str, str]] = []
@@ -482,6 +509,7 @@ class MainWindow(QMainWindow):
         self._pilot_layout_count_restore = 4
         if self.video_panel is not None:
             self._pilot_layout_count_restore = int(self.video_panel.layout_count())
+        self._reverse_page_owns_mode: bool = False
         self._active_page_name = ""
 
         # layout
@@ -494,11 +522,24 @@ class MainWindow(QMainWindow):
         self._page_tabs.setDocumentMode(True)
         self._page_tabs.setExpanding(False)
         self._page_tabs.addTab("Pilot")
+        self._page_tabs.addTab("Reverse Drive")
         self._page_tabs.addTab("Hold Test")
         self._page_tabs.addTab("Attitude")
         self._page_tabs.addTab("Vehicle Setup")
         self._page_tabs.currentChanged.connect(self._on_page_tab_changed)
-        root.addWidget(self._page_tabs, 0)
+
+        top_bar = QWidget()
+        top_bar_lay = QHBoxLayout(top_bar)
+        top_bar_lay.setContentsMargins(0, 0, 0, 0)
+        top_bar_lay.setSpacing(8)
+        top_bar_lay.addWidget(self._page_tabs, 0)
+        top_bar_lay.addStretch(1)
+        self._arm_disarm_btn = QPushButton()
+        self._arm_disarm_btn.setObjectName("armDisarmButton")
+        self._arm_disarm_btn.setMinimumWidth(132)
+        self._arm_disarm_btn.clicked.connect(self._toggle_arm_disarm_from_ui)
+        top_bar_lay.addWidget(self._arm_disarm_btn, 0)
+        root.addWidget(top_bar, 0)
 
         self._page_stack = QStackedWidget()
         root.addWidget(self._page_stack, 1)
@@ -524,6 +565,22 @@ class MainWindow(QMainWindow):
             right_lay.addWidget(self.sensor_panel, 3)
             pilot_outer.addWidget(right_col, 1)
         self._page_stack.addWidget(self._pilot_page)
+
+        self._reverse_page = QWidget()
+        reverse_outer = QHBoxLayout(self._reverse_page)
+        reverse_outer.setContentsMargins(0, 0, 0, 0)
+        reverse_outer.setSpacing(8)
+        self._reverse_video_host = QWidget()
+        self._reverse_video_host_layout = QVBoxLayout(self._reverse_video_host)
+        self._reverse_video_host_layout.setContentsMargins(0, 0, 0, 0)
+        self._reverse_video_host_layout.setSpacing(0)
+        if self.video_panel is None:
+            self._reverse_video_host_layout.addWidget(
+                self._make_center_placeholder("Video unavailable.\nReverse drive controls can still be toggled from the View menu."),
+                1,
+            )
+        reverse_outer.addWidget(self._reverse_video_host, 1)
+        self._page_stack.addWidget(self._reverse_page)
 
         self._hold_test_page = QWidget()
         hold_outer = QHBoxLayout(self._hold_test_page)
@@ -558,10 +615,9 @@ class MainWindow(QMainWindow):
         self._make_menu()
         self._set_center_page("pilot", announce=False)
         self._sync_reverse_action()
+        self._refresh_arm_disarm_button()
         self._refresh_drive_status()
         self._refresh_video_status()
-        if self._reverse_enabled:
-            self._apply_reverse_camera_selection()
 
         try:
             self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
@@ -644,6 +700,45 @@ class MainWindow(QMainWindow):
             3000,
         )
 
+    def _arm_disarm_button_state(self) -> tuple[str, bool, bool]:
+        armed_known = bool(self._last_hb_ts > 0 and isinstance(self._last_hb, dict) and "armed" in self._last_hb)
+        armed = bool((self._last_hb or {}).get("armed", False)) if armed_known else False
+        action_text = "Disarm" if armed else "Arm"
+        if not armed_known:
+            action_text = "Arm/Disarm"
+        return action_text, armed, armed_known
+
+    def _refresh_arm_disarm_button(self) -> None:
+        btn = getattr(self, "_arm_disarm_btn", None)
+        if btn is None:
+            return
+        action_text, armed, armed_known = self._arm_disarm_button_state()
+        shortcut_text = str(self._arm_disarm_shortcut_text or "O").upper()
+        btn.setText(f"{action_text} ({shortcut_text})")
+        btn.setToolTip(
+            f"Send the ROV arm/disarm toggle. Keyboard shortcut: {shortcut_text}."
+        )
+        btn.setProperty("armed", "true" if armed else "false")
+        btn.setProperty("known", "true" if armed_known else "false")
+        try:
+            btn.style().unpolish(btn)
+            btn.style().polish(btn)
+            btn.update()
+        except Exception:
+            pass
+
+    def _toggle_arm_disarm_from_ui(self, *_args) -> None:
+        try:
+            self.pilot_svc.queue_edge(self._arm_disarm_edge)
+        except Exception as exc:
+            self.statusBar().showMessage(f"Could not send arm/disarm toggle: {exc}", 5000)
+            return
+        shortcut_text = str(self._arm_disarm_shortcut_text or "O").upper()
+        self.statusBar().showMessage(
+            f"Arm/disarm toggle sent  |  key: {shortcut_text}",
+            3000,
+        )
+
     def eventFilter(self, obj, event):
         try:
             et = event.type()
@@ -665,6 +760,13 @@ class MainWindow(QMainWindow):
                         shortcut_text = self._lights_toggle_shortcut_text.upper()
                     except Exception:
                         shortcut_text = "L"
+                    try:
+                        arm_shortcut_text = self._arm_disarm_shortcut_text.upper()
+                    except Exception:
+                        arm_shortcut_text = "O"
+                    if event.text().upper() == arm_shortcut_text:
+                        self._toggle_arm_disarm_from_ui()
+                        return False
                     if event.text().upper() == shortcut_text:
                         self._toggle_lights_from_keyboard()
                         return False
@@ -724,7 +826,6 @@ class MainWindow(QMainWindow):
             if reverse != self._reverse_enabled:
                 self._reverse_enabled = reverse
                 self._sync_reverse_action()
-                self._apply_reverse_camera_selection()
 
             # Pilot max gain display (Y/A adjusts this topside).
             try:
@@ -861,6 +962,7 @@ class MainWindow(QMainWindow):
             self._prev_hb_rx_ts = now_ts
             self._last_hb_ts = now_ts
             self._last_hb = msg
+            self._refresh_arm_disarm_button()
         elif typ == "net" or msg.get("sensor") == "network":
             self._last_net_ts = time.time()
             self._last_net = msg
@@ -1031,6 +1133,7 @@ class MainWindow(QMainWindow):
             parts.append(f"sensor_age={sensor_age:.2f}s")
 
         self._set_status(self._link_lbl, " | ".join(parts))
+        self._refresh_arm_disarm_button()
         try:
             if status == "OK":
                 self._link_lbl.setStyleSheet("color: #9be89b;")
@@ -1350,8 +1453,102 @@ class MainWindow(QMainWindow):
             )
             return
         self.video_panel.set_layout_count(pane_count)
-        labels = {1: "single-camera", 2: "stacked dual-camera", 4: "quad-camera"}
+        labels = {1: "single-camera", 2: "stacked dual-camera", 3: "reverse-pane", 4: "quad-camera"}
         self.statusBar().showMessage(f"Video layout set to {labels.get(int(pane_count), 'custom')} view", 3000)
+
+    def _recordings_location(self) -> SaveLocation:
+        return resolve_recordings_dir(self._preferred_save_dir)
+
+    def _recordings_output_dir(self) -> tuple[Path, SaveLocation]:
+        location = self._recordings_location()
+        try:
+            location.path.mkdir(parents=True, exist_ok=True)
+            return location.path, location
+        except Exception as exc:
+            fallback = resolve_recordings_dir(None)
+            if location.path == fallback.path:
+                raise
+            try:
+                fallback.path.mkdir(parents=True, exist_ok=True)
+            except Exception:
+                raise exc
+            reason = f"Could not use save directory {location.path}: {exc}"
+            return fallback.path, SaveLocation(fallback.path, used_fallback=True, reason=reason)
+
+    def _make_recording_session_dir(self) -> tuple[Path, SaveLocation]:
+        location = self._recordings_location()
+        try:
+            return StreamRecorder.make_session_dir(location.path), location
+        except Exception as exc:
+            fallback = resolve_recordings_dir(None)
+            if location.path == fallback.path:
+                raise
+            session_dir = StreamRecorder.make_session_dir(fallback.path)
+            reason = f"Could not use save directory {location.path}: {exc}"
+            return session_dir, SaveLocation(fallback.path, used_fallback=True, reason=reason)
+
+    def _capture_output_dir(self) -> tuple[Path, SaveLocation | None]:
+        if self._record_dir and self._stream_recorder is not None and is_available_directory(self._record_dir):
+            return Path(self._record_dir), None
+
+        if self._record_dir and self._stream_recorder is None:
+            self._record_dir = None
+
+        return self._recordings_output_dir()
+
+    def _save_location_note(self, location: SaveLocation | None) -> str:
+        if location is not None and location.used_fallback and self._preferred_save_dir:
+            return " (using repo fallback)"
+        return ""
+
+    def _current_save_dir_summary(self) -> str:
+        location = self._recordings_location()
+        if location.used_fallback and self._preferred_save_dir:
+            return f"Current save root: {location.path}\nFallback active: {location.reason}"
+        return f"Current save root: {location.path}"
+
+    def _refresh_save_directory_actions(self) -> None:
+        summary = self._current_save_dir_summary()
+        if self._save_dir_act is not None:
+            self._save_dir_act.setToolTip(summary)
+        if self._reset_save_dir_act is not None:
+            self._reset_save_dir_act.setEnabled(bool(self._preferred_save_dir))
+            self._reset_save_dir_act.setToolTip(f"Use {DEFAULT_RECORDINGS_DIR} for new recordings and snapshots.")
+
+    def _choose_save_directory(self) -> None:
+        start_dir = str(self._recordings_location().path)
+        selected_dir = QFileDialog.getExistingDirectory(
+            self,
+            "Choose recordings and snapshots folder",
+            start_dir,
+        )
+        if not selected_dir:
+            return
+
+        selected_path = Path(selected_dir).expanduser()
+        self._preferred_save_dir = str(selected_path)
+        self._settings.setValue(self.SAVE_DIR_SETTINGS_KEY, self._preferred_save_dir)
+        if self._stream_recorder is None:
+            self._record_dir = None
+        self._refresh_save_directory_actions()
+
+        location = self._recordings_location()
+        if location.used_fallback:
+            QMessageBox.warning(
+                self,
+                "Save Directory",
+                f"{location.reason}\n\nNew captures will use:\n{location.path}",
+            )
+        else:
+            self.statusBar().showMessage(f"Save directory set: {location.path}", 5000)
+
+    def _reset_save_directory(self) -> None:
+        self._preferred_save_dir = ""
+        self._settings.remove(self.SAVE_DIR_SETTINGS_KEY)
+        if self._stream_recorder is None:
+            self._record_dir = None
+        self._refresh_save_directory_actions()
+        self.statusBar().showMessage(f"Save directory reset: {DEFAULT_RECORDINGS_DIR}", 5000)
 
     def _make_menu(self):
         bar = self.menuBar()
@@ -1360,12 +1557,21 @@ class MainWindow(QMainWindow):
         view_menu = bar.addMenu("&View")
         task_menu = bar.addMenu("&Tasks")
 
+        self._save_dir_act = QAction("Set Save Directory...", self)
+        self._save_dir_act.triggered.connect(self._choose_save_directory)
+        rec_menu.addAction(self._save_dir_act)
+
+        self._reset_save_dir_act = QAction("Use Repository Recordings Folder", self)
+        self._reset_save_dir_act.triggered.connect(self._reset_save_directory)
+        rec_menu.addAction(self._reset_save_dir_act)
+        rec_menu.addSeparator()
+
         self._reverse_act = QAction("Reverse Drive", self)
         self._reverse_act.setCheckable(True)
         self._reverse_act.setChecked(bool(self._reverse_enabled))
         self._reverse_act.setShortcut(REVERSE_TOGGLE_SHORTCUT)
         self._reverse_act.setToolTip(
-            "Swap to reverse driving mode: flips surge/sway/yaw and switches to the rear camera when available."
+            "Swap to reverse driving mode: flips surge/sway while keeping yaw and the video layout unchanged."
         )
         self._reverse_act.toggled.connect(self._toggle_reverse_mode)
         view_menu.addAction(self._reverse_act)
@@ -1392,6 +1598,16 @@ class MainWindow(QMainWindow):
         crab_act.triggered.connect(self._run_crab_detection_task)
         task_menu.addAction(crab_act)
 
+        iceberg_tracking_act = QAction("Iceberg Tracking", self)
+        iceberg_tracking_act.setToolTip("Open the iceberg survey and threat-level assessment applet.")
+        iceberg_tracking_act.triggered.connect(self._run_iceberg_tracking_task)
+        task_menu.addAction(iceberg_tracking_act)
+
+        edna_act = QAction("eDNA Analysis", self)
+        edna_act.setToolTip("Open the eDNA count entry and percent-frequency judge display.")
+        edna_act.triggered.connect(self._run_edna_analysis_task)
+        task_menu.addAction(edna_act)
+
         # Stream log (JSONL)
         start_log = QAction("Start Stream Log", self)
         start_log.triggered.connect(self._start_stream_log)
@@ -1414,6 +1630,8 @@ class MainWindow(QMainWindow):
         stop_vid = QAction("Stop Video Recording", self)
         stop_vid.triggered.connect(self._stop_video_recording)
         rec_menu.addAction(stop_vid)
+
+        self._refresh_save_directory_actions()
 
         quit_act = QAction("Quit", self)
         quit_act.triggered.connect(self.close)
@@ -1459,13 +1677,43 @@ class MainWindow(QMainWindow):
         if self.video_panel is not None:
             self.video_panel.close()
         super().closeEvent(event)
+
+    def _current_camera_name_for_file(self) -> str:
+        if self.video_panel is not None:
+            try:
+                name = self.video_panel.current_stream_name()
+                if name:
+                    return str(name)
+            except Exception:
+                pass
+            try:
+                vw = self.video_panel.current_video_widget()
+                name = getattr(vw, "stream_name", None)
+                if name:
+                    return str(name)
+            except Exception:
+                pass
+        return "camera"
+
     def _start_stream_log(self):
         if self._stream_recorder is not None:
             return
-        session_dir = StreamRecorder.make_session_dir("recordings")
-        self._record_dir = str(session_dir)
-        self._stream_recorder = StreamRecorder(session_dir / "streams.jsonl")
-        self._stream_recorder.start()
+        try:
+            out_dir, location = self._capture_output_dir()
+        except Exception as exc:
+            self.statusBar().showMessage(f"Could not prepare save directory: {exc}", 5000)
+            return
+        self._record_dir = str(out_dir)
+        stem = timestamped_camera_stem(self._current_camera_name_for_file(), "streams")
+        target = unique_capture_path(out_dir, stem, ".jsonl")
+        self._stream_recorder = StreamRecorder(target)
+        try:
+            self._stream_recorder.start()
+        except Exception as exc:
+            self._stream_recorder = None
+            self._record_dir = None
+            self.statusBar().showMessage(f"Could not start stream log: {exc}", 5000)
+            return
 
         # record pilot frames via callback
         try:
@@ -1473,7 +1721,7 @@ class MainWindow(QMainWindow):
         except Exception:
             pass
 
-        self.statusBar().showMessage(f"Recording streams → {self._record_dir}", 5000)
+        self.statusBar().showMessage(f"Recording streams -> {target}{self._save_location_note(location)}", 5000)
 
     def _stop_stream_log(self):
         if self._stream_recorder is None:
@@ -1496,10 +1744,14 @@ class MainWindow(QMainWindow):
     def _save_snapshot(self):
         if self.video_panel is None:
             return
-        out_dir = self._record_dir or str(StreamRecorder.make_session_dir("recordings"))
-        path = self.video_panel.save_snapshot(out_dir=out_dir)
+        try:
+            out_dir, location = self._capture_output_dir()
+        except Exception as exc:
+            self.statusBar().showMessage(f"Could not prepare save directory: {exc}", 5000)
+            return
+        path = self.video_panel.save_snapshot(out_dir=str(out_dir))
         if path:
-            self.statusBar().showMessage(f"Saved snapshot: {path}", 5000)
+            self.statusBar().showMessage(f"Saved snapshot: {path}{self._save_location_note(location)}", 5000)
         else:
             self.statusBar().showMessage("No frame yet (snapshot not saved)", 3000)
 
@@ -1527,13 +1779,41 @@ class MainWindow(QMainWindow):
         except Exception as e:
             QMessageBox.critical(self, "Crab Detection", f"Crab detection failed:\n{e}")
 
+    def _run_iceberg_tracking_task(self):
+        try:
+            window = IcebergTrackingWindow(parent=self)
+            self._task_windows.append(window)
+            window.destroyed.connect(lambda *_: self._task_windows.remove(window) if window in self._task_windows else None)
+            window.show()
+            window.raise_()
+            window.activateWindow()
+            self.statusBar().showMessage("Iceberg tracking applet opened.", 4000)
+        except Exception as e:
+            QMessageBox.critical(self, "Iceberg Tracking", f"Iceberg tracking failed:\n{e}")
+
+    def _run_edna_analysis_task(self):
+        try:
+            window = EDNAAnalysisWindow(parent=self)
+            self._task_windows.append(window)
+            window.destroyed.connect(lambda *_: self._task_windows.remove(window) if window in self._task_windows else None)
+            window.show()
+            window.raise_()
+            window.activateWindow()
+            self.statusBar().showMessage("eDNA analysis applet opened.", 4000)
+        except Exception as e:
+            QMessageBox.critical(self, "eDNA Analysis", f"eDNA analysis failed:\n{e}")
+
     def _start_video_recording(self):
         vw = self._current_video_widget()
         if vw is None:
             return
-        out_dir = self._record_dir or str(StreamRecorder.make_session_dir("recordings"))
-        vw.start_recording(out_dir=out_dir, basename=vw.stream_name, fps=30.0)
-        self.statusBar().showMessage(f"Video recording started → {out_dir}", 5000)
+        try:
+            out_dir, location = self._capture_output_dir()
+        except Exception as exc:
+            self.statusBar().showMessage(f"Could not prepare save directory: {exc}", 5000)
+            return
+        vw.start_recording(out_dir=str(out_dir), fps=30.0)
+        self.statusBar().showMessage(f"Video recording started -> {out_dir}{self._save_location_note(location)}", 5000)
 
     def _stop_video_recording(self):
         vw = self._current_video_widget()
@@ -1549,10 +1829,14 @@ class MainWindow(QMainWindow):
         if hasattr(vw, "is_recording") and vw.is_recording():
             self.statusBar().showMessage("Video recording already active", 3000)
             return
-        out_dir = self._record_dir or str(StreamRecorder.make_session_dir("recordings"))
-        target = vw.start_recording(out_dir=out_dir, basename=vw.stream_name, fps=30.0)
+        try:
+            out_dir, location = self._capture_output_dir()
+        except Exception as exc:
+            self.statusBar().showMessage(f"Could not prepare save directory: {exc}", 5000)
+            return
+        target = vw.start_recording(out_dir=str(out_dir), fps=30.0)
         if target:
-            self.statusBar().showMessage(f"Video recording started -> {target}", 5000)
+            self.statusBar().showMessage(f"Video recording started -> {target}{self._save_location_note(location)}", 5000)
         else:
             self.statusBar().showMessage("Could not start video recording", 3000)
 
