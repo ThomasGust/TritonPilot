@@ -51,6 +51,7 @@ from analysis.iceberg_tracking import (
     local_point_to_lat_lon,
     normalize_heading_deg,
 )
+from gui.responsive import resize_to_available_screen, vertical_scroll_area
 
 
 LEVEL_COLORS = {
@@ -81,7 +82,7 @@ class IcebergMapWidget(QWidget):
         self._heading_deg = 180.0
         self._future_track_only = True
         self._assessments: list[ThreatAssessment] = []
-        self.setMinimumSize(560, 420)
+        self.setMinimumSize(420, 320)
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
 
     def set_tracking_state(
@@ -425,7 +426,7 @@ class IcebergTrackingWindow(QMainWindow):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setWindowTitle("Iceberg Tracking Threat Assessment")
-        self.resize(1280, 820)
+        resize_to_available_screen(self, 1280, 820, min_width=880, min_height=600)
         self._platforms = list(DEFAULT_PLATFORMS)
         self._assessments: list[ThreatAssessment] = []
         self._survey_status = evaluate_survey_numbers([None, None, None, None, None])
@@ -433,7 +434,10 @@ class IcebergTrackingWindow(QMainWindow):
         self._last_coordinate_mode = "dms"
 
         splitter = QSplitter(Qt.Orientation.Horizontal)
-        splitter.addWidget(self._build_input_panel())
+        input_scroll = vertical_scroll_area(self._build_input_panel())
+        input_scroll.setMinimumWidth(340)
+        input_scroll.setMaximumWidth(460)
+        splitter.addWidget(input_scroll)
         splitter.addWidget(self._build_results_panel())
         splitter.setSizes([390, 890])
 
@@ -446,12 +450,13 @@ class IcebergTrackingWindow(QMainWindow):
         self._apply_local_style()
         self._connect_inputs()
         self._recalculate()
+        resize_to_available_screen(self, 1280, 820, min_width=880, min_height=600)
 
     def _build_input_panel(self) -> QWidget:
         panel = QFrame()
         panel.setObjectName("trackingPanel")
-        panel.setMinimumWidth(360)
-        panel.setMaximumWidth(470)
+        panel.setMinimumWidth(340)
+        panel.setMaximumWidth(440)
         layout = QVBoxLayout(panel)
         layout.setContentsMargins(16, 16, 16, 16)
         layout.setSpacing(12)

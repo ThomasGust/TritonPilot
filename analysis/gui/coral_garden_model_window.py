@@ -31,6 +31,7 @@ from analysis.coral_garden_model import (
     format_cm,
     model_bounds,
 )
+from gui.responsive import resize_to_available_screen
 
 
 class CoralGardenViewport(QWidget):
@@ -57,7 +58,7 @@ class CoralGardenViewport(QWidget):
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.addWidget(self.canvas)
-        self.setMinimumSize(640, 460)
+        self.setMinimumSize(420, 320)
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
 
         self._draw_scene(preserve_view=False)
@@ -280,7 +281,7 @@ class CoralGardenModelWindow(QMainWindow):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setWindowTitle("Coral Garden CAD Model")
-        self.resize(1180, 720)
+        resize_to_available_screen(self, 1180, 720, min_width=860, min_height=560)
         self._presentation_mode = False
 
         self.viewport = CoralGardenViewport()
@@ -296,12 +297,13 @@ class CoralGardenModelWindow(QMainWindow):
 
         self._apply_window_styles()
         self._update_model()
+        resize_to_available_screen(self, 1180, 720, min_width=860, min_height=560)
         self.statusBar().showMessage("Coral garden model ready.")
 
     def _build_controls(self) -> QWidget:
         panel = QWidget()
-        panel.setMinimumWidth(300)
-        panel.setMaximumWidth(380)
+        panel.setMinimumWidth(280)
+        panel.setMaximumWidth(360)
         layout = QVBoxLayout(panel)
 
         title = QLabel("Coral Garden Model")

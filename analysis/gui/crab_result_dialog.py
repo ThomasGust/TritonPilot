@@ -2,9 +2,14 @@ from __future__ import annotations
 
 import cv2
 import numpy as np
-from PyQt6.QtCore import Qt
-from PyQt6.QtGui import QGuiApplication, QImage, QPixmap
-from PyQt6.QtWidgets import QDialog, QHBoxLayout, QLabel, QSizePolicy, QVBoxLayout, QWidget
+from PyQt6.QtCore import Qt, QUrl
+from PyQt6.QtGui import QDesktopServices, QImage, QPixmap
+from PyQt6.QtWidgets import QDialog, QHBoxLayout, QLabel, QPushButton, QSizePolicy, QVBoxLayout, QWidget
+
+from gui.responsive import resize_to_available_screen
+
+
+COMPETITION_SUBMISSION_URL = "https://cbjfq.share.hsforms.com/2rHEWllQ5QO6D7Z4CwVM7IQ"
 
 
 def frame_to_pixmap(frame: np.ndarray | None) -> QPixmap:
@@ -80,6 +85,10 @@ class CrabDetectionResultView(QWidget):
         self.summary_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.summary_label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
 
+        self.submit_results_btn = QPushButton("Upload Results")
+        self.submit_results_btn.setToolTip("Open the competition result upload form")
+        self.submit_results_btn.clicked.connect(self._open_submission_form)
+
         self.source_label = QLabel("")
         self.source_label.setObjectName("summaryHint")
         self.source_label.setWordWrap(True)
@@ -101,8 +110,12 @@ class CrabDetectionResultView(QWidget):
         image_row.addWidget(self.original_panel, 1)
         image_row.addWidget(self.unwrapped_panel, 1)
 
+        summary_row = QHBoxLayout()
+        summary_row.addWidget(self.summary_label, 1)
+        summary_row.addWidget(self.submit_results_btn)
+
         root = QVBoxLayout(self)
-        root.addWidget(self.summary_label)
+        root.addLayout(summary_row)
         root.addWidget(self.source_label)
         root.addWidget(self.detail_label)
         root.addLayout(image_row, 1)
@@ -151,6 +164,9 @@ class CrabDetectionResultView(QWidget):
         self.summary_label.style().polish(self.summary_label)
         self.summary_label.update()
 
+    def _open_submission_form(self) -> None:
+        QDesktopServices.openUrl(QUrl(COMPETITION_SUBMISSION_URL))
+
 
 class CrabResultDialog(QDialog):
     def __init__(
@@ -181,15 +197,4 @@ class CrabResultDialog(QDialog):
         root = QVBoxLayout(self)
         root.addWidget(self.result_view)
 
-        self._resize_to_screen()
-
-    def _resize_to_screen(self) -> None:
-        screen = self.screen() or QGuiApplication.primaryScreen()
-        if screen is None:
-            self.resize(1400, 900)
-            return
-
-        available = screen.availableGeometry()
-        max_width = max(900, int(available.width() * 0.95))
-        max_height = max(650, int(available.height() * 0.9))
-        self.resize(min(max_width, 1500), min(max_height, 900))
+        resize_to_available_screen(self, 1500, 900, min_width=900, min_height=650, width_ratio=0.95)

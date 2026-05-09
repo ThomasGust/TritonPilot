@@ -54,6 +54,8 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 
+from gui.responsive import horizontal_scroll_area, resize_to_available_screen, vertical_scroll_area
+
 
 @dataclass
 class ProcessingSettings:
@@ -910,7 +912,7 @@ class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("Underwater PVC / Red Target Color Corrector")
-        self.resize(1280, 820)
+        resize_to_available_screen(self, 1280, 820, min_width=900, min_height=620)
 
         self.video_path: Optional[str] = None
         self.cap: Optional[cv2.VideoCapture] = None
@@ -930,6 +932,7 @@ class MainWindow(QMainWindow):
 
         self._build_ui()
         self._connect_actions()
+        resize_to_available_screen(self, 1280, 820, min_width=900, min_height=620)
         self.update_status("Open a video to begin.")
 
     def _build_ui(self):
@@ -953,7 +956,7 @@ class MainWindow(QMainWindow):
         top_bar.addWidget(self.export_frames_button)
         top_bar.addWidget(self.cancel_button)
         top_bar.addStretch(1)
-        layout.addLayout(top_bar)
+        layout.addWidget(horizontal_scroll_area(top_bar))
 
         main = QHBoxLayout()
         layout.addLayout(main, stretch=1)
@@ -963,7 +966,7 @@ class MainWindow(QMainWindow):
 
         self.preview_label = QLabel("No video loaded")
         self.preview_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.preview_label.setMinimumSize(800, 500)
+        self.preview_label.setMinimumSize(520, 320)
         self.preview_label.setStyleSheet("QLabel { background: #111; color: #ddd; border: 1px solid #333; }")
         preview_col.addWidget(self.preview_label, stretch=1)
 
@@ -976,10 +979,11 @@ class MainWindow(QMainWindow):
         timeline.addWidget(self.play_button)
         timeline.addWidget(self.frame_slider, stretch=1)
         timeline.addWidget(self.frame_label)
-        preview_col.addLayout(timeline)
+        preview_col.addWidget(horizontal_scroll_area(timeline))
 
-        side = QVBoxLayout()
-        main.addLayout(side, stretch=1)
+        side_panel = QWidget()
+        side = QVBoxLayout(side_panel)
+        main.addWidget(vertical_scroll_area(side_panel), stretch=1)
 
         side.addWidget(self._make_correction_group())
         side.addWidget(self._make_target_group())

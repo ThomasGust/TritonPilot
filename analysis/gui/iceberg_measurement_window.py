@@ -28,6 +28,7 @@ from analysis.iceberg_measurement import (
     measure_affine_variable_length,
     measure_line_endpoint_iceberg_variable_length,
 )
+from gui.responsive import horizontal_scroll_area, resize_to_available_screen
 
 
 IMAGE_SUFFIXES = {".jpg", ".jpeg", ".png", ".bmp", ".tif", ".tiff", ".webp"}
@@ -73,7 +74,7 @@ class MeasurementCanvas(QWidget):
         self._last_pan_pos: tuple[float, float] | None = None
         self._zoom = 1.0
         self._pan = np.array([0.0, 0.0], dtype=np.float64)
-        self.setMinimumSize(760, 460)
+        self.setMinimumSize(520, 340)
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
         self.setMouseTracking(True)
         self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
@@ -558,7 +559,7 @@ class IcebergMeasurementWindow(QMainWindow):
         super().__init__(parent)
         self.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose, True)
         self.setWindowTitle("Iceberg Hull Measurement")
-        self.resize(1400, 860)
+        resize_to_available_screen(self, 1400, 860, min_width=860, min_height=600)
 
         self._video_path: Path | None = None
         self._video_capture: cv2.VideoCapture | None = None
@@ -572,6 +573,7 @@ class IcebergMeasurementWindow(QMainWindow):
 
         self._build_ui()
         self._show_empty_state()
+        resize_to_available_screen(self, 1400, 860, min_width=860, min_height=600)
 
         if media_paths:
             self.set_media_paths(media_paths)
@@ -685,8 +687,8 @@ class IcebergMeasurementWindow(QMainWindow):
 
         container = QWidget(self)
         layout = QVBoxLayout(container)
-        layout.addLayout(video_row)
-        layout.addLayout(measurement_row)
+        layout.addWidget(horizontal_scroll_area(video_row))
+        layout.addWidget(horizontal_scroll_area(measurement_row))
         layout.addWidget(self.source_label)
         layout.addWidget(self.summary_label)
         layout.addWidget(self.detail_label)

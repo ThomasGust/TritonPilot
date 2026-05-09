@@ -37,6 +37,7 @@ from analysis.edna_analysis import (
     format_percent,
     total_seen,
 )
+from gui.responsive import horizontal_scroll_area, resize_to_available_screen
 
 
 class JudgeDisplayWidget(QWidget):
@@ -47,10 +48,12 @@ class JudgeDisplayWidget(QWidget):
         self.title_label = QLabel("eDNA Frequency Analysis")
         self.title_label.setObjectName("ednaJudgeTitle")
         self.title_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.title_label.setWordWrap(True)
 
         self.total_label = QLabel("Total sightings: 0")
         self.total_label.setObjectName("ednaJudgeTotal")
         self.total_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.total_label.setWordWrap(True)
 
         self.table = QTableWidget(0, 3)
         self.table.setObjectName("ednaJudgeTable")
@@ -69,6 +72,7 @@ class JudgeDisplayWidget(QWidget):
         self.formula_label = QLabel("Percent frequency = number seen / total seen * 100")
         self.formula_label.setObjectName("ednaJudgeFormula")
         self.formula_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.formula_label.setWordWrap(True)
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(22, 22, 22, 22)
@@ -171,9 +175,10 @@ class JudgeDisplayWindow(QMainWindow):
         super().__init__(parent)
         self.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose, True)
         self.setWindowTitle("eDNA Judge Display")
-        self.resize(1180, 780)
+        resize_to_available_screen(self, 1180, 780, min_width=760, min_height=560)
         self.display = JudgeDisplayWidget(self)
         self.setCentralWidget(self.display)
+        resize_to_available_screen(self, 1180, 780, min_width=760, min_height=560)
 
     def set_results(self, rows: list[FrequencyRow], precision: int = 2) -> None:
         self.display.set_results(rows, precision)
@@ -184,7 +189,7 @@ class EDNAAnalysisWindow(QMainWindow):
         super().__init__(parent)
         self.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose, True)
         self.setWindowTitle("eDNA Frequency Analysis")
-        self.resize(1320, 820)
+        resize_to_available_screen(self, 1320, 820, min_width=860, min_height=580)
 
         self._rows: list[FrequencyRow] = calculate_frequency_rows([0] * len(DEFAULT_SPECIES))
         self._judge_window: JudgeDisplayWindow | None = None
@@ -193,6 +198,7 @@ class EDNAAnalysisWindow(QMainWindow):
         self._updating_counts = False
 
         self._build_ui()
+        resize_to_available_screen(self, 1320, 820, min_width=860, min_height=580)
         self._apply_local_style()
         if use_sample:
             self._load_sample_counts()
@@ -226,9 +232,11 @@ class EDNAAnalysisWindow(QMainWindow):
         self.total_card = self._make_summary_card("Total sightings", "0")
         self.observed_card = self._make_summary_card("Species observed", "0/10")
         self.top_card = self._make_summary_card("Top species", "-")
-        header_layout.addWidget(self.total_card)
-        header_layout.addWidget(self.observed_card)
-        header_layout.addWidget(self.top_card)
+        card_row = QHBoxLayout()
+        card_row.addWidget(self.total_card)
+        card_row.addWidget(self.observed_card)
+        card_row.addWidget(self.top_card)
+        header_layout.addWidget(horizontal_scroll_area(card_row), 0)
         root.addWidget(header)
 
         splitter = QSplitter(Qt.Orientation.Horizontal)
@@ -244,7 +252,7 @@ class EDNAAnalysisWindow(QMainWindow):
     def _build_input_panel(self) -> QWidget:
         panel = QFrame()
         panel.setObjectName("ednaPanel")
-        panel.setMinimumWidth(470)
+        panel.setMinimumWidth(420)
         layout = QVBoxLayout(panel)
         layout.setContentsMargins(16, 16, 16, 16)
         layout.setSpacing(12)
@@ -343,7 +351,7 @@ class EDNAAnalysisWindow(QMainWindow):
     def _make_summary_card(label_text: str, value_text: str) -> QLabel:
         label = QLabel(f"{label_text}\n{value_text}")
         label.setObjectName("ednaSummaryCard")
-        label.setMinimumWidth(170)
+        label.setMinimumWidth(130)
         label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         label.setWordWrap(True)
         return label

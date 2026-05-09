@@ -34,6 +34,7 @@ from analysis.crab_detector_cv import (
     render_detection_views,
 )
 from analysis.gui.crab_result_dialog import CrabDetectionResultView, frame_to_pixmap
+from gui.responsive import horizontal_scroll_area, resize_to_available_screen
 
 IMAGE_SUFFIXES = {".jpg", ".jpeg", ".png", ".bmp", ".tif", ".tiff", ".webp"}
 VIDEO_SUFFIXES = {".mp4", ".mov", ".m4v", ".avi", ".mkv", ".wmv"}
@@ -96,7 +97,7 @@ class CornerPickerCanvas(QWidget):
         self._image_width = 0
         self._image_height = 0
         self._points: list[tuple[float, float]] = []
-        self.setMinimumSize(720, 440)
+        self.setMinimumSize(520, 320)
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
         self.setMouseTracking(True)
 
@@ -220,7 +221,7 @@ class ManualBoardPickerDialog(QDialog):
     def __init__(self, image: np.ndarray, parent=None):
         super().__init__(parent)
         self.setWindowTitle("Manual Plane Corners")
-        self.resize(1100, 760)
+        resize_to_available_screen(self, 1100, 760, min_width=700, min_height=500)
         self._selected_polygon: np.ndarray | None = None
 
         self.canvas = CornerPickerCanvas(self)
@@ -254,6 +255,7 @@ class ManualBoardPickerDialog(QDialog):
         layout = QVBoxLayout(self)
         layout.addWidget(self.canvas, 1)
         layout.addLayout(controls)
+        resize_to_available_screen(self, 1100, 760, min_width=700, min_height=500)
         self._update_controls(0)
 
     def selected_polygon(self) -> np.ndarray | None:
@@ -285,7 +287,7 @@ class CrabDetectionWindow(QMainWindow):
         super().__init__(parent)
         self.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose, True)
         self.setWindowTitle("Crab Competition Analyzer")
-        self.resize(1600, 950)
+        resize_to_available_screen(self, 1600, 950, min_width=900, min_height=620)
 
         self._force_square = bool(force_square)
         self._unwrap_size = normalize_unwrap_size(unwrap_size)
@@ -307,6 +309,7 @@ class CrabDetectionWindow(QMainWindow):
 
         self._build_ui()
         self._show_empty_state()
+        resize_to_available_screen(self, 1600, 950, min_width=900, min_height=620)
 
         if image_paths:
             self.set_media_paths(image_paths)
@@ -403,7 +406,7 @@ class CrabDetectionWindow(QMainWindow):
         video_top_row.addWidget(self.video_frame_slider, 1)
         video_top_row.addWidget(self.video_position_label)
         video_top_row.addWidget(self.video_run_frame_btn)
-        video_controls.addLayout(video_top_row)
+        video_controls.addWidget(horizontal_scroll_area(video_top_row))
 
         video_range_row = QHBoxLayout()
         video_range_row.addWidget(QLabel("Scan start"))
@@ -418,13 +421,13 @@ class CrabDetectionWindow(QMainWindow):
         video_range_row.addWidget(self.video_interval_spin)
         video_range_row.addWidget(self.video_scan_range_btn)
         video_range_row.addStretch(1)
-        video_controls.addLayout(video_range_row)
+        video_controls.addWidget(horizontal_scroll_area(video_range_row))
 
         self.result_view = CrabDetectionResultView(self)
 
         container = QWidget(self)
         layout = QVBoxLayout(container)
-        layout.addLayout(controls)
+        layout.addWidget(horizontal_scroll_area(controls))
         layout.addWidget(self.path_label)
         layout.addWidget(self.video_controls_container)
         layout.addWidget(self.result_view, 1)
@@ -744,7 +747,7 @@ class CrabDetectionWindow(QMainWindow):
             QApplication.restoreOverrideCursor()
 
         if result is None:
-            self.current_summary_text = "No crabs were detected in that video range."
+            self.current_summary_text = "No reliable crab result was found in that video range."
             self.result_view.set_result(
                 self.current_summary_text,
                 self._video_current_frame,
@@ -752,7 +755,8 @@ class CrabDetectionWindow(QMainWindow):
                 source_text=str(self._video_path),
                 detail_text=(
                     f"scan={start_seconds:.2f}s-{end_seconds:.2f}s | "
-                    f"interval={self.video_interval_spin.value():.2f}s"
+                    f"interval={self.video_interval_spin.value():.2f}s | "
+                    "try a clearer range with the whole board in view"
                 ),
                 tone="warn",
             )

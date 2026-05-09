@@ -24,6 +24,7 @@ from PyQt6.QtWidgets import (
 
 from analysis.gui.crab_result_dialog import frame_to_pixmap
 from analysis.planar_measurement import MeasurementError, measure_planar_height_from_plane
+from gui.responsive import horizontal_scroll_area, resize_to_available_screen
 
 
 IMAGE_SUFFIXES = {".jpg", ".jpeg", ".png", ".bmp", ".tif", ".tiff", ".webp"}
@@ -67,7 +68,7 @@ class PlanarMeasurementCanvas(QWidget):
         self._last_pan_pos: tuple[float, float] | None = None
         self._zoom = 1.0
         self._pan = np.array([0.0, 0.0], dtype=np.float64)
-        self.setMinimumSize(760, 460)
+        self.setMinimumSize(300, 240)
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
         self.setMouseTracking(True)
         self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
@@ -532,7 +533,7 @@ class PlanarHeightMeasurementWindow(QMainWindow):
         super().__init__(parent)
         self.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose, True)
         self.setWindowTitle("Planar Prop Height Measurement")
-        self.resize(1480, 900)
+        resize_to_available_screen(self, 1480, 900, min_width=900, min_height=620)
 
         self._video_path: Path | None = None
         self._video_capture: cv2.VideoCapture | None = None
@@ -549,6 +550,7 @@ class PlanarHeightMeasurementWindow(QMainWindow):
 
         self._build_ui()
         self._show_empty_state()
+        resize_to_available_screen(self, 1480, 900, min_width=900, min_height=620)
 
         if media_paths:
             self.set_media_paths(media_paths)
@@ -659,6 +661,7 @@ class PlanarHeightMeasurementWindow(QMainWindow):
         source_label = QLabel("Original frame: click the plane rectangle")
         source_label.setObjectName("summaryHint")
         source_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        source_label.setWordWrap(True)
         source_layout.addWidget(source_label)
         source_layout.addWidget(self.source_canvas, 1)
 
@@ -668,6 +671,7 @@ class PlanarHeightMeasurementWindow(QMainWindow):
         plane_label = QLabel("Unwrapped plane: draw references and height")
         plane_label.setObjectName("summaryHint")
         plane_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        plane_label.setWordWrap(True)
         plane_layout.addWidget(plane_label)
         plane_layout.addWidget(self.plane_canvas, 1)
 
@@ -679,8 +683,8 @@ class PlanarHeightMeasurementWindow(QMainWindow):
 
         container = QWidget(self)
         layout = QVBoxLayout(container)
-        layout.addLayout(video_row)
-        layout.addLayout(measurement_row)
+        layout.addWidget(horizontal_scroll_area(video_row))
+        layout.addWidget(horizontal_scroll_area(measurement_row))
         layout.addWidget(self.source_label)
         layout.addWidget(self.summary_label)
         layout.addWidget(self.detail_label)

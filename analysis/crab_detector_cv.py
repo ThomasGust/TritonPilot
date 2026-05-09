@@ -972,6 +972,7 @@ def extract_reference_copy_candidate_boxes(mask):
     image_area = height * width
     min_area = max(900, int(image_area * 0.00065))
     max_area = int(image_area * 0.04)
+    min_box_area = max(1600, int(image_area * 0.0014))
     min_width = max(22, int(max(height, width) * 0.020))
     min_height = max(18, int(max(height, width) * 0.018))
 
@@ -984,6 +985,8 @@ def extract_reference_copy_candidate_boxes(mask):
         if area < min_area or area > max_area:
             continue
         if box_width < min_width or box_height < min_height:
+            continue
+        if box_width * box_height < min_box_area:
             continue
         if x <= 4 or x + box_width >= width - 4 or y + box_height >= height - 4:
             continue
@@ -1466,6 +1469,36 @@ def has_valid_reference_feature(classification, min_inliers=8):
     )
 
 
+def reliable_reference_feature_count(detections, min_inliers=8):
+    return sum(
+        1
+        for detection in detections
+        if has_valid_reference_feature(detection.get("classification", {}), min_inliers=min_inliers)
+    )
+
+
+def reference_copy_detections_are_reliable(detections):
+    count = len(detections)
+    if count < 3:
+        return False
+
+    feature_backed_count = reliable_reference_feature_count(detections, min_inliers=8)
+    strong_feature_count = reliable_reference_feature_count(detections, min_inliers=14)
+    green_count = sum(
+        1
+        for detection in detections
+        if detection.get("classification", {}).get("is_european_green")
+    )
+
+    if strong_feature_count >= 3:
+        return True
+    if count >= 6 and feature_backed_count >= 3 and green_count > 0:
+        return True
+    if count >= 8 and feature_backed_count >= 4:
+        return True
+    return False
+
+
 def detect_reference_copy_crabs(image):
     dark_mask = build_crab_mask(image)
     color_mask = build_reference_copy_color_mask(image)
@@ -1521,6 +1554,9 @@ def detect_reference_copy_crabs(image):
             detection["index"] = index
             x, y, box_width, box_height = [int(value) for value in detection["original_box"]]
             candidate_mask[y : y + box_height, x : x + box_width] = 255
+
+    if not reference_copy_detections_are_reliable(detections):
+        return None
 
     green_count = sum(
         1 for detection in detections if detection["classification"]["is_european_green"]
@@ -1620,6 +1656,12 @@ def detect_crabs(image, force_square=True, unwrap_size=DEFAULT_UNWRAP_SIZE, boar
         and board_area_ratio > 0.45
         and board_touches_image_border
     ):
+        fallback_result = detect_reference_copy_crabs(image)
+        if fallback_result is not None:
+            return fallback_result
+        return None
+
+    if detection_result["count"] <= 1 and board_polygon_source == "auto":
         fallback_result = detect_reference_copy_crabs(image)
         if fallback_result is not None:
             return fallback_result
@@ -2160,6 +2202,23 @@ def choose_temporal_vote_sample(samples):
     return best_sample, temporal_vote
 
 
+def video_sample_is_reliable(sample, min_quality=28.0):
+    if sample is None or sample.get("detection_result") is None:
+        return False
+
+    quality = sample.get("quality") or {}
+    count = int(quality.get("count", 0))
+    if count <= 0:
+        return False
+    if float(quality.get("quality", 0.0)) < float(min_quality):
+        return False
+    if count < 3:
+        return False
+    if count < 6 and float(quality.get("confidence", 0.0)) < 0.40:
+        return False
+    return True
+
+
 def detect_crabs_in_video(
     video_path,
     *,
@@ -2168,6 +2227,7 @@ def detect_crabs_in_video(
     sample_interval_seconds=0.5,
     temporal_voting=True,
     max_reasonable_count=12,
+    min_result_quality=28.0,
     force_square=True,
     unwrap_size=DEFAULT_UNWRAP_SIZE,
 ):
@@ -2227,6 +2287,8 @@ def detect_crabs_in_video(
             best_sample = voted_sample
 
     if best_sample is None or best_sample["detection_result"] is None:
+        return None
+    if not video_sample_is_reliable(best_sample, min_quality=min_result_quality):
         return None
 
     return {

@@ -106,6 +106,31 @@ def test_reference_copy_detector_counts_underwater_aux_video_frame():
     assert result["species_counts"]["native_rock"] == 2
 
 
+def test_reference_copy_detector_ignores_tiny_artifact_candidate():
+    video_path = (
+        Path(__file__).resolve().parents[1]
+        / "recordings"
+        / "20260506-184445"
+        / "Aux Camera.mp4"
+    )
+    if not video_path.exists():
+        import pytest
+
+        pytest.skip("underwater auxiliary camera recording is not available")
+
+    capture = cv2.VideoCapture(str(video_path))
+    capture.set(cv2.CAP_PROP_POS_MSEC, 3500)
+    ok, frame = capture.read()
+    capture.release()
+    assert ok
+
+    result = detect_crabs(frame)
+
+    assert result is not None
+    assert result["detector"] == "reference_copy"
+    assert result["count"] == 8
+
+
 def test_video_detector_selects_underwater_frame_with_expected_counts():
     video_path = (
         Path(__file__).resolve().parents[1]
@@ -132,6 +157,28 @@ def test_video_detector_selects_underwater_frame_with_expected_counts():
     assert result["temporal_vote"] is not None
     assert result["temporal_vote"]["signature"][:3] == (4, 2, 2)
     assert result["quality"]["confidence"] > 0.0
+
+
+def test_video_detector_rejects_low_evidence_gripper_scan():
+    video_path = (
+        Path(__file__).resolve().parents[1]
+        / "recordings"
+        / "20260507-204434"
+        / "Aux Camera.mp4"
+    )
+    if not video_path.exists():
+        import pytest
+
+        pytest.skip("low-evidence gripper recording is not available")
+
+    result = detect_crabs_in_video(
+        video_path,
+        start_seconds=0.0,
+        end_seconds=5.0,
+        sample_interval_seconds=0.5,
+    )
+
+    assert result is None
 
 
 def test_hard_pool_video_rejects_compression_artifact_frame():

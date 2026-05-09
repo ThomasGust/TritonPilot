@@ -37,6 +37,13 @@ def apply_modern_style(app: QApplication) -> None:
     qss = """
     QMainWindow { background: #18181c; }
     QWidget { font-size: 12px; }
+    QScrollArea#responsiveControlStrip {
+        background: transparent;
+        border: none;
+    }
+    QScrollArea#responsiveControlStrip > QWidget > QWidget {
+        background: transparent;
+    }
     QTabWidget::pane { border: 1px solid #2a2a32; border-radius: 10px; }
     QTabBar::tab { padding: 8px 12px; margin: 2px; border-radius: 10px; }
     QTabBar::tab:selected { background: #2a2a36; }

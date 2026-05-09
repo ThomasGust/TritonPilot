@@ -2,6 +2,15 @@
 
 Topside control, video, recording, and telemetry code for the TritonPilot ROV project.
 
+Mac setup for analysis applets:
+
+```sh
+python3 -m venv .venv
+source .venv/bin/activate
+python -m pip install --upgrade pip
+python -m pip install -r requirements-macos.txt
+```
+
 Standalone crab competition analyzer:
 `python -m analysis.main_crab_detection [image-folder-or-video ...]`
 
@@ -32,3 +41,6 @@ Underwater color correction / frame export applet:
 The analysis applets live under `analysis/` so a competition-day laptop can find
 the task-specific tools without digging through the pilot interface. The old
 top-level launcher names still forward to these modules for compatibility.
+The Qt applets size themselves to the active display and put wide toolbars in
+scrollable strips, which keeps the controls reachable on smaller Mac laptop
+screens as well as larger Windows monitors.

@@ -26,6 +26,7 @@ from PyQt6.QtWidgets import (
 
 from analysis.gui.crab_result_dialog import frame_to_pixmap
 from analysis.planar_measurement import MeasurementError, measure_planar_segment_from_plane
+from gui.responsive import horizontal_scroll_area, resize_to_available_screen
 
 
 IMAGE_SUFFIXES = {".jpg", ".jpeg", ".png", ".bmp", ".tif", ".tiff", ".webp"}
@@ -232,7 +233,7 @@ class PlanarMeasurementCanvas(QWidget):
         self._last_pan_pos: tuple[float, float] | None = None
         self._zoom = 1.0
         self._pan = np.array([0.0, 0.0], dtype=np.float64)
-        self.setMinimumSize(420, 340)
+        self.setMinimumSize(300, 240)
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
         self.setMouseTracking(True)
         self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
@@ -911,7 +912,7 @@ class MultiRectLengthMeasurementWindow(QMainWindow):
         super().__init__(parent)
         self.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose, True)
         self.setWindowTitle("Multi-Rectangle Prop Length Measurement")
-        self.resize(1480, 900)
+        resize_to_available_screen(self, 1480, 900, min_width=900, min_height=620)
 
         self._video_path: Path | None = None
         self._video_capture: cv2.VideoCapture | None = None
@@ -929,6 +930,7 @@ class MultiRectLengthMeasurementWindow(QMainWindow):
 
         self._build_ui()
         self._show_empty_state()
+        resize_to_available_screen(self, 1480, 900, min_width=900, min_height=620)
 
         if media_paths:
             self.set_media_paths(media_paths)
@@ -985,35 +987,44 @@ class MultiRectLengthMeasurementWindow(QMainWindow):
         self.zoom_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.undo_btn = QPushButton("Undo")
         self.undo_btn.clicked.connect(self.canvas_undo)
-        self.delete_btn = QPushButton("Delete Point")
+        self.delete_btn = QPushButton("Delete")
         self.delete_btn.clicked.connect(self.canvas_delete_selected)
-        self.clear_btn = QPushButton("Clear Points")
+        self.clear_btn = QPushButton("Clear")
         self.clear_btn.clicked.connect(self.canvas_clear)
-        self.add_measure_btn = QPushButton("Add Measure")
+        self.add_measure_btn = QPushButton("Add")
         self.add_measure_btn.clicked.connect(self._add_measurement_line)
-        self.remove_measure_btn = QPushButton("Remove Measure")
+        self.remove_measure_btn = QPushButton("Remove")
         self.remove_measure_btn.clicked.connect(self._remove_measurement_line)
 
-        measurement_row = QHBoxLayout()
-        measurement_row.addWidget(QLabel("Boundary"))
-        measurement_row.addWidget(self.source_mode_combo)
-        measurement_row.addSpacing(10)
-        measurement_row.addWidget(QLabel("Reference lengths"))
+        reference_row = QHBoxLayout()
+        reference_row.addWidget(QLabel("Boundary"))
+        reference_row.addWidget(self.source_mode_combo)
+        reference_row.addSpacing(10)
+        reference_row.addWidget(QLabel("Reference lengths"))
         for index, spinbox in enumerate(self.reference_length_spins, start=1):
-            measurement_row.addWidget(QLabel(f"R{index}"))
-            measurement_row.addWidget(spinbox)
-        measurement_row.addSpacing(10)
-        measurement_row.addWidget(self.zoom_out_btn)
-        measurement_row.addWidget(self.zoom_reset_btn)
-        measurement_row.addWidget(self.zoom_in_btn)
-        measurement_row.addWidget(self.pan_btn)
-        measurement_row.addWidget(self.zoom_label)
-        measurement_row.addStretch(1)
-        measurement_row.addWidget(self.add_measure_btn)
-        measurement_row.addWidget(self.remove_measure_btn)
-        measurement_row.addWidget(self.undo_btn)
-        measurement_row.addWidget(self.delete_btn)
-        measurement_row.addWidget(self.clear_btn)
+            reference_row.addWidget(QLabel(f"R{index}"))
+            reference_row.addWidget(spinbox)
+        reference_row.addStretch(1)
+
+        view_row = QHBoxLayout()
+        view_row.addWidget(QLabel("View"))
+        view_row.addWidget(self.zoom_out_btn)
+        view_row.addWidget(self.zoom_reset_btn)
+        view_row.addWidget(self.zoom_in_btn)
+        view_row.addWidget(self.pan_btn)
+        view_row.addWidget(self.zoom_label)
+        view_row.addStretch(1)
+
+        action_row = QHBoxLayout()
+        action_row.addWidget(QLabel("Measurements"))
+        action_row.addWidget(self.add_measure_btn)
+        action_row.addWidget(self.remove_measure_btn)
+        action_row.addSpacing(10)
+        action_row.addWidget(QLabel("Points"))
+        action_row.addWidget(self.undo_btn)
+        action_row.addWidget(self.delete_btn)
+        action_row.addWidget(self.clear_btn)
+        action_row.addStretch(1)
 
         self.source_label = QLabel("")
         self.source_label.setObjectName("summaryHint")
@@ -1063,6 +1074,7 @@ class MultiRectLengthMeasurementWindow(QMainWindow):
         source_label = QLabel("Original frame: click boundary lines, then drag orange corner anchors")
         source_label.setObjectName("summaryHint")
         source_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        source_label.setWordWrap(True)
         source_layout.addWidget(source_label)
         source_layout.addWidget(self.source_canvas, 1)
 
@@ -1072,6 +1084,7 @@ class MultiRectLengthMeasurementWindow(QMainWindow):
         preview_label = QLabel("Live unwrapped preview")
         preview_label.setObjectName("summaryHint")
         preview_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        preview_label.setWordWrap(True)
         preview_layout.addWidget(preview_label)
         preview_layout.addWidget(self.preview_canvas, 1)
 
@@ -1081,24 +1094,29 @@ class MultiRectLengthMeasurementWindow(QMainWindow):
         plane_label = QLabel("Unwrapped plane: draw references and measurements")
         plane_label.setObjectName("summaryHint")
         plane_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        plane_label.setWordWrap(True)
         plane_layout.addWidget(plane_label)
         plane_layout.addWidget(self.plane_canvas, 1)
 
-        setup_splitter = QSplitter(Qt.Orientation.Horizontal, self)
-        setup_splitter.addWidget(source_panel)
-        setup_splitter.addWidget(preview_panel)
-        setup_splitter.setStretchFactor(0, 1)
-        setup_splitter.setStretchFactor(1, 1)
+        self.setup_splitter = QSplitter(Qt.Orientation.Horizontal, self)
+        self.setup_splitter.setChildrenCollapsible(False)
+        self.setup_splitter.addWidget(source_panel)
+        self.setup_splitter.addWidget(preview_panel)
+        self.setup_splitter.setStretchFactor(0, 1)
+        self.setup_splitter.setStretchFactor(1, 1)
+        self.setup_splitter.setSizes([1, 1])
 
         self.view_tabs = QTabWidget(self)
-        self.view_tabs.addTab(setup_splitter, "Anchors")
+        self.view_tabs.addTab(self.setup_splitter, "Anchors")
         self.view_tabs.addTab(plane_panel, "Unwrapped")
         self.view_tabs.currentChanged.connect(self._view_tab_changed)
 
         container = QWidget(self)
         layout = QVBoxLayout(container)
-        layout.addLayout(video_row)
-        layout.addLayout(measurement_row)
+        layout.addWidget(horizontal_scroll_area(video_row))
+        layout.addWidget(horizontal_scroll_area(reference_row))
+        layout.addLayout(view_row)
+        layout.addLayout(action_row)
         layout.addWidget(self.source_label)
         layout.addWidget(self.summary_label)
         layout.addWidget(self.detail_label)
