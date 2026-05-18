@@ -60,29 +60,6 @@ CONFIG_FIELD_SPECS = [
         "step": 0.05,
         "decimals": 4,
     },
-    {"key": "ATTITUDE_HOLD_KP", "label": "Attitude Hold Kp", "min": -1000.0, "max": 1000.0, "step": 0.001, "decimals": 4},
-    {"key": "ATTITUDE_HOLD_KI", "label": "Attitude Hold Ki", "min": -1000.0, "max": 1000.0, "step": 0.001, "decimals": 4},
-    {"key": "ATTITUDE_HOLD_KD", "label": "Attitude Hold Kd", "min": -1000.0, "max": 1000.0, "step": 0.001, "decimals": 4},
-    {
-        "key": "ATTITUDE_HOLD_LPF_TAU_S",
-        "label": "Attitude Hold LPF Tau (s)",
-        "min": 0.0,
-        "max": 1000.0,
-        "step": 0.01,
-        "decimals": 4,
-    },
-    {
-        "key": "ATTITUDE_HOLD_ERROR_DEADBAND_DEG",
-        "label": "Attitude Hold Deadband (deg)",
-        "min": 0.0,
-        "max": 1000.0,
-        "step": 0.1,
-        "decimals": 3,
-    },
-    {"key": "ATTITUDE_HOLD_OUT_LIMIT", "label": "Attitude Hold Out Limit", "min": 0.0, "max": 1000.0, "step": 0.01, "decimals": 4},
-    {"key": "ATTITUDE_HOLD_WALK_RATE_DPS", "label": "Attitude Hold Walk Rate (deg/s)", "min": 0.0, "max": 1000.0, "step": 0.5, "decimals": 2},
-    {"key": "ATTITUDE_HOLD_TARGET_MIN_DEG", "label": "Attitude Hold Target Min (deg)", "min": -360.0, "max": 360.0, "step": 1.0, "decimals": 2},
-    {"key": "ATTITUDE_HOLD_TARGET_MAX_DEG", "label": "Attitude Hold Target Max (deg)", "min": -360.0, "max": 360.0, "step": 1.0, "decimals": 2},
     {"key": "EXTERNAL_DEPTH_RATE_HZ", "label": "External Depth Rate (Hz)", "min": 0.0, "max": 1000.0, "step": 0.1, "decimals": 2},
 ]
 
@@ -212,8 +189,6 @@ class ManagementPage(QWidget):
             ("Depth Reference", "depth_reference"),
             ("Surface Pressure", "surface_pressure"),
             ("Sensor To Top", "sensor_to_top"),
-            ("Flat Mount", "flat_mount"),
-            ("Flat Mount Loaded", "flat_mount_loaded"),
             ("Available Commands", "commands"),
         ]
         for row, (label_text, key) in enumerate(status_items):
@@ -255,26 +230,6 @@ class ManagementPage(QWidget):
         depth_buttons.addWidget(self.save_surface_btn)
         depth_card.body.addLayout(depth_buttons)
         root.addWidget(depth_card)
-
-        flat_card = _SectionCard(
-            "Flat Pose",
-            "Hold the ROV in the pose that should count as flat, then capture the mount reference. Yaw usually matches ATTITUDE_AUTO_MOUNT_YAW_DEG.",
-        )
-        flat_form = QFormLayout()
-        flat_form.setContentsMargins(0, 0, 0, 0)
-        flat_form.setSpacing(8)
-        self.flat_yaw_spin = self._make_spinbox(-360.0, 360.0, 1.0, 2, suffix=" deg")
-        flat_form.addRow("Reference Yaw", self.flat_yaw_spin)
-        flat_card.body.addLayout(flat_form)
-
-        flat_buttons = QHBoxLayout()
-        flat_buttons.setSpacing(8)
-        self.capture_flat_btn = QPushButton("Capture Flat Pose")
-        self.capture_flat_btn.clicked.connect(self._capture_flat_reference)
-        flat_buttons.addWidget(self.capture_flat_btn)
-        flat_buttons.addStretch(1)
-        flat_card.body.addLayout(flat_buttons)
-        root.addWidget(flat_card)
 
         config_card = _SectionCard(
             "Config Values",
@@ -368,13 +323,6 @@ class ManagementPage(QWidget):
         )
         self._status_labels["surface_pressure"].setText(self._fmt_num(refs.get("surface_pressure_mbar"), "mbar", decimals=2))
         self._status_labels["sensor_to_top"].setText(self._fmt_num(refs.get("depth_sensor_to_top_m"), "m", decimals=4))
-        self._status_labels["flat_mount"].setText(
-            self._format_path_state(
-                bool(refs.get("mount_exists")),
-                refs.get("mount_path"),
-            )
-        )
-        self._status_labels["flat_mount_loaded"].setText("yes" if refs.get("mount_loaded") else "no")
         commands_text = ", ".join(sorted(self._available_commands)) if self._available_commands else "-"
         self._status_labels["commands"].setText(commands_text)
 
@@ -392,8 +340,6 @@ class ManagementPage(QWidget):
         )
         if refs.get("surface_pressure_mbar") is not None:
             self._set_spin_value(self.manual_surface_pressure_spin, refs.get("surface_pressure_mbar"))
-        if config.get("ATTITUDE_AUTO_MOUNT_YAW_DEG") is not None:
-            self._set_spin_value(self.flat_yaw_spin, config.get("ATTITUDE_AUTO_MOUNT_YAW_DEG"))
 
         for spec in CONFIG_FIELD_SPECS:
             key = str(spec["key"])
@@ -430,11 +376,6 @@ class ManagementPage(QWidget):
                 f"Captured surface pressure {self._fmt_num(data.get('surface_pressure_mbar'), 'mbar', decimals=2)} "
                 f"and saved it to {str(data.get('path') or 'the depth reference file')}."
             )
-        elif cmd == "capture_flat_reference":
-            msg = (
-                f"Captured flat pose with yaw {self._fmt_num(data.get('yaw_deg'), 'deg', decimals=2)} "
-                f"and saved it to {str(data.get('path') or 'the mount reference file')}."
-            )
         else:
             msg = f"{self._command_label(cmd)} succeeded."
 
@@ -452,7 +393,6 @@ class ManagementPage(QWidget):
         self.save_sensor_offset_btn.setEnabled((not busy) and can_set_config and sensor_offset_present)
         self.save_surface_btn.setEnabled((not busy) and ("set_surface_reference" in self._available_commands))
         self.capture_surface_btn.setEnabled((not busy) and ("capture_surface_reference" in self._available_commands))
-        self.capture_flat_btn.setEnabled((not busy) and ("capture_flat_reference" in self._available_commands))
 
         has_enabled_config_field = any(spin.isEnabled() for spin in self._config_spins.values())
         self.save_config_btn.setEnabled((not busy) and can_set_config and has_enabled_config_field)
@@ -461,7 +401,6 @@ class ManagementPage(QWidget):
             self.save_sensor_offset_btn.setEnabled(False)
             self.save_surface_btn.setEnabled(False)
             self.capture_surface_btn.setEnabled(False)
-            self.capture_flat_btn.setEnabled(False)
             self.save_config_btn.setEnabled(False)
 
     def _save_sensor_offset(self) -> None:
@@ -489,20 +428,6 @@ class ManagementPage(QWidget):
         self._queue_request(
             "capture_surface_reference",
             {"samples": 20, "delay_s": 0.02},
-            request_meta={"refresh_after_success": True},
-        )
-
-    def _capture_flat_reference(self) -> None:
-        answer = QMessageBox.question(
-            self,
-            "Capture Flat Pose",
-            "Capture the current vehicle pose as the flat mount reference now?\n\nHold the ROV in the pose that should count as flat.",
-        )
-        if answer != QMessageBox.StandardButton.Yes:
-            return
-        self._queue_request(
-            "capture_flat_reference",
-            {"samples": 200, "delay_s": 0.02, "yaw_deg": float(self.flat_yaw_spin.value())},
             request_meta={"refresh_after_success": True},
         )
 
@@ -614,46 +539,6 @@ class ManagementPage(QWidget):
                 parts.append(f"{label} {text}")
         return " | ".join(parts) if parts else "-"
 
-    def _format_attitude_sensor(self, sensor: dict) -> str:
-        parts: list[str] = []
-        for label, key in (("pitch", "pitch_deg"), ("roll", "roll_deg"), ("yaw", "yaw_deg")):
-            text = self._fmt_num(sensor.get(key), "deg", decimals=1)
-            if text != "-":
-                parts.append(f"{label} {text}")
-        sample_age = sensor.get("sample_age_s")
-        if sample_age is not None:
-            parts.append(f"sample age {self._fmt_num(sample_age, 's', decimals=2)}")
-        return " | ".join(parts) if parts else "-"
-
-    def _format_attitude_debug(self, status: dict) -> str:
-        pitch = dict(status.get("pitch") or {})
-        roll = dict(status.get("roll") or {})
-        parts: list[str] = []
-        for axis_name, axis_state in (("pitch", pitch), ("roll", roll)):
-            axis_parts: list[str] = []
-            for label, key, unit, decimals in (
-                ("angle", "angle_f_deg", "deg", 1),
-                ("target", "target_deg", "deg", 1),
-                ("error", "error_deg", "deg", 1),
-                ("out", "u_out", "", 3),
-            ):
-                text = self._fmt_num(axis_state.get(key), unit, decimals=decimals)
-                if text != "-":
-                    axis_parts.append(f"{label} {text}")
-            if axis_parts:
-                parts.append(f"{axis_name}: " + ", ".join(axis_parts))
-        return " | ".join(parts) if parts else "-"
-
-    def _format_attitude_targets(self, hold_state: dict) -> str:
-        pitch_text = self._fmt_num(hold_state.get("target_pitch_deg"), "deg", decimals=1)
-        roll_text = self._fmt_num(hold_state.get("target_roll_deg"), "deg", decimals=1)
-        parts: list[str] = []
-        if pitch_text != "-":
-            parts.append(f"p {pitch_text}")
-        if roll_text != "-":
-            parts.append(f"r {roll_text}")
-        return " | ".join(parts)
-
     @staticmethod
     def _command_label(cmd: str) -> str:
         labels = {
@@ -662,7 +547,6 @@ class ManagementPage(QWidget):
             "set_config": "Save Config",
             "set_surface_reference": "Save Manual Surface Pressure",
             "capture_surface_reference": "Capture Surface Reference",
-            "capture_flat_reference": "Capture Flat Pose",
         }
         return labels.get(str(cmd), str(cmd) or "Request")
 

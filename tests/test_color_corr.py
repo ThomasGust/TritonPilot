@@ -1,7 +1,11 @@
 import cv2
 import numpy as np
+import pytest
 
 from analysis.color_corr import FixedIntervalFrameExportWorker, ProcessingSettings, VideoProcessor
+
+
+pytestmark = pytest.mark.vision
 
 
 def test_pvc_mask_rejects_flat_bright_water_like_background():

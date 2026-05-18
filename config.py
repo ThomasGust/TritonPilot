@@ -97,11 +97,6 @@ CONTROLLER_WIN_BUTTONS = _parse_int_list_env("TRITON_CONTROLLER_WIN_BUTTONS", []
 DEPTH_HOLD_TOGGLE_BUTTON = os.environ.get("TRITON_DEPTH_HOLD_TOGGLE", "rstick").strip().lower()
 DEPTH_HOLD_DEFAULT = os.environ.get("TRITON_DEPTH_HOLD_DEFAULT", "0").strip().lower() in ("1", "true", "yes")
 
-# Attitude hold is still available from the hold-test UI/API, but its controller
-# shortcut defaults to unbound so L3 can be used for lights.
-ATTITUDE_HOLD_TOGGLE_BUTTON = os.environ.get("TRITON_ATTITUDE_HOLD_TOGGLE", "").strip().lower()
-ATTITUDE_HOLD_DEFAULT = os.environ.get("TRITON_ATTITUDE_HOLD_DEFAULT", "0").strip().lower() in ("1", "true", "yes")
-
 # Lights are toggled by sending TritonOS its normal synthetic button edge.
 # Default controls: keyboard L or controller L3.
 LIGHTS_TOGGLE_SHORTCUT = os.environ.get("TRITON_LIGHTS_TOGGLE_SHORTCUT", "L").strip() or "L"
@@ -169,7 +164,6 @@ T200_WRIST_GAIN_STEP = float(os.environ.get("TRITON_T200_WRIST_GAIN_STEP", "0.05
 DEPTH_HOLD_WALK_DEADBAND = float(os.environ.get("TRITON_DEPTH_HOLD_WALK_DEADBAND", "0.10"))
 DEPTH_HOLD_WALK_RATE_MPS = float(os.environ.get("TRITON_DEPTH_HOLD_WALK_RATE_MPS", "0.45"))
 DEPTH_HOLD_SENSOR_STALE_S = float(os.environ.get("TRITON_DEPTH_HOLD_SENSOR_STALE_S", "2.0"))
-ATTITUDE_HOLD_SENSOR_STALE_S = float(os.environ.get("TRITON_ATTITUDE_HOLD_SENSOR_STALE_S", "1.0"))
 
 
 # ---------------------------------------------------------------------------

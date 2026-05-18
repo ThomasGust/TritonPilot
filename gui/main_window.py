@@ -26,7 +26,6 @@ from PyQt6.QtWidgets import (
 from config import (
     ARM_DISARM_TOGGLE_EDGE,
     ARM_DISARM_TOGGLE_SHORTCUT,
-    ATTITUDE_HOLD_SENSOR_STALE_S,
     PILOT_PUB_ENDPOINT,
     SENSOR_SUB_ENDPOINT,
     MANAGEMENT_RPC_ENDPOINT,
@@ -54,7 +53,7 @@ from recording.save_location import DEFAULT_RECORDINGS_DIR, SaveLocation, is_ava
 from recording.capture_paths import timestamped_camera_stem, unique_capture_path
 from gui.video_tabs import VideoTabs
 from gui.sensor_panel import SensorPanel
-from gui.instruments import InstrumentPanel, HoldTestPanel, AttitudeInspectorPage
+from gui.instruments import InstrumentPanel, HoldTestPanel
 from analysis.gui.crab_detection_window import CrabDetectionWindow
 from analysis.gui.edna_analysis_window import EDNAAnalysisWindow
 from analysis.gui.iceberg_tracking_window import IcebergTrackingWindow
@@ -119,7 +118,7 @@ class MainWindow(QMainWindow):
 
     def _refresh_drive_status(self) -> None:
         direction = "REVERSE" if self._reverse_enabled else "FORWARD"
-        parts = [f"Mode: {direction}", self._depth_hold_status_text, self._attitude_hold_status_text]
+        parts = [f"Mode: {direction}", self._depth_hold_status_text]
         self._set_status(self._mode_lbl, " | ".join(parts))
         self._set_status_tone(self._mode_lbl, "alert" if self._reverse_enabled else None)
 
@@ -221,15 +220,13 @@ class MainWindow(QMainWindow):
         elif index == 2:
             self._set_center_page("hold_test")
         elif index == 3:
-            self._set_center_page("attitude")
-        elif index == 4:
             self._set_center_page("management")
         else:
             self._set_center_page("pilot")
 
     def _set_center_page(self, page_name: str, *, announce: bool = True) -> None:
         page_name = str(page_name)
-        if page_name not in {"pilot", "reverse_drive", "hold_test", "attitude", "management"}:
+        if page_name not in {"pilot", "reverse_drive", "hold_test", "management"}:
             page_name = "pilot"
         if page_name == getattr(self, "_active_page_name", "pilot"):
             return
@@ -278,16 +275,6 @@ class MainWindow(QMainWindow):
                 self._management_page.refresh_state()
             except Exception:
                 pass
-        elif page_name == "attitude":
-            if self.video_panel is not None:
-                if self._active_page_name == "pilot":
-                    self._pilot_layout_count_restore = int(self.video_panel.layout_count())
-                try:
-                    self.video_panel.set_layout_controls_visible(True)
-                    self.video_panel.setParent(None)
-                except Exception:
-                    pass
-            self._page_stack.setCurrentWidget(self._attitude_page)
         else:
             if self.video_panel is not None:
                 self.video_panel.set_layout_controls_visible(True)
@@ -302,7 +289,7 @@ class MainWindow(QMainWindow):
         prev = False
         try:
             prev = self._page_tabs.blockSignals(True)
-            tab_index = {"pilot": 0, "reverse_drive": 1, "hold_test": 2, "attitude": 3, "management": 4}.get(page_name, 0)
+            tab_index = {"pilot": 0, "reverse_drive": 1, "hold_test": 2, "management": 3}.get(page_name, 0)
             self._page_tabs.setCurrentIndex(tab_index)
         finally:
             try:
@@ -316,7 +303,6 @@ class MainWindow(QMainWindow):
                 "pilot": "Pilot",
                 "reverse_drive": "Reverse Drive",
                 "hold_test": "Hold Test",
-                "attitude": "Attitude Inspector",
                 "management": "Vehicle Setup",
             }.get(page_name, "Pilot")
             self.statusBar().showMessage(f"Switched to {label} page", 3000)
@@ -335,7 +321,6 @@ class MainWindow(QMainWindow):
         self._reverse_enabled: bool = False
         self._reverse_camera_name: str | None = None
         self._depth_hold_status_text: str = "Depth Hold: OFF"
-        self._attitude_hold_status_text: str = "Att Hold: OFF"
 
         self._link_lbl = QLabel("Heartbeat: (no data)")
         self.statusBar().addPermanentWidget(self._link_lbl)
@@ -349,7 +334,7 @@ class MainWindow(QMainWindow):
         self._gain_lbl = QLabel("Max Gain: 100%")
         self.statusBar().addPermanentWidget(self._gain_lbl)
 
-        self._mode_lbl = QLabel("Mode: FORWARD | Depth Hold: OFF | Att Hold: OFF")
+        self._mode_lbl = QLabel("Mode: FORWARD | Depth Hold: OFF")
         self.statusBar().addPermanentWidget(self._mode_lbl, 1)
 
         self._video_lbl = QLabel("Camera: -")
@@ -410,8 +395,6 @@ class MainWindow(QMainWindow):
         self._last_ctrl_status: dict = {'controller': 'unknown'}
         self._last_pilot_msg_ts: float = 0.0
         self._last_pilot_msg: dict = {}
-        self._last_attitude_ts: float = 0.0
-        self._last_attitude: dict = {}
 
         # 1) pilot publisher (xbox -> ROV)
         # These keyboard controls drive the two-axis servo wrist. We keep the
@@ -466,9 +449,6 @@ class MainWindow(QMainWindow):
         self.sensor_panel = SensorPanel()
         self.instrument_panel = InstrumentPanel()
         self.hold_test_panel = HoldTestPanel(pilot_svc=self.pilot_svc, endpoint=MANAGEMENT_RPC_ENDPOINT)
-        self.attitude_inspector_page = AttitudeInspectorPage(
-            recording_session_provider=lambda: self._make_recording_session_dir()[0]
-        )
         self.hold_test_panel.setMinimumWidth(320)
         self._sensor_ui_pending: dict[tuple[str, str], dict] = {}
         self._sensor_ui_pending_order: list[tuple[str, str]] = []
@@ -524,7 +504,6 @@ class MainWindow(QMainWindow):
         self._page_tabs.addTab("Pilot")
         self._page_tabs.addTab("Reverse Drive")
         self._page_tabs.addTab("Hold Test")
-        self._page_tabs.addTab("Attitude")
         self._page_tabs.addTab("Vehicle Setup")
         self._page_tabs.currentChanged.connect(self._on_page_tab_changed)
 
@@ -600,9 +579,6 @@ class MainWindow(QMainWindow):
             hold_outer.addWidget(self._hold_test_video_host, 3)
         hold_outer.addWidget(self.hold_test_panel, 1)
         self._page_stack.addWidget(self._hold_test_page)
-
-        self._attitude_page = self.attitude_inspector_page
-        self._page_stack.addWidget(self._attitude_page)
 
         self._management_page = ManagementPage(endpoint=MANAGEMENT_RPC_ENDPOINT)
         self._page_stack.addWidget(self._management_page)
@@ -821,7 +797,6 @@ class MainWindow(QMainWindow):
         try:
             modes = (msg or {}).get("modes", {}) or {}
             dh = bool(modes.get("depth_hold", False))
-            ah = bool(modes.get("attitude_hold", False))
             reverse = bool(modes.get("reverse", False))
             if reverse != self._reverse_enabled:
                 self._reverse_enabled = reverse
@@ -898,31 +873,8 @@ class MainWindow(QMainWindow):
             else:
                 self._depth_hold_status_text = "Depth Hold: OFF"
 
-            if ah:
-                att_stale = (time.time() - float(self._last_attitude_ts)) > float(ATTITUDE_HOLD_SENSOR_STALE_S)
-                rpy = ((self._last_attitude or {}).get("rpy_deg") or {})
-                pitch = rpy.get("pitch", None)
-                roll = rpy.get("roll", None)
-                pr_bits: list[str] = []
-                try:
-                    if pitch is not None:
-                        pr_bits.append(f"p {float(pitch):+.1f}")
-                except Exception:
-                    pass
-                try:
-                    if roll is not None:
-                        pr_bits.append(f"r {float(roll):+.1f}")
-                except Exception:
-                    pass
-                details = " ".join(pr_bits) if pr_bits else "telemetry -"
-                self._attitude_hold_status_text = f"Att Hold: {details}"
-                if att_stale:
-                    self._attitude_hold_status_text += " [ATT STALE]"
-            else:
-                self._attitude_hold_status_text = "Att Hold: OFF"
         except Exception:
             self._depth_hold_status_text = "Depth Hold: -"
-            self._attitude_hold_status_text = "Att Hold: -"
         self._refresh_drive_status()
         self._refresh_video_status()
 
@@ -968,10 +920,6 @@ class MainWindow(QMainWindow):
             self._last_net = msg
         else:
             self._last_sensor_ts = time.time()
-
-            if typ == "attitude":
-                self._last_attitude_ts = time.time()
-                self._last_attitude = dict(msg or {})
 
             # Update a compact depth readout in the status bar.
             if typ == "external_depth":
@@ -1047,10 +995,6 @@ class MainWindow(QMainWindow):
                     pass
                 try:
                     self.hold_test_panel.update_from_sensor(msg)
-                except Exception:
-                    pass
-                try:
-                    self.attitude_inspector_page.update_from_sensor(msg)
                 except Exception:
                     pass
                 try:
@@ -1668,10 +1612,6 @@ class MainWindow(QMainWindow):
             pass
         try:
             self.hold_test_panel.shutdown()
-        except Exception:
-            pass
-        try:
-            self.attitude_inspector_page.shutdown()
         except Exception:
             pass
         if self.video_panel is not None:

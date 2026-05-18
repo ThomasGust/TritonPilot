@@ -206,7 +206,6 @@ def test_reverse_drive_page_keeps_pilot_video_layout(monkeypatch, tmp_path):
     monkeypatch.setattr(main_window, "RemoteCameraManager", _FakeRemoteCameraManager)
     monkeypatch.setattr(main_window, "VideoTabs", _FakeVideoPanel)
     monkeypatch.setattr(main_window, "HoldTestPanel", _SimplePage)
-    monkeypatch.setattr(main_window, "AttitudeInspectorPage", _SimplePage)
     monkeypatch.setattr(main_window, "ManagementPage", _SimplePage)
     monkeypatch.setattr(main_window.threading, "Thread", _NoopThread)
 
@@ -261,7 +260,6 @@ def test_arm_disarm_backup_controls_queue_menu_edge(monkeypatch, tmp_path):
     monkeypatch.setattr(main_window, "RemoteCameraManager", _FakeRemoteCameraManager)
     monkeypatch.setattr(main_window, "VideoTabs", _FakeVideoPanel)
     monkeypatch.setattr(main_window, "HoldTestPanel", _SimplePage)
-    monkeypatch.setattr(main_window, "AttitudeInspectorPage", _SimplePage)
     monkeypatch.setattr(main_window, "ManagementPage", _SimplePage)
     monkeypatch.setattr(main_window.threading, "Thread", _NoopThread)
 

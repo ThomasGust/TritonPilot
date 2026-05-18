@@ -2,6 +2,7 @@ from pathlib import Path
 
 import cv2
 import numpy as np
+import pytest
 
 from analysis.crab_detector_cv import (
     apply_channel_gains,
@@ -11,6 +12,9 @@ from analysis.crab_detector_cv import (
     estimate_board_white_balance_gains,
     unwrap_board,
 )
+
+
+pytestmark = pytest.mark.vision
 
 
 def test_crab_detector_finds_expected_counts_on_bundled_sample():

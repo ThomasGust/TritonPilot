@@ -86,8 +86,6 @@ class PilotPublisherService:
 
         # --- modes / toggles ----------------------------------------------
         from config import (
-            ATTITUDE_HOLD_DEFAULT,
-            ATTITUDE_HOLD_TOGGLE_BUTTON,
             DEPTH_HOLD_TOGGLE_BUTTON,
             DEPTH_HOLD_DEFAULT,
             LIGHTS_TOGGLE_BUTTON,
@@ -105,7 +103,6 @@ class PilotPublisherService:
         )
 
         self._depth_hold_toggle_button = str(DEPTH_HOLD_TOGGLE_BUTTON or "rstick").strip().lower()
-        self._attitude_hold_toggle_button = str(ATTITUDE_HOLD_TOGGLE_BUTTON or "").strip().lower()
         self._lights_toggle_button = str(LIGHTS_TOGGLE_BUTTON or "").strip().lower()
         self._lights_toggle_edge = str(LIGHTS_TOGGLE_EDGE or "lights").strip().lower() or "lights"
         self._reverse_toggle_button = str(REVERSE_TOGGLE_BUTTON or "").strip().lower()
@@ -133,7 +130,6 @@ class PilotPublisherService:
 
         self._modes = {
             "depth_hold": bool(DEPTH_HOLD_DEFAULT),
-            "attitude_hold": bool(ATTITUDE_HOLD_DEFAULT),
             "max_gain": float(self._max_gain),
             "reverse": bool(REVERSE_MODE_DEFAULT),
             "t200_wrist_gain": float(self._t200_wrist_gain),
@@ -299,9 +295,6 @@ class PilotPublisherService:
         if edges.get(self._depth_hold_toggle_button) == "down":
             self.toggle_depth_hold()
 
-        if self._attitude_hold_toggle_button and edges.get(self._attitude_hold_toggle_button) == "down":
-            self.toggle_attitude_hold()
-
         if self._lights_toggle_button and edges.get(self._lights_toggle_button) == "down":
             edges[self._lights_toggle_edge] = "down"
 
@@ -328,21 +321,6 @@ class PilotPublisherService:
     def toggle_depth_hold(self) -> bool:
         new_state = not bool(self.current_modes().get("depth_hold", False))
         self.set_depth_hold_enabled(new_state)
-        return new_state
-
-    def set_attitude_hold_enabled(self, enabled: bool) -> bool:
-        enabled = bool(enabled)
-        with self._mode_lock:
-            prev = bool(self._modes.get("attitude_hold", False))
-            self._modes["attitude_hold"] = enabled
-        changed = prev != enabled
-        if changed:
-            self._emit_status(self._status_payload(controller="connected"))
-        return changed
-
-    def toggle_attitude_hold(self) -> bool:
-        new_state = not bool(self.current_modes().get("attitude_hold", False))
-        self.set_attitude_hold_enabled(new_state)
         return new_state
 
     def _status_payload(self, controller: str | None = None, error: str | None = None) -> dict:
