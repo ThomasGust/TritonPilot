@@ -33,6 +33,8 @@ class SensorSubscriberService:
         poll_ms: int = 200,
         stale_reconnect_s: float = 3.0,
         initial_reconnect_s: float = 5.0,
+        rcv_hwm: int = 1000,
+        conflate: bool = False,
     ):
         self.endpoint = endpoint
         self.on_message = on_message
@@ -41,6 +43,8 @@ class SensorSubscriberService:
         self.poll_ms = int(poll_ms)
         self.stale_reconnect_s = float(stale_reconnect_s)
         self.initial_reconnect_s = float(initial_reconnect_s)
+        self.rcv_hwm = int(max(1, rcv_hwm))
+        self.conflate = bool(conflate)
 
         self._stop = threading.Event()
         self._thread: Optional[threading.Thread] = None
@@ -76,12 +80,13 @@ class SensorSubscriberService:
         ctx = zmq.Context.instance()
         sock = ctx.socket(zmq.SUB)
 
-        # We only care about the most recent telemetry.
+        # Keep the raw receive stream available for logging. The GUI coalesces
+        # visual updates separately, so this does not force high-rate repainting.
         apply_hotplug_opts(
             sock,
             linger_ms=0,
-            rcv_hwm=1,
-            conflate=True,
+            rcv_hwm=self.rcv_hwm,
+            conflate=self.conflate,
             reconnect_ivl_ms=250,
             reconnect_ivl_max_ms=2000,
             heartbeat_ivl_ms=1000,
@@ -145,7 +150,8 @@ class SensorSubscriberService:
                             poller.register(self._sock, zmq.POLLIN)
                     continue
 
-                # Drain backlog (keep latest). CONFLATE already helps when supported.
+                # Drain backlog. UI widgets coalesce later, while recorders can
+                # still see each received raw telemetry frame.
                 while True:
                     try:
                         raw = self._sock.recv_string(flags=zmq.NOBLOCK)

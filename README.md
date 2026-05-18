@@ -2,6 +2,23 @@
 
 Topside control, video, recording, and telemetry code for the TritonPilot ROV project.
 
+## Raw Sensor Bringup
+
+The main topside app includes a `Raw Sensors` page for live IMU/depth/power
+inspection. It shows rolling accel, gyro, and magnetometer plots plus flattened
+live values for depth, env, ADC, power, and leak telemetry.
+
+Use `Recording > Start Stream Log` for full JSONL capture of pilot and sensor
+messages. On the `Raw Sensors` page, `Start Raw CSV` writes
+`raw_sensor_timeseries.csv` in the current recording session for quick plotting
+in spreadsheet tools.
+
+For a terminal-only sensor check:
+
+```sh
+python tools/sensor_stream_sub_test.py --endpoint tcp://<rov-ip>:6001 --jsonl raw_sensors.jsonl
+```
+
 Mac setup for analysis applets:
 
 ```sh

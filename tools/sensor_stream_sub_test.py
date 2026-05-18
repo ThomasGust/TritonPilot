@@ -10,16 +10,16 @@ OR can show a tiny PyQt6 window (optional) using the existing SensorPanel.
 Examples
 --------
   # Use default endpoint from config.py (ROV_HOST env var controls the IP)
-  python3 tests/sensor_stream_sub_test.py
+  python3 tools/sensor_stream_sub_test.py
 
   # Explicit endpoint
-  python3 tests/sensor_stream_sub_test.py --endpoint tcp://{ROV_HOST}:6001
+  python3 tools/sensor_stream_sub_test.py --endpoint tcp://{ROV_HOST}:6001
 
   # Dashboard off; print each message as JSON
-  python3 tests/sensor_stream_sub_test.py --raw
+  python3 tools/sensor_stream_sub_test.py --raw
 
   # Optional: show a small Qt sensor table
-  python3 tests/sensor_stream_sub_test.py --qt
+  python3 tools/sensor_stream_sub_test.py --qt
 """
 
 from __future__ import annotations
@@ -65,9 +65,26 @@ def _format_msg(msg: dict) -> str:
     if typ == "imu":
         a = msg.get("accel", {})
         g = msg.get("gyro", {})
+        m = msg.get("mag", {})
+        src = msg.get("mag_source") or "-"
+        mag_sources = msg.get("mag_sources") or {}
+
+        def _norm(vec: dict) -> str:
+            try:
+                x = float(vec.get("x", 0.0))
+                y = float(vec.get("y", 0.0))
+                z = float(vec.get("z", 0.0))
+            except Exception:
+                return "-"
+            return f"{(x*x + y*y + z*z) ** 0.5:.1f}"
+
+        ak = mag_sources.get("ak09915") if isinstance(mag_sources, dict) else None
+        mmc = mag_sources.get("mmc5983") if isinstance(mag_sources, dict) else None
         return (
             f"imu  acc=({a.get('x', 0): .2f},{a.get('y', 0): .2f},{a.get('z', 0): .2f}) "
-            f"gyro=({g.get('x', 0): .2f},{g.get('y', 0): .2f},{g.get('z', 0): .2f})"
+            f"gyro=({g.get('x', 0): .2f},{g.get('y', 0): .2f},{g.get('z', 0): .2f}) "
+            f"mag[{src}]=({m.get('x', 0): .1f},{m.get('y', 0): .1f},{m.get('z', 0): .1f}) "
+            f"|B| ak={_norm(ak or {})} mmc={_norm(mmc or {})}"
         )
     if typ == "env":
         return f"env  {msg.get('temperature_c', 0):.1f} C  {msg.get('pressure_kpa', 0):.1f} kPa"
@@ -196,7 +213,7 @@ def run_dashboard(sock: zmq.Socket, require_types: list[str], require_timeout_s:
             row = 4
 
             # Show a stable order for common sensors
-            preferred = ["imu", "env", "bar02", "bar30"]
+            preferred = ["imu", "env", "bar02", "bar30", "adc", "power", "leak", "heartbeat", "network"]
             ordered_sensors = []
             for s in preferred:
                 if s in latest:

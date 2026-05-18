@@ -54,6 +54,7 @@ from recording.capture_paths import timestamped_camera_stem, unique_capture_path
 from gui.video_tabs import VideoTabs
 from gui.sensor_panel import SensorPanel
 from gui.instruments import InstrumentPanel, HoldTestPanel
+from gui.raw_sensor_page import RawSensorPage
 from analysis.gui.crab_detection_window import CrabDetectionWindow
 from analysis.gui.edna_analysis_window import EDNAAnalysisWindow
 from analysis.gui.iceberg_tracking_window import IcebergTrackingWindow
@@ -220,13 +221,15 @@ class MainWindow(QMainWindow):
         elif index == 2:
             self._set_center_page("hold_test")
         elif index == 3:
+            self._set_center_page("raw_sensors")
+        elif index == 4:
             self._set_center_page("management")
         else:
             self._set_center_page("pilot")
 
     def _set_center_page(self, page_name: str, *, announce: bool = True) -> None:
         page_name = str(page_name)
-        if page_name not in {"pilot", "reverse_drive", "hold_test", "management"}:
+        if page_name not in {"pilot", "reverse_drive", "hold_test", "raw_sensors", "management"}:
             page_name = "pilot"
         if page_name == getattr(self, "_active_page_name", "pilot"):
             return
@@ -275,6 +278,16 @@ class MainWindow(QMainWindow):
                 self._management_page.refresh_state()
             except Exception:
                 pass
+        elif page_name == "raw_sensors":
+            if self.video_panel is not None:
+                if self._active_page_name == "pilot":
+                    self._pilot_layout_count_restore = int(self.video_panel.layout_count())
+                try:
+                    self.video_panel.set_layout_controls_visible(True)
+                    self.video_panel.setParent(None)
+                except Exception:
+                    pass
+            self._page_stack.setCurrentWidget(self._raw_sensor_page)
         else:
             if self.video_panel is not None:
                 self.video_panel.set_layout_controls_visible(True)
@@ -289,7 +302,7 @@ class MainWindow(QMainWindow):
         prev = False
         try:
             prev = self._page_tabs.blockSignals(True)
-            tab_index = {"pilot": 0, "reverse_drive": 1, "hold_test": 2, "management": 3}.get(page_name, 0)
+            tab_index = {"pilot": 0, "reverse_drive": 1, "hold_test": 2, "raw_sensors": 3, "management": 4}.get(page_name, 0)
             self._page_tabs.setCurrentIndex(tab_index)
         finally:
             try:
@@ -303,6 +316,7 @@ class MainWindow(QMainWindow):
                 "pilot": "Pilot",
                 "reverse_drive": "Reverse Drive",
                 "hold_test": "Hold Test",
+                "raw_sensors": "Raw Sensors",
                 "management": "Vehicle Setup",
             }.get(page_name, "Pilot")
             self.statusBar().showMessage(f"Switched to {label} page", 3000)
@@ -449,6 +463,9 @@ class MainWindow(QMainWindow):
         self.sensor_panel = SensorPanel()
         self.instrument_panel = InstrumentPanel()
         self.hold_test_panel = HoldTestPanel(pilot_svc=self.pilot_svc, endpoint=MANAGEMENT_RPC_ENDPOINT)
+        self.raw_sensor_page = RawSensorPage(
+            recording_session_provider=lambda: self._make_recording_session_dir()[0]
+        )
         self.hold_test_panel.setMinimumWidth(320)
         self._sensor_ui_pending: dict[tuple[str, str], dict] = {}
         self._sensor_ui_pending_order: list[tuple[str, str]] = []
@@ -504,6 +521,7 @@ class MainWindow(QMainWindow):
         self._page_tabs.addTab("Pilot")
         self._page_tabs.addTab("Reverse Drive")
         self._page_tabs.addTab("Hold Test")
+        self._page_tabs.addTab("Raw Sensors")
         self._page_tabs.addTab("Vehicle Setup")
         self._page_tabs.currentChanged.connect(self._on_page_tab_changed)
 
@@ -582,6 +600,9 @@ class MainWindow(QMainWindow):
 
         self._management_page = ManagementPage(endpoint=MANAGEMENT_RPC_ENDPOINT)
         self._page_stack.addWidget(self._management_page)
+
+        self._raw_sensor_page = self.raw_sensor_page
+        self._page_stack.addWidget(self._raw_sensor_page)
 
         if self.video_panel is not None:
             self._attach_shared_video_panel(self._pilot_video_host_layout)
@@ -759,6 +780,10 @@ class MainWindow(QMainWindow):
         # called in sensor thread
         if self._stream_recorder is not None:
             self._stream_recorder.record("sensors", msg)
+        try:
+            self.raw_sensor_page.record_message(msg)
+        except Exception:
+            pass
         self.sensor_msg_sig.emit(msg)
 
 
@@ -995,6 +1020,10 @@ class MainWindow(QMainWindow):
                     pass
                 try:
                     self.hold_test_panel.update_from_sensor(msg)
+                except Exception:
+                    pass
+                try:
+                    self.raw_sensor_page.update_from_sensor(msg)
                 except Exception:
                     pass
                 try:
@@ -1612,6 +1641,10 @@ class MainWindow(QMainWindow):
             pass
         try:
             self.hold_test_panel.shutdown()
+        except Exception:
+            pass
+        try:
+            self.raw_sensor_page.shutdown()
         except Exception:
             pass
         if self.video_panel is not None:
