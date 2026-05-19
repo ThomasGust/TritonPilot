@@ -5,13 +5,20 @@ Topside control, video, recording, and telemetry code for the TritonPilot ROV pr
 ## Raw Sensor Bringup
 
 The main topside app includes a `Raw Sensors` page for live IMU/depth/power
-inspection. It shows rolling accel, gyro, and magnetometer plots plus flattened
-live values for depth, env, ADC, power, and leak telemetry.
+inspection. It shows rolling accel/gyro plots, separate AK09915 and MMC5983
+magnetometer plots when both are available, and flattened live values for
+depth, env, ADC, power, and leak telemetry.
+
+The same page also runs a diagnostic topside roll/pitch estimator. It
+calibrates its zero from the current rest pose, subtracts the observed gyro
+bias, and publishes/logs `attitude` rows for visualization only. This is not
+connected to vehicle control.
 
 Use `Recording > Start Stream Log` for full JSONL capture of pilot and sensor
 messages. On the `Raw Sensors` page, `Start Raw CSV` writes
 `raw_sensor_timeseries.csv` in the current recording session for quick plotting
-in spreadsheet tools.
+in spreadsheet tools. Raw sensor rows and derived roll/pitch `attitude` rows
+share the same time-series file.
 
 For a terminal-only sensor check:
 

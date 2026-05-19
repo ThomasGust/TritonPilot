@@ -51,6 +51,27 @@ class RawSensorCsvLogger:
         "gyro_y",
         "gyro_z",
         "gyro_norm",
+        "roll_deg",
+        "pitch_deg",
+        "tilt_deg",
+        "accel_roll_deg",
+        "accel_pitch_deg",
+        "accel_tilt_deg",
+        "gravity_x",
+        "gravity_y",
+        "gravity_z",
+        "reference_accel_x",
+        "reference_accel_y",
+        "reference_accel_z",
+        "reference_accel_norm",
+        "gyro_bias_x",
+        "gyro_bias_y",
+        "gyro_bias_z",
+        "gyro_unbiased_x",
+        "gyro_unbiased_y",
+        "gyro_unbiased_z",
+        "calibration_state",
+        "calibration_samples",
         "mag_x",
         "mag_y",
         "mag_z",
@@ -139,6 +160,24 @@ class RawSensorCsvLogger:
 
         put_vec("accel", msg.get("accel"))
         put_vec("gyro", msg.get("gyro"))
+        put_vec("gravity", msg.get("gravity"))
+        put_vec("reference_accel", msg.get("reference_accel"))
+        put_vec("gyro_bias", msg.get("gyro_bias"))
+        put_vec("gyro_unbiased", msg.get("gyro_unbiased"))
+        ref = msg.get("reference_accel")
+        if isinstance(ref, dict):
+            row["reference_accel_norm"] = _float_or_blank(ref.get("norm"))
+        for key in (
+            "roll_deg",
+            "pitch_deg",
+            "tilt_deg",
+            "accel_roll_deg",
+            "accel_pitch_deg",
+            "accel_tilt_deg",
+            "calibration_samples",
+        ):
+            row[key] = _float_or_blank(msg.get(key))
+        row["calibration_state"] = str(msg.get("calibration_state", ""))
         put_vec("mag", msg.get("mag") or msg.get("magnetometer"))
         row["mag_source"] = str(msg.get("mag_source", ""))
 

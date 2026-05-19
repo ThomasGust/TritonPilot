@@ -780,11 +780,16 @@ class MainWindow(QMainWindow):
         # called in sensor thread
         if self._stream_recorder is not None:
             self._stream_recorder.record("sensors", msg)
+        derived_msgs = []
         try:
-            self.raw_sensor_page.record_message(msg)
+            derived_msgs = self.raw_sensor_page.record_message(msg) or []
         except Exception:
             pass
         self.sensor_msg_sig.emit(msg)
+        for derived in derived_msgs:
+            if self._stream_recorder is not None:
+                self._stream_recorder.record("attitude", derived)
+            self.sensor_msg_sig.emit(derived)
 
 
     def _on_pilot_status_from_thread(self, status: dict):

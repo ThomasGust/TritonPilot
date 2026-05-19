@@ -34,7 +34,7 @@ from typing import Any, Dict, Optional
 
 import zmq
 
-# Ensure repo root is on sys.path when run as `python3 tests/...`
+# Ensure repo root is on sys.path when run as `python3 tools/...`
 _THIS = Path(__file__).resolve()
 _REPO_ROOT = _THIS.parents[1]
 if str(_REPO_ROOT) not in sys.path:
@@ -65,6 +65,11 @@ def _format_msg(msg: dict) -> str:
     if typ == "imu":
         a = msg.get("accel", {})
         g = msg.get("gyro", {})
+        return (
+            f"imu  acc=({a.get('x', 0): .2f},{a.get('y', 0): .2f},{a.get('z', 0): .2f}) "
+            f"gyro=({g.get('x', 0): .3f},{g.get('y', 0): .3f},{g.get('z', 0): .3f})"
+        )
+    if typ == "mag":
         m = msg.get("mag", {})
         src = msg.get("mag_source") or "-"
         mag_sources = msg.get("mag_sources") or {}
@@ -81,10 +86,14 @@ def _format_msg(msg: dict) -> str:
         ak = mag_sources.get("ak09915") if isinstance(mag_sources, dict) else None
         mmc = mag_sources.get("mmc5983") if isinstance(mag_sources, dict) else None
         return (
-            f"imu  acc=({a.get('x', 0): .2f},{a.get('y', 0): .2f},{a.get('z', 0): .2f}) "
-            f"gyro=({g.get('x', 0): .2f},{g.get('y', 0): .2f},{g.get('z', 0): .2f}) "
-            f"mag[{src}]=({m.get('x', 0): .1f},{m.get('y', 0): .1f},{m.get('z', 0): .1f}) "
+            f"mag  primary[{src}]=({m.get('x', 0): .1f},{m.get('y', 0): .1f},{m.get('z', 0): .1f}) "
             f"|B| ak={_norm(ak or {})} mmc={_norm(mmc or {})}"
+        )
+    if typ == "attitude":
+        return (
+            f"att  roll={msg.get('roll_deg', 0): .2f} deg  "
+            f"pitch={msg.get('pitch_deg', 0): .2f} deg  "
+            f"tilt={msg.get('tilt_deg', 0): .2f} deg"
         )
     if typ == "env":
         return f"env  {msg.get('temperature_c', 0):.1f} C  {msg.get('pressure_kpa', 0):.1f} kPa"
@@ -213,7 +222,7 @@ def run_dashboard(sock: zmq.Socket, require_types: list[str], require_timeout_s:
             row = 4
 
             # Show a stable order for common sensors
-            preferred = ["imu", "env", "bar02", "bar30", "adc", "power", "leak", "heartbeat", "network"]
+            preferred = ["imu", "mag", "attitude", "env", "bar02", "bar30", "adc", "power", "leak", "heartbeat", "network"]
             ordered_sensors = []
             for s in preferred:
                 if s in latest:

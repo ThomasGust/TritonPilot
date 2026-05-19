@@ -57,7 +57,8 @@ class SensorPanel(QWidget):
         typ = msg.get("type", "-")
 
         if typ == "imu":
-            # Display accel + (if present) gyro + mag. Many IMUs publish all three.
+            # Display accel + gyro. Magnetometers publish separately so IMU
+            # cadence is not held back by slower mag reads.
             def _vec(d: dict | None):
                 d = d or {}
                 try:
@@ -75,12 +76,33 @@ class SensorPanel(QWidget):
             if "gyro" in msg:
                 gx, gy, gz = _vec(msg.get("gyro"))
                 lines.append(f"gyro=({gx:.2f},{gy:.2f},{gz:.2f})")
-            # Some stacks use 'mag', others 'magnetometer'
-            if "mag" in msg or "magnetometer" in msg:
-                mx, my, mz = _vec(msg.get("mag") or msg.get("magnetometer"))
-                lines.append(f"mag=({mx:.2f},{my:.2f},{mz:.2f})")
 
             val = "\n".join(lines) if lines else str(msg)
+        elif typ == "mag":
+            def _vec_norm(d: dict | None) -> str:
+                d = d or {}
+                try:
+                    x = float(d.get("x", 0.0))
+                    y = float(d.get("y", 0.0))
+                    z = float(d.get("z", 0.0))
+                except Exception:
+                    return "-"
+                return f"({x:.1f},{y:.1f},{z:.1f}) |B|={(x*x+y*y+z*z) ** 0.5:.1f}"
+
+            mags = msg.get("mag_sources") or {}
+            if isinstance(mags, dict):
+                val = f"ak={_vec_norm(mags.get('ak09915'))}\nmmc={_vec_norm(mags.get('mmc5983'))}"
+            else:
+                val = _vec_norm(msg.get("mag") or msg.get("magnetometer"))
+        elif typ == "attitude":
+            try:
+                val = (
+                    f"roll={float(msg.get('roll_deg', 0.0)):.2f} deg "
+                    f"pitch={float(msg.get('pitch_deg', 0.0)):.2f} deg "
+                    f"tilt={float(msg.get('tilt_deg', 0.0)):.2f} deg"
+                )
+            except Exception:
+                val = str(msg)
         elif typ == "env":
             val = f"{msg.get('temperature_c', 0):.1f} C, {msg.get('pressure_kpa', 0):.1f} kPa"
         elif typ == "leak":

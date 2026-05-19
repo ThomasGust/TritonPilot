@@ -23,6 +23,7 @@ from PyQt6.QtWidgets import (
 
 from recording.raw_sensor_csv import RawSensorCsvLogger
 from recording.stream_recorder import StreamRecorder
+from telemetry.roll_pitch_estimator import RollPitchEstimator
 
 
 class _Card(QFrame):
@@ -117,6 +118,11 @@ class RollingVectorPlot(QWidget):
             "y": QColor(112, 194, 255),
             "z": QColor(156, 226, 156),
             "norm": QColor(228, 142, 255),
+            "roll": QColor(247, 198, 84),
+            "pitch": QColor(112, 194, 255),
+            "tilt": QColor(156, 226, 156),
+            "accel_roll": QColor(228, 142, 255),
+            "accel_pitch": QColor(255, 160, 122),
         }
         self.setMinimumHeight(190)
 
@@ -174,8 +180,9 @@ class RollingVectorPlot(QWidget):
             painter.setPen(QPen(color, 3))
             painter.drawLine(QPointF(legend_x, legend_y), QPointF(legend_x + 14, legend_y))
             painter.setPen(QColor(190, 198, 210))
-            painter.drawText(QRectF(legend_x + 18, legend_y - 8, 52, 16), Qt.AlignmentFlag.AlignLeft, name)
-            legend_x += 64
+            text_w = painter.fontMetrics().horizontalAdvance(str(name))
+            painter.drawText(QRectF(legend_x + 18, legend_y - 8, text_w + 4, 16), Qt.AlignmentFlag.AlignLeft, name)
+            legend_x += max(64, 28 + text_w)
 
         plot = outer.adjusted(44, 52, -12, -24)
         if plot.width() <= 20 or plot.height() <= 20:
@@ -246,6 +253,8 @@ class RawSensorPage(QWidget):
         self._type_counts: dict[str, int] = {}
         self._type_rates: dict[str, float] = {}
         self._rate_t0 = time.time()
+        self._attitude_estimator = RollPitchEstimator()
+        self._latest_attitude: dict | None = None
 
         title = QLabel("Raw Sensors")
         title_font = QFont(title.font())
@@ -259,11 +268,14 @@ class RawSensorPage(QWidget):
         record_row.setSpacing(8)
         self.record_btn = QPushButton("Start Raw CSV")
         self.record_btn.clicked.connect(self._toggle_recording)
+        self.attitude_rest_btn = QPushButton("Set Rest")
+        self.attitude_rest_btn.clicked.connect(self._reset_attitude_reference)
         self.record_state = QLabel("Recording: idle")
         self.record_path_lbl = QLabel("File: -")
         self.record_path_lbl.setWordWrap(True)
         self.record_path_lbl.setStyleSheet("color: #b6bac8;")
         record_row.addWidget(self.record_btn, 0)
+        record_row.addWidget(self.attitude_rest_btn, 0)
         record_row.addWidget(self.record_state, 1)
         self.record_card.body.addLayout(record_row)
         self.record_card.body.addWidget(self.record_path_lbl)
@@ -278,6 +290,9 @@ class RawSensorPage(QWidget):
             [
                 ("Rates", "rates"),
                 ("IMU Age", "imu_age"),
+                ("Mag Age", "mag_age"),
+                ("Roll/Pitch", "attitude"),
+                ("Rest Reference", "attitude_ref"),
                 ("Accel", "accel"),
                 ("Gyro", "gyro"),
                 ("Primary Mag", "mag"),
@@ -301,12 +316,22 @@ class RawSensorPage(QWidget):
 
         self.accel_plot = RollingVectorPlot("Accelerometer", ["x", "y", "z", "norm"], window_s=20.0)
         self.gyro_plot = RollingVectorPlot("Gyroscope", ["x", "y", "z", "norm"], window_s=20.0)
+        self.attitude_plot = RollingVectorPlot(
+            "Roll/Pitch Estimator",
+            ["roll", "pitch", "tilt", "accel_roll", "accel_pitch"],
+            window_s=20.0,
+        )
         self.mag_plot = RollingVectorPlot("Primary Magnetometer", ["x", "y", "z", "norm"], window_s=20.0)
+        self.ak_plot = RollingVectorPlot("AK09915 Magnetometer", ["x", "y", "z", "norm"], window_s=20.0)
+        self.mmc_plot = RollingVectorPlot("MMC5983 Magnetometer", ["x", "y", "z", "norm"], window_s=20.0)
 
         plot_card = _Card("Rolling Raw Vectors")
         plot_card.body.addWidget(self.accel_plot)
         plot_card.body.addWidget(self.gyro_plot)
+        plot_card.body.addWidget(self.attitude_plot)
         plot_card.body.addWidget(self.mag_plot)
+        plot_card.body.addWidget(self.ak_plot)
+        plot_card.body.addWidget(self.mmc_plot)
 
         content = QWidget()
         content_lay = QVBoxLayout(content)
@@ -376,11 +401,30 @@ class RawSensorPage(QWidget):
     def shutdown(self) -> None:
         self.stop_recording()
 
-    def record_message(self, msg: dict) -> None:
+    def _reset_attitude_reference(self) -> None:
+        self._attitude_estimator.reset()
+        self._latest_attitude = None
+        self.attitude_plot.samples.clear()
+        self.attitude_plot.update()
+        self._refresh_attitude_status()
+
+    def record_message(self, msg: dict) -> list[dict]:
+        derived: list[dict] = []
         with self._logger_lock:
             logger = self._logger
         if logger is not None:
             logger.record(dict(msg or {}))
+        if str((msg or {}).get("type", "")) == "imu":
+            try:
+                estimate = self._attitude_estimator.update(dict(msg or {}), recv_time_s=time.time())
+            except Exception:
+                estimate = None
+            if isinstance(estimate, dict):
+                derived.append(estimate)
+                self._latest_attitude = estimate
+                if logger is not None:
+                    logger.record(dict(estimate))
+        return derived
 
     def update_from_sensor(self, msg: dict) -> None:
         msg = dict(msg or {})
@@ -399,6 +443,10 @@ class RawSensorPage(QWidget):
 
         if typ == "imu":
             self._update_imu(msg, now)
+        elif typ == "mag":
+            self._update_mag(msg, now)
+        elif typ == "attitude":
+            self._update_attitude(msg)
         elif typ == "external_depth":
             self._update_depth(msg, now)
         elif typ == "env":
@@ -418,7 +466,7 @@ class RawSensorPage(QWidget):
     def _refresh_rates(self) -> None:
         if not self._type_rates:
             return
-        order = ["imu", "external_depth", "env", "adc", "power", "leak", "heartbeat", "net"]
+        order = ["imu", "mag", "attitude", "external_depth", "env", "adc", "power", "leak", "heartbeat", "net"]
         parts = []
         for typ in order:
             if typ in self._type_rates:
@@ -427,6 +475,54 @@ class RawSensorPage(QWidget):
             if typ not in order:
                 parts.append(f"{typ} {self._type_rates[typ]:.1f} Hz")
         self._labels["rates"].setText(" | ".join(parts))
+
+    @staticmethod
+    def _plot_values(vec: dict | None) -> dict[str, float]:
+        x, y, z = _vec(vec)
+        out = {}
+        if x is not None:
+            out["x"] = x
+        if y is not None:
+            out["y"] = y
+        if z is not None:
+            out["z"] = z
+        norm = _vec_norm(vec)
+        if norm is not None:
+            out["norm"] = norm
+        return out
+
+    def _refresh_attitude_status(self) -> None:
+        status = self._attitude_estimator.status()
+        target = int(status.get("calibration_target_samples") or 0)
+        count = int(status.get("calibration_samples") or 0)
+        if status.get("calibration_state") != "calibrated":
+            self._labels["attitude"].setText(f"calibrating {count}/{target}")
+            self._labels["attitude_ref"].setText("-")
+            return
+        ref = status.get("reference_accel")
+        bias = status.get("gyro_bias")
+        last = status.get("last_output") or self._latest_attitude or {}
+        if last:
+            self._labels["attitude"].setText(
+                f"roll {_num(last.get('roll_deg'), decimals=2, unit='deg')} | "
+                f"pitch {_num(last.get('pitch_deg'), decimals=2, unit='deg')} | "
+                f"tilt {_num(last.get('tilt_deg'), decimals=2, unit='deg')}"
+            )
+        else:
+            self._labels["attitude"].setText("calibrated")
+        if isinstance(ref, tuple) and len(ref) == 3:
+            ref_txt = f"g0 x {ref[0]:.3f} | y {ref[1]:.3f} | z {ref[2]:.3f}"
+        else:
+            ref_txt = "g0 -"
+        if isinstance(bias, tuple) and len(bias) == 3:
+            bias_txt = (
+                f"bias {math.degrees(bias[0]):.2f}, "
+                f"{math.degrees(bias[1]):.2f}, "
+                f"{math.degrees(bias[2]):.2f} deg/s"
+            )
+        else:
+            bias_txt = "bias -"
+        self._labels["attitude_ref"].setText(f"{ref_txt} | {bias_txt}")
 
     def _update_imu(self, msg: dict, now: float) -> None:
         ts = msg.get("ts")
@@ -448,24 +544,65 @@ class RawSensorPage(QWidget):
         if isinstance(mag_sources, dict):
             self._labels["ak"].setText(_fmt_vec(mag_sources.get("ak09915"), decimals=2, unit="uT"))
             self._labels["mmc"].setText(_fmt_vec(mag_sources.get("mmc5983"), decimals=2, unit="uT"))
+            self.ak_plot.add_sample(now, self._plot_values(mag_sources.get("ak09915")))
+            self.mmc_plot.add_sample(now, self._plot_values(mag_sources.get("mmc5983")))
 
-        def values(vec: dict) -> dict[str, float]:
-            x, y, z = _vec(vec)
-            out = {}
-            if x is not None:
-                out["x"] = x
-            if y is not None:
-                out["y"] = y
-            if z is not None:
-                out["z"] = z
-            norm = _vec_norm(vec)
-            if norm is not None:
-                out["norm"] = norm
-            return out
+        self.accel_plot.add_sample(now, self._plot_values(accel))
+        self.gyro_plot.add_sample(now, self._plot_values(gyro))
+        self.mag_plot.add_sample(now, self._plot_values(mag))
+        self._refresh_attitude_status()
 
-        self.accel_plot.add_sample(now, values(accel))
-        self.gyro_plot.add_sample(now, values(gyro))
-        self.mag_plot.add_sample(now, values(mag))
+    def _update_mag(self, msg: dict, now: float) -> None:
+        ts = msg.get("ts")
+        try:
+            age = now - float(ts)
+        except Exception:
+            age = None
+        self._labels["mag_age"].setText(_num(age, decimals=2, unit="s"))
+
+        mag = msg.get("mag") or msg.get("magnetometer") or {}
+        source = str(msg.get("mag_source") or "-")
+        self._labels["mag"].setText(f"{source} | {_fmt_vec(mag, decimals=2, unit='uT')}")
+        self.mag_plot.add_sample(now, self._plot_values(mag))
+
+        mag_sources = msg.get("mag_sources") or {}
+        if isinstance(mag_sources, dict):
+            ak = mag_sources.get("ak09915")
+            mmc = mag_sources.get("mmc5983")
+            self._labels["ak"].setText(_fmt_vec(ak, decimals=2, unit="uT"))
+            self._labels["mmc"].setText(_fmt_vec(mmc, decimals=2, unit="uT"))
+            self.ak_plot.add_sample(now, self._plot_values(ak))
+            self.mmc_plot.add_sample(now, self._plot_values(mmc))
+
+    def _update_attitude(self, msg: dict) -> None:
+        self._latest_attitude = dict(msg or {})
+        self._labels["attitude"].setText(
+            f"roll {_num(msg.get('roll_deg'), decimals=2, unit='deg')} | "
+            f"pitch {_num(msg.get('pitch_deg'), decimals=2, unit='deg')} | "
+            f"tilt {_num(msg.get('tilt_deg'), decimals=2, unit='deg')}"
+        )
+        ref = msg.get("reference_accel") if isinstance(msg.get("reference_accel"), dict) else {}
+        bias = msg.get("gyro_bias") if isinstance(msg.get("gyro_bias"), dict) else {}
+        def _deg_value(key: str) -> str:
+            try:
+                return _num(math.degrees(float(bias.get(key))), decimals=2)
+            except Exception:
+                return "-"
+        self._labels["attitude_ref"].setText(
+            f"g0 x {_num(ref.get('x'), decimals=3)} | y {_num(ref.get('y'), decimals=3)} | "
+            f"z {_num(ref.get('z'), decimals=3)} | bias "
+            f"{_deg_value('x')}, {_deg_value('y')}, {_deg_value('z')} deg/s"
+        )
+        self.attitude_plot.add_sample(
+            float(msg.get("recv_time_s") or time.time()),
+            {
+                "roll": msg.get("roll_deg"),
+                "pitch": msg.get("pitch_deg"),
+                "tilt": msg.get("tilt_deg"),
+                "accel_roll": msg.get("accel_roll_deg"),
+                "accel_pitch": msg.get("accel_pitch_deg"),
+            },
+        )
 
     def _update_depth(self, msg: dict, _now: float) -> None:
         if msg.get("error"):
