@@ -30,10 +30,10 @@ class SensorSubscriberService:
         on_message: Optional[Callable[[dict], None]] = None,
         debug: bool = False,
         *,
-        poll_ms: int = 200,
+        poll_ms: int = 50,
         stale_reconnect_s: float = 3.0,
         initial_reconnect_s: float = 5.0,
-        rcv_hwm: int = 1000,
+        rcv_hwm: int = 200,
         conflate: bool = False,
     ):
         self.endpoint = endpoint
@@ -154,7 +154,7 @@ class SensorSubscriberService:
                 # still see each received raw telemetry frame.
                 while True:
                     try:
-                        raw = self._sock.recv_string(flags=zmq.NOBLOCK)
+                        raw = self._sock.recv(flags=zmq.NOBLOCK)
                     except zmq.Again:
                         break
                     except zmq.ZMQError as e:

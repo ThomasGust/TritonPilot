@@ -3,6 +3,7 @@ from __future__ import annotations
 import csv
 import json
 import math
+import queue
 import threading
 import time
 from pathlib import Path
@@ -102,6 +103,8 @@ class RawSensorCsvLogger:
     def __init__(self, path: str | Path):
         self.path = Path(path)
         self._lock = threading.Lock()
+        self._q: "queue.Queue[Dict[str, Any] | None]" = queue.Queue(maxsize=20_000)
+        self._thread: threading.Thread | None = None
         self._fh = None
         self._writer: Optional[csv.DictWriter] = None
         self._closed = False
@@ -112,13 +115,25 @@ class RawSensorCsvLogger:
         self._writer = csv.DictWriter(self._fh, fieldnames=self.FIELDNAMES, extrasaction="ignore")
         if self.path.stat().st_size == 0:
             self._writer.writeheader()
+        self._closed = False
+        self._thread = threading.Thread(target=self._run, daemon=True)
+        self._thread.start()
 
     def stop(self) -> None:
         with self._lock:
             self._closed = True
+        thread = self._thread
+        if thread is not None:
+            try:
+                self._q.put(None, timeout=2.0)
+            except queue.Full:
+                pass
+            thread.join(timeout=2.0)
+        with self._lock:
             fh = self._fh
             self._fh = None
             self._writer = None
+            self._thread = None
         if fh is not None:
             try:
                 fh.flush()
@@ -129,15 +144,33 @@ class RawSensorCsvLogger:
     def record(self, msg: Dict[str, Any]) -> None:
         if self._closed:
             return
-        row = self.flatten(msg)
+        try:
+            self._q.put_nowait(dict(msg or {}))
+        except queue.Full:
+            # Keep telemetry/UI responsive if disk cannot keep up.
+            pass
+
+    def _run(self) -> None:
+        while True:
+            msg = self._q.get()
+            if msg is None:
+                break
+            row = self.flatten(msg)
+            with self._lock:
+                writer = self._writer
+                if writer is None:
+                    continue
+                try:
+                    writer.writerow(row)
+                except Exception:
+                    pass
         with self._lock:
-            writer = self._writer
-            if writer is None:
-                return
-            try:
-                writer.writerow(row)
-            except Exception:
-                pass
+            fh = self._fh
+            if fh is not None:
+                try:
+                    fh.flush()
+                except Exception:
+                    pass
 
     @classmethod
     def flatten(cls, msg: Dict[str, Any]) -> Dict[str, Any]:

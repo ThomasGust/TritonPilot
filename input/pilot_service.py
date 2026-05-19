@@ -537,7 +537,7 @@ class PilotPublisherService:
 
                 frame_dict = frame.to_dict()
                 try:
-                    self.sock.send_string(json.dumps(frame_dict), flags=zmq.NOBLOCK)
+                    self.sock.send_string(json.dumps(frame_dict, separators=(",", ":")), flags=zmq.NOBLOCK)
                 except zmq.Again:
                     # Keep control loop real-time: drop stale frame instead of blocking.
                     continue

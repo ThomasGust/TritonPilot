@@ -107,11 +107,21 @@ def _fmt_vec(msg: dict | None, *, decimals: int = 3, unit: str = "") -> str:
 
 
 class RollingVectorPlot(QWidget):
-    def __init__(self, title: str, series: list[str], *, window_s: float = 20.0, parent=None):
+    def __init__(
+        self,
+        title: str,
+        series: list[str],
+        *,
+        window_s: float = 20.0,
+        max_update_hz: float = 30.0,
+        parent=None,
+    ):
         super().__init__(parent)
         self.title = str(title)
         self.series = list(series)
         self.window_s = max(2.0, float(window_s))
+        self._min_update_interval_s = 1.0 / max(1.0, float(max_update_hz))
+        self._last_update_s = 0.0
         self.samples: deque[tuple[float, dict[str, float]]] = deque(maxlen=2400)
         self.colors = {
             "x": QColor(247, 198, 84),
@@ -139,7 +149,10 @@ class RollingVectorPlot(QWidget):
             return
         self.samples.append((float(ts), clean))
         self._trim(float(ts))
-        self.update()
+        now = time.monotonic()
+        if (now - self._last_update_s) >= self._min_update_interval_s:
+            self._last_update_s = now
+            self.update()
 
     def _trim(self, newest_ts: float) -> None:
         cutoff = float(newest_ts) - self.window_s - 1.0

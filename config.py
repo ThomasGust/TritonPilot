@@ -7,10 +7,80 @@ You can import this from anywhere:
 """
 
 import os
+import socket
 from pathlib import Path
 
-# ROV IP (can be overridden via env)
-ROV_HOST = os.environ.get("ROV_HOST", "192.168.1.4")
+DEFAULT_ROV_HOST = os.environ.get("TRITON_ROV_DEFAULT_HOST", "192.168.1.4")
+
+
+def _env_bool(name: str, default: bool) -> bool:
+    raw = os.environ.get(name, "").strip().lower()
+    if not raw:
+        return bool(default)
+    return raw in ("1", "true", "yes", "on")
+
+
+def _split_hosts(raw: str) -> list[str]:
+    out: list[str] = []
+    seen: set[str] = set()
+    for part in raw.replace(";", ",").split(","):
+        host = part.strip()
+        if not host or host in seen:
+            continue
+        seen.add(host)
+        out.append(host)
+    return out
+
+
+def _tcp_reachable_host(host: str, port: int, timeout_s: float) -> str | None:
+    try:
+        sock = socket.create_connection((host, int(port)), timeout=float(timeout_s))
+    except OSError:
+        return None
+    reachable = host
+    try:
+        peer = sock.getpeername()
+        if isinstance(peer, tuple) and peer:
+            peer_host = str(peer[0])
+            if peer_host and ":" not in peer_host:
+                reachable = peer_host
+    except Exception:
+        pass
+    try:
+        sock.close()
+    except Exception:
+        pass
+    return reachable
+
+
+def _auto_detect_rov_host() -> str:
+    """Pick a reachable ROV host without forcing a stale tether IP.
+
+    The preferred path is still the wired tether at 192.168.1.4. If that route
+    is down, fall back to mDNS so bench testing can continue over the Pi's Wi-Fi.
+    Explicit ROV_HOST/ROV_* endpoint environment variables still win.
+    """
+    explicit = os.environ.get("ROV_HOST", "").strip()
+    if explicit:
+        return explicit
+
+    default_host = DEFAULT_ROV_HOST
+    if not _env_bool("TRITON_ROV_AUTO_DETECT", True):
+        return default_host
+
+    candidates = _split_hosts(os.environ.get("TRITON_ROV_HOSTS", f"{default_host},tritonpi.local"))
+    ports = (6001, 5556)
+    timeout_s = float(os.environ.get("TRITON_ROV_HOST_PROBE_TIMEOUT", "0.25"))
+    for host in candidates:
+        for port in ports:
+            reachable = _tcp_reachable_host(host, port, timeout_s)
+            if reachable:
+                return reachable
+    return default_host
+
+
+# ROV host (can be overridden via env)
+ROV_HOST = _auto_detect_rov_host()
 
 # ZMQ endpoints
 PILOT_PUB_ENDPOINT = os.environ.get("ROV_PILOT_EP", f"tcp://{ROV_HOST}:6000")

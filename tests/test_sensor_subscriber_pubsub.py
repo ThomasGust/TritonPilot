@@ -33,9 +33,9 @@ def test_sensor_subscriber_receives_messages():
 
     time.sleep(0.15)  # slow-joiner
 
-    pub.send_string(json.dumps({"type": "heartbeat", "sensor": "heartbeat", "armed": False, "pilot_age": 0.0}))
     t0 = time.time()
     while time.time() - t0 < 1.0 and not received:
+        pub.send_string(json.dumps({"type": "heartbeat", "sensor": "heartbeat", "armed": False, "pilot_age": 0.0}))
         time.sleep(0.02)
 
     sub.stop()

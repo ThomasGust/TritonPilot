@@ -467,11 +467,14 @@ class MainWindow(QMainWindow):
             recording_session_provider=lambda: self._make_recording_session_dir()[0]
         )
         self.hold_test_panel.setMinimumWidth(320)
+        self._sensor_thread_lock = threading.Lock()
+        self._sensor_thread_pending: dict[tuple[str, str], dict] = {}
+        self._sensor_thread_pending_order: list[tuple[str, str]] = []
         self._sensor_ui_pending: dict[tuple[str, str], dict] = {}
         self._sensor_ui_pending_order: list[tuple[str, str]] = []
         self._sensor_ui_max_batch = 32
         self._sensor_ui_timer = QTimer(self)
-        self._sensor_ui_timer.setInterval(50)  # ~20 Hz UI refresh cap for sensor table/widgets
+        self._sensor_ui_timer.setInterval(33)  # ~30 Hz UI refresh cap for sensor table/widgets
         self._sensor_ui_timer.timeout.connect(self._flush_sensor_ui)
         self._sensor_ui_timer.start()
         self.sensor_svc = SensorSubscriberService(
@@ -785,11 +788,11 @@ class MainWindow(QMainWindow):
             derived_msgs = self.raw_sensor_page.record_message(msg) or []
         except Exception:
             pass
-        self.sensor_msg_sig.emit(msg)
+        self._queue_sensor_msg_from_thread(msg)
         for derived in derived_msgs:
             if self._stream_recorder is not None:
                 self._stream_recorder.record("attitude", derived)
-            self.sensor_msg_sig.emit(derived)
+            self._queue_sensor_msg_from_thread(derived)
 
 
     def _on_pilot_status_from_thread(self, status: dict):
@@ -1010,9 +1013,38 @@ class MainWindow(QMainWindow):
         except Exception:
             pass
 
+    def _queue_sensor_msg_from_thread(self, msg: dict) -> None:
+        """Coalesce telemetry before it becomes Qt UI work."""
+        try:
+            sensor = str((msg or {}).get("sensor", "unknown"))
+            typ = str((msg or {}).get("type", "-"))
+            key = (sensor, typ)
+            payload = dict(msg or {})
+            with self._sensor_thread_lock:
+                if key not in self._sensor_thread_pending:
+                    self._sensor_thread_pending_order.append(key)
+                self._sensor_thread_pending[key] = payload
+        except Exception:
+            pass
+
+    def _drain_sensor_thread_msgs(self) -> None:
+        try:
+            with self._sensor_thread_lock:
+                order = list(self._sensor_thread_pending_order)
+                pending = dict(self._sensor_thread_pending)
+                self._sensor_thread_pending_order.clear()
+                self._sensor_thread_pending.clear()
+        except Exception:
+            return
+        for key in order:
+            msg = pending.get(key)
+            if isinstance(msg, dict):
+                self._handle_sensor_msg_on_ui(msg)
+
     def _flush_sensor_ui(self) -> None:
         """Apply coalesced sensor updates to UI widgets at a bounded rate."""
         try:
+            self._drain_sensor_thread_msgs()
             n = 0
             while self._sensor_ui_pending_order and n < int(self._sensor_ui_max_batch):
                 key = self._sensor_ui_pending_order.pop(0)
@@ -1109,6 +1141,8 @@ class MainWindow(QMainWindow):
             )
         elif sensor_age is not None:
             parts.append(f"sensor_age={sensor_age:.2f}s")
+        else:
+            parts.append(f"host={self._rov_host}")
 
         self._set_status(self._link_lbl, " | ".join(parts))
         self._refresh_arm_disarm_button()
