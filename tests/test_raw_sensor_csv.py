@@ -68,9 +68,17 @@ def test_raw_sensor_csv_logger_flattens_attitude(tmp_path: Path):
             "ts": 20.0,
             "sensor": "roll_pitch_estimator",
             "type": "attitude",
+            "source": "onboard_imu_mag_relative",
             "roll_deg": 1.25,
             "pitch_deg": -2.5,
+            "yaw_deg": 3.0,
             "tilt_deg": 2.8,
+            "roll_pitch_ready": True,
+            "attitude_ready": True,
+            "yaw_ready": True,
+            "mag_ready": False,
+            "sample_age_s": 0.02,
+            "gyro_bias_alpha": 0.001,
             "gravity": {"x": 0.1, "y": -0.9, "z": 0.3},
             "reference_accel": {"x": 0.34, "y": -0.94, "z": -0.02, "norm": 9.91},
             "gyro_bias": {"x": -0.01, "y": 0.02, "z": 0.03},
@@ -82,6 +90,12 @@ def test_raw_sensor_csv_logger_flattens_attitude(tmp_path: Path):
 
     row = next(csv.DictReader(out.open(newline="", encoding="utf-8")))
     assert row["type"] == "attitude"
+    assert row["source"] == "onboard_imu_mag_relative"
     assert float(row["roll_deg"]) == 1.25
+    assert float(row["yaw_deg"]) == 3.0
+    assert row["attitude_ready"] == "1"
+    assert row["mag_ready"] == "0"
+    assert float(row["sample_age_s"]) == 0.02
+    assert float(row["gyro_bias_alpha"]) == 0.001
     assert float(row["reference_accel_norm"]) == 9.91
     assert row["calibration_state"] == "calibrated"

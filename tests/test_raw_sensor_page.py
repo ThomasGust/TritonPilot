@@ -126,3 +126,53 @@ def test_raw_sensor_page_updates_separate_mag_and_attitude_rows(tmp_path):
         page.close()
         page.deleteLater()
         app.processEvents()
+
+
+def test_raw_sensor_page_prefers_onboard_attitude_over_local_fallback(tmp_path):
+    app = _app()
+    page = RawSensorPage(recording_session_provider=lambda: tmp_path)
+    try:
+        onboard = {
+            "ts": 40.0,
+            "sensor": "roll_pitch_estimator",
+            "type": "attitude",
+            "source": "onboard_imu_mag_relative",
+            "roll_deg": 1.0,
+            "pitch_deg": 2.0,
+            "yaw_deg": 3.0,
+            "reference_accel": {"x": 0.0, "y": 0.0, "z": 1.0},
+            "gyro_bias": {"x": 0.0, "y": 0.0, "z": 0.0},
+            "yaw_source": "mmc5983",
+            "yaw_status": "ready",
+        }
+        assert page.record_message(onboard) == []
+        page.update_from_sensor(onboard)
+
+        mag_msg = {
+            "ts": 41.0,
+            "sensor": "mag",
+            "type": "mag",
+            "mag": {"x": 50.0, "y": 10.0, "z": -5.0},
+            "mag_source": "ak09915",
+        }
+        page.record_message(mag_msg)
+        for i in range(36):
+            derived = page.record_message(
+                {
+                    "ts": 42.0 + i * 0.05,
+                    "sensor": "imu",
+                    "type": "imu",
+                    "accel": {"x": 0.0, "y": 0.0, "z": 9.80665},
+                    "gyro": {"x": 0.0, "y": 0.0, "z": 0.0},
+                }
+            )
+            assert derived == []
+
+        app.processEvents()
+        assert "roll 1.00 deg" in page._labels["attitude"].text()
+        assert "src onboard_imu_mag_relative" in page._labels["attitude_ref"].text()
+    finally:
+        page.shutdown()
+        page.close()
+        page.deleteLater()
+        app.processEvents()

@@ -44,6 +44,7 @@ class RawSensorCsvLogger:
         "sensor_ts",
         "sensor",
         "type",
+        "source",
         "accel_x",
         "accel_y",
         "accel_z",
@@ -54,10 +55,29 @@ class RawSensorCsvLogger:
         "gyro_norm",
         "roll_deg",
         "pitch_deg",
+        "yaw_deg",
         "tilt_deg",
+        "yaw_mag_deg",
+        "yaw_weight",
+        "yaw_rate_dps",
+        "yaw_mag_age_s",
+        "yaw_mag_norm",
+        "yaw_mag_norm_error",
+        "yaw_status",
+        "yaw_source",
+        "roll_pitch_ready",
+        "attitude_ready",
+        "yaw_ready",
+        "mag_ready",
+        "sample_age_s",
         "accel_roll_deg",
         "accel_pitch_deg",
         "accel_tilt_deg",
+        "accel_weight",
+        "accel_error_deg",
+        "accel_norm_error",
+        "gyro_rate_dps",
+        "gyro_bias_alpha",
         "gravity_x",
         "gravity_y",
         "gravity_z",
@@ -65,6 +85,14 @@ class RawSensorCsvLogger:
         "reference_accel_y",
         "reference_accel_z",
         "reference_accel_norm",
+        "reference_mag_x",
+        "reference_mag_y",
+        "reference_mag_z",
+        "reference_mag_norm",
+        "leveled_mag_x",
+        "leveled_mag_y",
+        "leveled_mag_z",
+        "leveled_mag_norm",
         "gyro_bias_x",
         "gyro_bias_y",
         "gyro_bias_z",
@@ -73,6 +101,8 @@ class RawSensorCsvLogger:
         "gyro_unbiased_z",
         "calibration_state",
         "calibration_samples",
+        "calibration_tilt_std_deg",
+        "calibration_gyro_rms_dps",
         "mag_x",
         "mag_y",
         "mag_z",
@@ -180,6 +210,7 @@ class RawSensorCsvLogger:
         row["sensor_ts"] = _float_or_blank(msg.get("ts"))
         row["sensor"] = str(msg.get("sensor", ""))
         row["type"] = str(msg.get("type", ""))
+        row["source"] = str(msg.get("source", ""))
         row["error"] = str(msg.get("error", ""))
         row["raw_json"] = _json_text(msg)
 
@@ -203,16 +234,38 @@ class RawSensorCsvLogger:
         for key in (
             "roll_deg",
             "pitch_deg",
+            "yaw_deg",
             "tilt_deg",
+            "yaw_mag_deg",
+            "yaw_weight",
+            "yaw_rate_dps",
+            "yaw_mag_age_s",
+            "yaw_mag_norm",
+            "yaw_mag_norm_error",
+            "sample_age_s",
             "accel_roll_deg",
             "accel_pitch_deg",
             "accel_tilt_deg",
+            "accel_weight",
+            "accel_error_deg",
+            "accel_norm_error",
+            "gyro_rate_dps",
+            "gyro_bias_alpha",
             "calibration_samples",
+            "calibration_tilt_std_deg",
+            "calibration_gyro_rms_dps",
         ):
             row[key] = _float_or_blank(msg.get(key))
         row["calibration_state"] = str(msg.get("calibration_state", ""))
+        row["yaw_status"] = str(msg.get("yaw_status", ""))
+        row["yaw_source"] = str(msg.get("yaw_source", ""))
+        for key in ("roll_pitch_ready", "attitude_ready", "yaw_ready", "mag_ready"):
+            if key in msg:
+                row[key] = int(bool(msg.get(key)))
         put_vec("mag", msg.get("mag") or msg.get("magnetometer"))
         row["mag_source"] = str(msg.get("mag_source", ""))
+        put_vec("reference_mag", msg.get("reference_mag"))
+        put_vec("leveled_mag", msg.get("leveled_mag"))
 
         mag_sources = msg.get("mag_sources") or {}
         if isinstance(mag_sources, dict):

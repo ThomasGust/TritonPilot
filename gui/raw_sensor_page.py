@@ -130,6 +130,8 @@ class RollingVectorPlot(QWidget):
             "norm": QColor(228, 142, 255),
             "roll": QColor(247, 198, 84),
             "pitch": QColor(112, 194, 255),
+            "yaw": QColor(255, 170, 92),
+            "yaw_mag": QColor(255, 118, 118),
             "tilt": QColor(156, 226, 156),
             "accel_roll": QColor(228, 142, 255),
             "accel_pitch": QColor(255, 160, 122),
@@ -255,6 +257,8 @@ class RollingVectorPlot(QWidget):
 class RawSensorPage(QWidget):
     """Raw ROV telemetry dashboard with focused CSV capture."""
 
+    LOCAL_ATTITUDE_FALLBACK_STALE_S = 2.0
+
     def __init__(self, parent=None, recording_session_provider: Callable[[], Path] | None = None):
         super().__init__(parent)
         self._recording_session_provider = recording_session_provider
@@ -268,6 +272,7 @@ class RawSensorPage(QWidget):
         self._rate_t0 = time.time()
         self._attitude_estimator = RollPitchEstimator()
         self._latest_attitude: dict | None = None
+        self._last_onboard_attitude_recv_s: float | None = None
 
         title = QLabel("Raw Sensors")
         title_font = QFont(title.font())
@@ -281,7 +286,7 @@ class RawSensorPage(QWidget):
         record_row.setSpacing(8)
         self.record_btn = QPushButton("Start Raw CSV")
         self.record_btn.clicked.connect(self._toggle_recording)
-        self.attitude_rest_btn = QPushButton("Set Rest")
+        self.attitude_rest_btn = QPushButton("Set Local Rest")
         self.attitude_rest_btn.clicked.connect(self._reset_attitude_reference)
         self.record_state = QLabel("Recording: idle")
         self.record_path_lbl = QLabel("File: -")
@@ -304,7 +309,7 @@ class RawSensorPage(QWidget):
                 ("Rates", "rates"),
                 ("IMU Age", "imu_age"),
                 ("Mag Age", "mag_age"),
-                ("Roll/Pitch", "attitude"),
+                ("Attitude", "attitude"),
                 ("Rest Reference", "attitude_ref"),
                 ("Accel", "accel"),
                 ("Gyro", "gyro"),
@@ -330,8 +335,8 @@ class RawSensorPage(QWidget):
         self.accel_plot = RollingVectorPlot("Accelerometer", ["x", "y", "z", "norm"], window_s=20.0)
         self.gyro_plot = RollingVectorPlot("Gyroscope", ["x", "y", "z", "norm"], window_s=20.0)
         self.attitude_plot = RollingVectorPlot(
-            "Roll/Pitch Estimator",
-            ["roll", "pitch", "tilt", "accel_roll", "accel_pitch"],
+            "Final Attitude",
+            ["roll", "pitch", "yaw"],
             window_s=20.0,
         )
         self.mag_plot = RollingVectorPlot("Primary Magnetometer", ["x", "y", "z", "norm"], window_s=20.0)
@@ -416,10 +421,20 @@ class RawSensorPage(QWidget):
 
     def _reset_attitude_reference(self) -> None:
         self._attitude_estimator.reset()
+        if self._using_onboard_attitude():
+            self._labels["attitude_ref"].setText("local fallback rest reset | onboard attitude active")
+            return
         self._latest_attitude = None
         self.attitude_plot.samples.clear()
         self.attitude_plot.update()
         self._refresh_attitude_status()
+
+    def _using_onboard_attitude(self, now: float | None = None) -> bool:
+        if self._last_onboard_attitude_recv_s is None:
+            return False
+        if now is None:
+            now = time.time()
+        return (float(now) - float(self._last_onboard_attitude_recv_s)) <= self.LOCAL_ATTITUDE_FALLBACK_STALE_S
 
     def record_message(self, msg: dict) -> list[dict]:
         derived: list[dict] = []
@@ -427,16 +442,28 @@ class RawSensorPage(QWidget):
             logger = self._logger
         if logger is not None:
             logger.record(dict(msg or {}))
-        if str((msg or {}).get("type", "")) == "imu":
+        typ = str((msg or {}).get("type", ""))
+        if typ == "attitude":
+            source = str((msg or {}).get("source", ""))
+            if not source.startswith("topside_"):
+                self._last_onboard_attitude_recv_s = time.time()
+            return derived
+        if typ == "mag":
+            try:
+                self._attitude_estimator.update_mag(dict(msg or {}))
+            except Exception:
+                pass
+        if typ == "imu":
             try:
                 estimate = self._attitude_estimator.update(dict(msg or {}), recv_time_s=time.time())
             except Exception:
                 estimate = None
             if isinstance(estimate, dict):
-                derived.append(estimate)
-                self._latest_attitude = estimate
-                if logger is not None:
-                    logger.record(dict(estimate))
+                if not self._using_onboard_attitude():
+                    derived.append(estimate)
+                    self._latest_attitude = estimate
+                    if logger is not None:
+                        logger.record(dict(estimate))
         return derived
 
     def update_from_sensor(self, msg: dict) -> None:
@@ -516,11 +543,12 @@ class RawSensorPage(QWidget):
         bias = status.get("gyro_bias")
         last = status.get("last_output") or self._latest_attitude or {}
         if last:
-            self._labels["attitude"].setText(
+            text = (
                 f"roll {_num(last.get('roll_deg'), decimals=2, unit='deg')} | "
                 f"pitch {_num(last.get('pitch_deg'), decimals=2, unit='deg')} | "
-                f"tilt {_num(last.get('tilt_deg'), decimals=2, unit='deg')}"
+                f"yaw {_num(last.get('yaw_deg'), decimals=2, unit='deg')}"
             )
+            self._labels["attitude"].setText(text)
         else:
             self._labels["attitude"].setText("calibrated")
         if isinstance(ref, tuple) and len(ref) == 3:
@@ -563,7 +591,8 @@ class RawSensorPage(QWidget):
         self.accel_plot.add_sample(now, self._plot_values(accel))
         self.gyro_plot.add_sample(now, self._plot_values(gyro))
         self.mag_plot.add_sample(now, self._plot_values(mag))
-        self._refresh_attitude_status()
+        if not self._using_onboard_attitude(now):
+            self._refresh_attitude_status()
 
     def _update_mag(self, msg: dict, now: float) -> None:
         ts = msg.get("ts")
@@ -589,11 +618,15 @@ class RawSensorPage(QWidget):
 
     def _update_attitude(self, msg: dict) -> None:
         self._latest_attitude = dict(msg or {})
-        self._labels["attitude"].setText(
+        source = str(msg.get("source", ""))
+        if not source.startswith("topside_"):
+            self._last_onboard_attitude_recv_s = time.time()
+        text = (
             f"roll {_num(msg.get('roll_deg'), decimals=2, unit='deg')} | "
             f"pitch {_num(msg.get('pitch_deg'), decimals=2, unit='deg')} | "
-            f"tilt {_num(msg.get('tilt_deg'), decimals=2, unit='deg')}"
+            f"yaw {_num(msg.get('yaw_deg'), decimals=2, unit='deg')}"
         )
+        self._labels["attitude"].setText(text)
         ref = msg.get("reference_accel") if isinstance(msg.get("reference_accel"), dict) else {}
         bias = msg.get("gyro_bias") if isinstance(msg.get("gyro_bias"), dict) else {}
         def _deg_value(key: str) -> str:
@@ -601,19 +634,27 @@ class RawSensorPage(QWidget):
                 return _num(math.degrees(float(bias.get(key))), decimals=2)
             except Exception:
                 return "-"
+        quality = ""
+        if source:
+            quality = f" | src {source}"
+        if msg.get("calibration_tilt_std_deg") is not None:
+            quality += f" | cal std {_num(msg.get('calibration_tilt_std_deg'), decimals=2, unit='deg')}"
+        if msg.get("yaw_source"):
+            quality += f" | yaw {msg.get('yaw_source')}"
+        if msg.get("yaw_status"):
+            quality += f" ({msg.get('yaw_status')})"
         self._labels["attitude_ref"].setText(
             f"g0 x {_num(ref.get('x'), decimals=3)} | y {_num(ref.get('y'), decimals=3)} | "
             f"z {_num(ref.get('z'), decimals=3)} | bias "
             f"{_deg_value('x')}, {_deg_value('y')}, {_deg_value('z')} deg/s"
+            f"{quality}"
         )
         self.attitude_plot.add_sample(
             float(msg.get("recv_time_s") or time.time()),
             {
                 "roll": msg.get("roll_deg"),
                 "pitch": msg.get("pitch_deg"),
-                "tilt": msg.get("tilt_deg"),
-                "accel_roll": msg.get("accel_roll_deg"),
-                "accel_pitch": msg.get("accel_pitch_deg"),
+                "yaw": msg.get("yaw_deg"),
             },
         )
 
