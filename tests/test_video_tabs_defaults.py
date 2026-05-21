@@ -31,9 +31,13 @@ class _DummyVideoWidget(QWidget):
     def __init__(self, _manager, stream_name: str, parent=None):
         super().__init__(parent)
         self.stream_name = stream_name
+        self._recording = False
 
     def set_water_correction(self, enabled: bool) -> None:
         return
+
+    def is_recording(self) -> bool:
+        return bool(self._recording)
 
     def shutdown(self, release_only: bool = True):
         return
@@ -143,6 +147,32 @@ def test_video_tabs_reverse_layout_spans_rear_camera_without_saving(monkeypatch)
             "Downward Camera",
             "Arm Camera",
         ]
+    finally:
+        tabs.close()
+        tabs.deleteLater()
+        app.processEvents()
+
+
+def test_video_tabs_can_suspend_and_resume_visible_streams(monkeypatch):
+    app = _app()
+    fake_settings = _FakeSettings({"video/layout_count": 2})
+    monkeypatch.setattr("gui.video_tabs.QSettings", lambda *args, **kwargs: fake_settings)
+    monkeypatch.setattr("gui.video_tabs.VideoWidget", _DummyVideoWidget)
+
+    tabs = VideoTabs(
+        _DummyManager(default_pane_order=["Primary Camera", "Aux Camera", "Arm Camera"]),
+        stream_names=["Primary Camera", "Aux Camera", "Arm Camera"],
+    )
+    try:
+        app.processEvents()
+        assert all(tabs._widgets[name] is not None for name in tabs.visible_stream_names())
+
+        assert tabs.suspend_all() is True
+        assert all(widget is None for widget in tabs._widgets.values())
+
+        tabs.resume_visible_streams()
+        app.processEvents()
+        assert all(tabs._widgets[name] is not None for name in tabs.visible_stream_names())
     finally:
         tabs.close()
         tabs.deleteLater()

@@ -74,9 +74,6 @@ class PilotPublisherService:
         # ZMQ sockets are NOT thread-safe; create/connect in the thread that uses them.
         self.sock = None
 
-        # Slow joiner fix
-        time.sleep(1.0)
-
         self.seq = 0
         self._stop = threading.Event()
         self._thread: Optional[threading.Thread] = None

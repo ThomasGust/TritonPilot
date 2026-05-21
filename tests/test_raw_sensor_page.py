@@ -129,6 +129,45 @@ def test_raw_sensor_page_updates_separate_mag_and_attitude_rows(tmp_path):
         app.processEvents()
 
 
+def test_raw_sensor_page_does_not_clear_mag_on_plain_imu(tmp_path):
+    app = _app()
+    page = RawSensorPage(recording_session_provider=lambda: tmp_path)
+    try:
+        mag_msg = {
+            "ts": 20.0,
+            "sensor": "mag",
+            "type": "mag",
+            "mag": {"x": 50.0, "y": 10.0, "z": -5.0},
+            "mag_source": "ak09915",
+            "mag_sources": {
+                "ak09915": {"x": 50.0, "y": 10.0, "z": -5.0},
+                "mmc5983": {"x": 35.0, "y": -44.0, "z": -9.0},
+            },
+        }
+        page.update_from_sensor(mag_msg)
+        before_text = page._labels["mag"].text()
+        before_samples = len(page.mag_plot.samples)
+
+        page.update_from_sensor(
+            {
+                "ts": 20.05,
+                "sensor": "imu",
+                "type": "imu",
+                "accel": {"x": 0.0, "y": 0.0, "z": 1.0},
+                "gyro": {"x": 0.0, "y": 0.0, "z": 0.0},
+            }
+        )
+        app.processEvents()
+
+        assert page._labels["mag"].text() == before_text
+        assert len(page.mag_plot.samples) == before_samples
+    finally:
+        page.shutdown()
+        page.close()
+        page.deleteLater()
+        app.processEvents()
+
+
 def test_raw_sensor_page_prefers_onboard_attitude_over_local_fallback(tmp_path):
     app = _app()
     page = RawSensorPage(recording_session_provider=lambda: tmp_path)

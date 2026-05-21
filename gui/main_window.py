@@ -214,6 +214,30 @@ class MainWindow(QMainWindow):
             pass
         target_layout.addWidget(self.video_panel, 1)
 
+    def _resume_video_panel(self) -> None:
+        if self.video_panel is None:
+            return
+        try:
+            resume = getattr(self.video_panel, "resume_visible_streams", None)
+            if callable(resume):
+                resume()
+        except Exception:
+            pass
+
+    def _suspend_video_panel_if_hidden(self) -> None:
+        if self.video_panel is None:
+            return
+        try:
+            suspend = getattr(self.video_panel, "suspend_all", None)
+            if callable(suspend):
+                suspend()
+                return
+            stop_all = getattr(self.video_panel, "stop_all", None)
+            if callable(stop_all):
+                stop_all()
+        except Exception:
+            pass
+
     def _on_page_tab_changed(self, index: int) -> None:
         index = int(index)
         if index == 1:
@@ -246,6 +270,7 @@ class MainWindow(QMainWindow):
             if self.video_panel is not None:
                 if self._active_page_name == "pilot":
                     self._pilot_layout_count_restore = int(self.video_panel.layout_count())
+                self._resume_video_panel()
                 self._attach_shared_video_panel(self._reverse_video_host_layout)
                 self.video_panel.set_layout_controls_visible(True)
                 self.video_panel.set_layout_controls_enabled(True)
@@ -262,6 +287,7 @@ class MainWindow(QMainWindow):
                 self.video_panel.set_layout_controls_visible(True)
                 self.video_panel.set_layout_controls_enabled(False)
                 self.video_panel.set_layout_count(1)
+                self._resume_video_panel()
                 self._attach_shared_video_panel(self._hold_test_video_host_layout)
             self._page_stack.setCurrentWidget(self._hold_test_page)
         elif page_name == "management":
@@ -273,6 +299,7 @@ class MainWindow(QMainWindow):
                     self.video_panel.setParent(None)
                 except Exception:
                     pass
+                self._suspend_video_panel_if_hidden()
             self._page_stack.setCurrentWidget(self._management_page)
             try:
                 self._management_page.refresh_state()
@@ -287,14 +314,17 @@ class MainWindow(QMainWindow):
                     self.video_panel.setParent(None)
                 except Exception:
                     pass
+                self._suspend_video_panel_if_hidden()
             self._page_stack.setCurrentWidget(self._raw_sensor_page)
         else:
             if self.video_panel is not None:
                 self.video_panel.set_layout_controls_visible(True)
                 self.video_panel.set_layout_controls_enabled(True)
+                self._resume_video_panel()
                 self._attach_shared_video_panel(self._pilot_video_host_layout)
                 if previous_page != "reverse_drive":
                     self.video_panel.set_layout_count(int(self._pilot_layout_count_restore))
+                    self._resume_video_panel()
             self._page_stack.setCurrentWidget(self._pilot_page)
 
         self._active_page_name = page_name

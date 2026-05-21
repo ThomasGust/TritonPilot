@@ -191,7 +191,8 @@ class VideoWidget(QWidget):
                 self.label.setPixmap(QPixmap())
             except Exception:
                 pass
-        self.label.setText(msg)
+        if self.label.text() != msg:
+            self.label.setText(msg)
 
     # --- out-of-water correction ---
     def set_water_correction(self, enabled: bool) -> None:
@@ -256,13 +257,16 @@ class VideoWidget(QWidget):
         now = time.time()
 
         if self._record_started_ts is not None and self._rec is not None:
-            self._record_badge.setText(f"REC {self._format_elapsed(now - self._record_started_ts)}")
+            text = f"REC {self._format_elapsed(now - self._record_started_ts)}"
+            if self._record_badge.text() != text:
+                self._record_badge.setText(text)
             self._record_badge.show()
         else:
             self._record_badge.hide()
 
         if self._snapshot_indicator_until_ts > now:
-            self._snapshot_badge.setText(self._snapshot_indicator_text)
+            if self._snapshot_badge.text() != self._snapshot_indicator_text:
+                self._snapshot_badge.setText(self._snapshot_indicator_text)
             self._snapshot_badge.show()
         else:
             self._snapshot_badge.hide()
@@ -403,7 +407,8 @@ class VideoWidget(QWidget):
 
         # Clear any status text (pixmap will be shown instead).
         try:
-            self.label.setText("")
+            if self.label.text():
+                self.label.setText("")
         except Exception:
             pass
 
@@ -417,7 +422,7 @@ class VideoWidget(QWidget):
             target_w,
             target_h,
             Qt.AspectRatioMode.KeepAspectRatio,
-            Qt.TransformationMode.SmoothTransformation,
+            Qt.TransformationMode.FastTransformation,
         )
         pix.setDevicePixelRatio(dpr)
         self.label.setPixmap(pix)

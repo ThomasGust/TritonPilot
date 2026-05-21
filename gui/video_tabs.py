@@ -385,6 +385,28 @@ class VideoTabs(QWidget):
                 self._warmup_timer.start(700)
                 return
 
+    def resume_visible_streams(self) -> None:
+        for name in self.visible_stream_names():
+            self._ensure_stream_started(name)
+        if self.stream_names:
+            try:
+                if not self._warmup_timer.isActive():
+                    self._warmup_timer.start(700)
+            except Exception:
+                pass
+
+    def suspend_all(self) -> bool:
+        for widget in self._widgets.values():
+            if widget is None:
+                continue
+            try:
+                if bool(widget.is_recording()):
+                    return False
+            except Exception:
+                pass
+        self.stop_all()
+        return True
+
     def _assign_stream_to_pane(self, pane_index: int, name: str, *, save: bool, emit: bool) -> bool:
         if name not in self.stream_names:
             return False

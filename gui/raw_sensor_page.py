@@ -113,7 +113,7 @@ class RollingVectorPlot(QWidget):
         series: list[str],
         *,
         window_s: float = 20.0,
-        max_update_hz: float = 30.0,
+        max_update_hz: float = 15.0,
         parent=None,
     ):
         super().__init__(parent)
@@ -122,6 +122,8 @@ class RollingVectorPlot(QWidget):
         self.window_s = max(2.0, float(window_s))
         self._min_update_interval_s = 1.0 / max(1.0, float(max_update_hz))
         self._last_update_s = 0.0
+        self._display_scale = 1.0
+        self._display_scale_update_s = time.monotonic()
         self.samples: deque[tuple[float, dict[str, float]]] = deque(maxlen=2400)
         self.colors = {
             "x": QColor(247, 198, 84),
@@ -137,6 +139,7 @@ class RollingVectorPlot(QWidget):
             "accel_pitch": QColor(255, 160, 122),
         }
         self.setMinimumHeight(190)
+        self.setAttribute(Qt.WidgetAttribute.WA_OpaquePaintEvent, True)
 
     def add_sample(self, ts: float, values: dict[str, float]) -> None:
         clean: dict[str, float] = {}
@@ -171,6 +174,7 @@ class RollingVectorPlot(QWidget):
     def paintEvent(self, _event):  # noqa: N802
         painter = QPainter(self)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        painter.fillRect(self.rect(), QColor(18, 18, 22))
         outer = QRectF(self.rect()).adjusted(6, 6, -6, -6)
         if outer.width() <= 8 or outer.height() <= 8:
             return
@@ -214,7 +218,18 @@ class RollingVectorPlot(QWidget):
 
         values = [abs(v) for _ts, sample in visible for v in sample.values()]
         peak = max(values) if values else 1.0
-        scale = max(1.0, math.ceil(peak * 1.1))
+        target_scale = max(1.0, math.ceil(peak * 1.1))
+        now_s = time.monotonic()
+        dt = max(0.0, min(1.0, now_s - self._display_scale_update_s))
+        self._display_scale_update_s = now_s
+        if target_scale >= self._display_scale:
+            self._display_scale = target_scale
+        else:
+            # Let the axis relax downward gradually so one quiet sample does not
+            # make active traces appear to jump or vanish after motion.
+            self._display_scale -= (self._display_scale - target_scale) * min(1.0, dt / 2.0)
+            self._display_scale = max(target_scale, self._display_scale)
+        scale = max(1.0, self._display_scale)
 
         grid_pen = QPen(QColor(34, 40, 48), 1)
         for i in range(5):
@@ -230,21 +245,29 @@ class RollingVectorPlot(QWidget):
         for name in self.series:
             path = QPainterPath()
             started = False
+            point_count = 0
+            last_point: QPointF | None = None
             for ts, sample in visible:
                 if name not in sample:
-                    started = False
                     continue
                 age = newest - ts
                 x = plot.right() - (age / self.window_s) * plot.width()
                 frac = (sample[name] + scale) / (2.0 * scale)
                 y = plot.bottom() - frac * plot.height()
+                point = QPointF(x, y)
                 if not started:
-                    path.moveTo(x, y)
+                    path.moveTo(point)
                     started = True
                 else:
-                    path.lineTo(x, y)
-            painter.setPen(QPen(self.colors.get(name, QColor(220, 220, 220)), 2))
+                    path.lineTo(point)
+                point_count += 1
+                last_point = point
+            color = self.colors.get(name, QColor(220, 220, 220))
+            painter.setPen(QPen(color, 2))
             painter.drawPath(path)
+            if point_count == 1 and last_point is not None:
+                painter.setBrush(color)
+                painter.drawEllipse(last_point, 2.25, 2.25)
 
         painter.setPen(QColor(132, 140, 154))
         painter.drawText(
@@ -628,14 +651,14 @@ class RawSensorPage(QWidget):
             logger = RawSensorCsvLogger(target)
             logger.start()
         except Exception as exc:
-            self.record_state.setText(f"Recording: error ({exc})")
+            self._set_widget_text(self.record_state, f"Recording: error ({exc})")
             return
         with self._logger_lock:
             self._logger = logger
             self._record_started_ts = time.time()
-        self.record_btn.setText("Stop Raw CSV")
-        self.record_state.setText("Recording: active")
-        self.record_path_lbl.setText(f"File: {target}")
+        self._set_widget_text(self.record_btn, "Stop Raw CSV")
+        self._set_widget_text(self.record_state, "Recording: active")
+        self._set_widget_text(self.record_path_lbl, f"File: {target}")
 
     def stop_recording(self) -> None:
         with self._logger_lock:
@@ -644,8 +667,8 @@ class RawSensorPage(QWidget):
             self._record_started_ts = None
         if logger is not None:
             logger.stop()
-        self.record_btn.setText("Start Raw CSV")
-        self.record_state.setText("Recording: idle")
+        self._set_widget_text(self.record_btn, "Start Raw CSV")
+        self._set_widget_text(self.record_state, "Recording: idle")
 
     def shutdown(self) -> None:
         self.stop_recording()
@@ -653,13 +676,23 @@ class RawSensorPage(QWidget):
     def _reset_attitude_reference(self) -> None:
         self._attitude_estimator.reset()
         if self._using_onboard_attitude():
-            self._labels["attitude_ref"].setText("local fallback rest reset | onboard attitude active")
+            self._set_label_text("attitude_ref", "local fallback rest reset | onboard attitude active")
             return
         self._latest_attitude = None
         self.attitude_plot.samples.clear()
         self.attitude_view.clear()
         self.attitude_plot.update()
         self._refresh_attitude_status()
+
+    def _set_label_text(self, key: str, text: str) -> None:
+        label = self._labels.get(key)
+        if label is not None and label.text() != text:
+            label.setText(text)
+
+    @staticmethod
+    def _set_widget_text(widget: QLabel | QPushButton, text: str) -> None:
+        if widget.text() != text:
+            widget.setText(text)
 
     def _using_onboard_attitude(self, now: float | None = None) -> bool:
         if self._last_onboard_attitude_recv_s is None:
@@ -733,7 +766,7 @@ class RawSensorPage(QWidget):
         with self._logger_lock:
             started = self._record_started_ts
         if started is not None:
-            self.record_state.setText(f"Recording: active ({max(0.0, now - started):.1f}s)")
+            self._set_widget_text(self.record_state, f"Recording: active ({max(0.0, now - started):.1f}s)")
 
     def _refresh_rates(self) -> None:
         if not self._type_rates:
@@ -746,7 +779,7 @@ class RawSensorPage(QWidget):
         for typ in sorted(self._type_rates):
             if typ not in order:
                 parts.append(f"{typ} {self._type_rates[typ]:.1f} Hz")
-        self._labels["rates"].setText(" | ".join(parts))
+        self._set_label_text("rates", " | ".join(parts))
 
     @staticmethod
     def _plot_values(vec: dict | None) -> dict[str, float]:
@@ -768,8 +801,8 @@ class RawSensorPage(QWidget):
         target = int(status.get("calibration_target_samples") or 0)
         count = int(status.get("calibration_samples") or 0)
         if status.get("calibration_state") != "calibrated":
-            self._labels["attitude"].setText(f"calibrating {count}/{target}")
-            self._labels["attitude_ref"].setText("-")
+            self._set_label_text("attitude", f"calibrating {count}/{target}")
+            self._set_label_text("attitude_ref", "-")
             self.attitude_view.clear()
             return
         ref = status.get("reference_accel")
@@ -781,10 +814,10 @@ class RawSensorPage(QWidget):
                 f"pitch {_num(last.get('pitch_deg'), decimals=2, unit='deg')} | "
                 f"yaw {_num(last.get('yaw_deg'), decimals=2, unit='deg')}"
             )
-            self._labels["attitude"].setText(text)
+            self._set_label_text("attitude", text)
             self.attitude_view.set_attitude(last)
         else:
-            self._labels["attitude"].setText("calibrated")
+            self._set_label_text("attitude", "calibrated")
         if isinstance(ref, tuple) and len(ref) == 3:
             ref_txt = f"g0 x {ref[0]:.3f} | y {ref[1]:.3f} | z {ref[2]:.3f}"
         else:
@@ -797,7 +830,7 @@ class RawSensorPage(QWidget):
             )
         else:
             bias_txt = "bias -"
-        self._labels["attitude_ref"].setText(f"{ref_txt} | {bias_txt}")
+        self._set_label_text("attitude_ref", f"{ref_txt} | {bias_txt}")
 
     def _update_imu(self, msg: dict, now: float) -> None:
         ts = msg.get("ts")
@@ -805,26 +838,32 @@ class RawSensorPage(QWidget):
             age = now - float(ts)
         except Exception:
             age = None
-        self._labels["imu_age"].setText(_num(age, decimals=2, unit="s"))
+        self._set_label_text("imu_age", _num(age, decimals=2, unit="s"))
 
         accel = msg.get("accel") or {}
         gyro = msg.get("gyro") or {}
-        mag = msg.get("mag") or msg.get("magnetometer") or {}
-        self._labels["accel"].setText(_fmt_vec(accel, decimals=3))
-        self._labels["gyro"].setText(_fmt_vec(gyro, decimals=4))
-        source = str(msg.get("mag_source") or "-")
-        self._labels["mag"].setText(f"{source} | {_fmt_vec(mag, decimals=2, unit='uT')}")
+        mag = msg.get("mag") or msg.get("magnetometer")
+        self._set_label_text("accel", _fmt_vec(accel, decimals=3))
+        self._set_label_text("gyro", _fmt_vec(gyro, decimals=4))
+        if _vec_norm(mag) is not None:
+            source = str(msg.get("mag_source") or "-")
+            self._set_label_text("mag", f"{source} | {_fmt_vec(mag, decimals=2, unit='uT')}")
 
         mag_sources = msg.get("mag_sources") or {}
         if isinstance(mag_sources, dict):
-            self._labels["ak"].setText(_fmt_vec(mag_sources.get("ak09915"), decimals=2, unit="uT"))
-            self._labels["mmc"].setText(_fmt_vec(mag_sources.get("mmc5983"), decimals=2, unit="uT"))
-            self.ak_plot.add_sample(now, self._plot_values(mag_sources.get("ak09915")))
-            self.mmc_plot.add_sample(now, self._plot_values(mag_sources.get("mmc5983")))
+            ak = mag_sources.get("ak09915")
+            mmc = mag_sources.get("mmc5983")
+            if _vec_norm(ak) is not None:
+                self._set_label_text("ak", _fmt_vec(ak, decimals=2, unit="uT"))
+                self.ak_plot.add_sample(now, self._plot_values(ak))
+            if _vec_norm(mmc) is not None:
+                self._set_label_text("mmc", _fmt_vec(mmc, decimals=2, unit="uT"))
+                self.mmc_plot.add_sample(now, self._plot_values(mmc))
 
         self.accel_plot.add_sample(now, self._plot_values(accel))
         self.gyro_plot.add_sample(now, self._plot_values(gyro))
-        self.mag_plot.add_sample(now, self._plot_values(mag))
+        if _vec_norm(mag) is not None:
+            self.mag_plot.add_sample(now, self._plot_values(mag))
         if not self._using_onboard_attitude(now):
             self._refresh_attitude_status()
 
@@ -834,19 +873,20 @@ class RawSensorPage(QWidget):
             age = now - float(ts)
         except Exception:
             age = None
-        self._labels["mag_age"].setText(_num(age, decimals=2, unit="s"))
+        self._set_label_text("mag_age", _num(age, decimals=2, unit="s"))
 
         mag = msg.get("mag") or msg.get("magnetometer") or {}
         source = str(msg.get("mag_source") or "-")
-        self._labels["mag"].setText(f"{source} | {_fmt_vec(mag, decimals=2, unit='uT')}")
-        self.mag_plot.add_sample(now, self._plot_values(mag))
+        if _vec_norm(mag) is not None:
+            self._set_label_text("mag", f"{source} | {_fmt_vec(mag, decimals=2, unit='uT')}")
+            self.mag_plot.add_sample(now, self._plot_values(mag))
 
         mag_sources = msg.get("mag_sources") or {}
         if isinstance(mag_sources, dict):
             ak = mag_sources.get("ak09915")
             mmc = mag_sources.get("mmc5983")
-            self._labels["ak"].setText(_fmt_vec(ak, decimals=2, unit="uT"))
-            self._labels["mmc"].setText(_fmt_vec(mmc, decimals=2, unit="uT"))
+            self._set_label_text("ak", _fmt_vec(ak, decimals=2, unit="uT"))
+            self._set_label_text("mmc", _fmt_vec(mmc, decimals=2, unit="uT"))
             self.ak_plot.add_sample(now, self._plot_values(ak))
             self.mmc_plot.add_sample(now, self._plot_values(mmc))
 
@@ -860,7 +900,7 @@ class RawSensorPage(QWidget):
             f"pitch {_num(msg.get('pitch_deg'), decimals=2, unit='deg')} | "
             f"yaw {_num(msg.get('yaw_deg'), decimals=2, unit='deg')}"
         )
-        self._labels["attitude"].setText(text)
+        self._set_label_text("attitude", text)
         ref = msg.get("reference_accel") if isinstance(msg.get("reference_accel"), dict) else {}
         bias = msg.get("gyro_bias") if isinstance(msg.get("gyro_bias"), dict) else {}
         def _deg_value(key: str) -> str:
@@ -877,7 +917,8 @@ class RawSensorPage(QWidget):
             quality += f" | yaw {msg.get('yaw_source')}"
         if msg.get("yaw_status"):
             quality += f" ({msg.get('yaw_status')})"
-        self._labels["attitude_ref"].setText(
+        self._set_label_text(
+            "attitude_ref",
             f"g0 x {_num(ref.get('x'), decimals=3)} | y {_num(ref.get('y'), decimals=3)} | "
             f"z {_num(ref.get('z'), decimals=3)} | bias "
             f"{_deg_value('x')}, {_deg_value('y')}, {_deg_value('z')} deg/s"
@@ -895,7 +936,7 @@ class RawSensorPage(QWidget):
 
     def _update_depth(self, msg: dict, _now: float) -> None:
         if msg.get("error"):
-            self._labels["depth"].setText(f"ERR | {msg.get('error')}")
+            self._set_label_text("depth", f"ERR | {msg.get('error')}")
             return
         parts = [
             f"depth {_num(msg.get('depth_m'), decimals=3, unit='m')}",
@@ -903,10 +944,11 @@ class RawSensorPage(QWidget):
             f"pressure {_num(msg.get('pressure_mbar'), decimals=1, unit='mbar')}",
             f"temp {_num(msg.get('temperature_c'), decimals=2, unit='C')}",
         ]
-        self._labels["depth"].setText(" | ".join(parts))
+        self._set_label_text("depth", " | ".join(parts))
 
     def _update_env(self, msg: dict) -> None:
-        self._labels["env"].setText(
+        self._set_label_text(
+            "env",
             f"temp {_num(msg.get('temperature_c'), decimals=2, unit='C')} | "
             f"pressure {_num(msg.get('pressure_kpa'), decimals=2, unit='kPa')}"
         )
@@ -917,13 +959,14 @@ class RawSensorPage(QWidget):
             text = " | ".join(f"ch{i} {_num(v, decimals=3, unit='V')}" for i, v in enumerate(channels))
         else:
             text = str(channels or "-")
-        self._labels["adc"].setText(text)
+        self._set_label_text("adc", text)
 
     def _update_power(self, msg: dict) -> None:
         if msg.get("error"):
-            self._labels["power"].setText(f"ERR | {msg.get('error')}")
+            self._set_label_text("power", f"ERR | {msg.get('error')}")
             return
-        self._labels["power"].setText(
+        self._set_label_text(
+            "power",
             f"{_num(msg.get('voltage_v'), decimals=2, unit='V')} | "
             f"{_num(msg.get('current_a'), decimals=2, unit='A')} | "
             f"{_num(msg.get('power_w'), decimals=1, unit='W')}"
@@ -931,6 +974,6 @@ class RawSensorPage(QWidget):
 
     def _update_leak(self, msg: dict) -> None:
         if msg.get("error"):
-            self._labels["leak"].setText(f"ERR | {msg.get('error')}")
+            self._set_label_text("leak", f"ERR | {msg.get('error')}")
         else:
-            self._labels["leak"].setText("DETECTED" if msg.get("leak") else "OK")
+            self._set_label_text("leak", "DETECTED" if msg.get("leak") else "OK")
