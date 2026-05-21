@@ -21,9 +21,10 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 
+import config
 from recording.raw_sensor_csv import RawSensorCsvLogger
 from recording.stream_recorder import StreamRecorder
-from telemetry.roll_pitch_estimator import RollPitchEstimator
+from telemetry.roll_pitch_estimator import RollPitchConfig, RollPitchEstimator
 
 
 class _Card(QFrame):
@@ -525,7 +526,13 @@ class RawSensorPage(QWidget):
         self._type_counts: dict[str, int] = {}
         self._type_rates: dict[str, float] = {}
         self._rate_t0 = time.time()
-        self._attitude_estimator = RollPitchEstimator()
+        self._attitude_estimator = RollPitchEstimator(
+            RollPitchConfig(
+                vehicle_roll_axis=str(getattr(config, "ATTITUDE_VEHICLE_ROLL_AXIS", "y")),
+                roll_sign=float(getattr(config, "ATTITUDE_ROLL_SIGN", 1.0)),
+                pitch_sign=float(getattr(config, "ATTITUDE_PITCH_SIGN", 1.0)),
+            )
+        )
         self._latest_attitude: dict | None = None
         self._attitude_display_zero: dict[str, float] | None = None
         self._attitude_display_zero_kind: str | None = None

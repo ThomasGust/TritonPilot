@@ -10,6 +10,7 @@ pytest.importorskip("PyQt6")
 
 from PyQt6.QtWidgets import QApplication
 
+import config
 from gui.raw_sensor_page import Attitude3DWidget, RawSensorPage
 
 
@@ -68,6 +69,19 @@ def test_raw_sensor_page_updates_vectors_and_records_csv(tmp_path):
         assert len(rows) == 1
         assert rows[0]["sensor"] == "imu"
         assert float(rows[0]["mag_norm"]) > 40.0
+    finally:
+        page.shutdown()
+        page.close()
+        page.deleteLater()
+        app.processEvents()
+
+
+def test_raw_sensor_page_fallback_estimator_uses_configured_vehicle_axis(tmp_path, monkeypatch):
+    app = _app()
+    monkeypatch.setattr(config, "ATTITUDE_VEHICLE_ROLL_AXIS", "y")
+    page = RawSensorPage(recording_session_provider=lambda: tmp_path)
+    try:
+        assert page._attitude_estimator.config.vehicle_roll_axis == "y"
     finally:
         page.shutdown()
         page.close()
