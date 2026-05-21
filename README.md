@@ -26,6 +26,34 @@ For a terminal-only sensor check:
 python tools/sensor_stream_sub_test.py --endpoint tcp://<rov-ip>:6001 --jsonl raw_sensors.jsonl
 ```
 
+## Tether Internet Routing
+
+The pilot computer can act as the ROV's internet gateway over the tether. The
+normal layout is:
+
+- pilot Wi-Fi: internet-facing network
+- pilot tether adapter: `192.168.1.1/24`
+- ROV `eth0`: `192.168.1.4/24`
+
+Probe the Windows side without admin:
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File .\tools\setup_tether_nat.ps1 -ProbeOnly
+```
+
+Configure or repair the Windows NAT path from an elevated PowerShell:
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File .\tools\setup_tether_nat.ps1 -TuneAdapter -ResetAdapter
+```
+
+Then, on the Pi, only switch the default route after the tether gateway answers:
+
+```bash
+sudo bash bin/configure_tether_gateway.sh --probe
+sudo bash bin/configure_tether_gateway.sh --persistent
+```
+
 Mac setup for analysis applets:
 
 ```sh
