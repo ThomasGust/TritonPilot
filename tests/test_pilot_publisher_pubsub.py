@@ -205,3 +205,28 @@ def test_hold_modes_are_exposed_and_toggleable(monkeypatch):
     assert modes["autopilot"]["yaw"] == "hold"
     assert modes["autopilot"]["roll"] == "level"
     assert modes["autopilot"]["pitch"] == "level"
+
+
+def test_manual_hold_targets_are_exposed_in_autopilot_modes(monkeypatch):
+    monkeypatch.setattr("input.pilot_service.time.sleep", lambda *_args, **_kwargs: None)
+
+    svc = PilotPublisherService(endpoint="inproc://hold_targets_test", rate_hz=30.0, deadzone=0.0, debug=False)
+
+    assert svc.set_depth_hold_target(1.25, enable=True) is True
+    assert svc.set_autopilot_axis_target("roll", 8.5) is True
+    assert svc.set_autopilot_axis_target("pitch", -3.0) is True
+    assert svc.set_autopilot_axis_target("yaw", 181.0) is True
+
+    modes = svc.current_modes()
+    assert modes["depth_hold"] is True
+    assert modes["autopilot"]["depth"] is True
+    assert modes["autopilot"]["roll"] == "hold"
+    assert modes["autopilot"]["pitch"] == "hold"
+    assert modes["autopilot"]["yaw"] == "hold"
+    assert modes["autopilot"]["targets"]["depth_m"] == 1.25
+    assert modes["autopilot"]["targets"]["roll_deg"] == 8.5
+    assert modes["autopilot"]["targets"]["pitch_deg"] == -3.0
+    assert modes["autopilot"]["targets"]["yaw_deg"] == -179.0
+
+    modes["autopilot"]["targets"]["roll_deg"] = 99.0
+    assert svc.current_modes()["autopilot"]["targets"]["roll_deg"] == 8.5

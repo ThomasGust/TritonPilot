@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import math
 import time
 import threading
 import traceback
@@ -142,6 +143,7 @@ class PilotPublisherService:
                 "roll": "level" if bool(ROLL_PITCH_LEVEL_DEFAULT) else "off",
                 "pitch": "level" if bool(ROLL_PITCH_LEVEL_DEFAULT) else "off",
                 "yaw": "hold" if bool(YAW_HOLD_DEFAULT) else "off",
+                "targets": {},
             },
             "t200_wrist_gain": float(self._t200_wrist_gain),
         }
@@ -280,9 +282,34 @@ class PilotPublisherService:
                 edges[str(key)] = str(edge_state)
         return edges
 
+    @staticmethod
+    def _wrap_deg(deg: float) -> float:
+        return ((float(deg) + 180.0) % 360.0) - 180.0
+
+    @staticmethod
+    def _finite_float(value) -> float | None:
+        try:
+            v = float(value)
+        except Exception:
+            return None
+        if not math.isfinite(v):
+            return None
+        return v
+
+    @staticmethod
+    def _copy_modes_payload(modes: dict) -> dict:
+        out = dict(modes or {})
+        ap = out.get("autopilot")
+        if isinstance(ap, dict):
+            ap_copy = dict(ap)
+            targets = ap_copy.get("targets")
+            ap_copy["targets"] = dict(targets) if isinstance(targets, dict) else {}
+            out["autopilot"] = ap_copy
+        return out
+
     def current_modes(self) -> dict:
         with self._mode_lock:
-            return dict(self._modes)
+            return self._copy_modes_payload(self._modes)
 
     def is_reverse_enabled(self) -> bool:
         return bool(self.current_modes().get("reverse", False))
@@ -308,6 +335,8 @@ class PilotPublisherService:
             ap = dict(current)
         else:
             ap = {}
+        targets = ap.get("targets")
+        ap["targets"] = dict(targets) if isinstance(targets, dict) else {}
         ap.setdefault("depth", bool(self._modes.get("depth_hold", False)))
         ap.setdefault("roll", "off")
         ap.setdefault("pitch", "off")
@@ -332,6 +361,58 @@ class PilotPublisherService:
         changed = prev != mode_value
         if changed:
             self._emit_status(self._status_payload())
+        return changed
+
+    def set_autopilot_axis_target(self, axis: str, target_deg: float, *, mode: str = "hold") -> bool:
+        axis_key = str(axis or "").strip().lower()
+        if axis_key not in {"roll", "pitch", "yaw"}:
+            return False
+        target = self._finite_float(target_deg)
+        if target is None:
+            return False
+        target = self._wrap_deg(target)
+        mode_value = str(mode or "hold").strip().lower() or "hold"
+        if mode_value not in {"hold", "level", "damp", "off"}:
+            mode_value = "hold"
+        if mode_value in {"level", "damp"}:
+            # These modes do not use a manual angle setpoint.
+            mode_value = "hold"
+
+        with self._mode_lock:
+            ap = self._autopilot_modes_locked()
+            targets = dict(ap.get("targets") or {})
+            key = f"{axis_key}_deg"
+            prev_target = self._finite_float(targets.get(key))
+            prev_mode = str(ap.get(axis_key, "off"))
+            targets[key] = float(target)
+            ap["targets"] = targets
+            ap[axis_key] = mode_value
+            if axis_key in {"roll", "pitch"}:
+                ap["roll_pitch_level"] = ap.get("roll") == "level" and ap.get("pitch") == "level"
+                self._modes["roll_pitch_level"] = bool(ap["roll_pitch_level"])
+            else:
+                self._modes["yaw_hold"] = mode_value == "hold"
+            self._modes["autopilot"] = ap
+
+        changed = prev_mode != mode_value or prev_target is None or abs(self._wrap_deg(prev_target - target)) > 1e-9
+        if changed:
+            self._emit_status(self._status_payload(controller="connected"))
+        return changed
+
+    def clear_autopilot_axis_target(self, axis: str) -> bool:
+        axis_key = str(axis or "").strip().lower()
+        if axis_key not in {"roll", "pitch", "yaw"}:
+            return False
+        with self._mode_lock:
+            ap = self._autopilot_modes_locked()
+            targets = dict(ap.get("targets") or {})
+            key = f"{axis_key}_deg"
+            changed = key in targets
+            targets.pop(key, None)
+            ap["targets"] = targets
+            self._modes["autopilot"] = ap
+        if changed:
+            self._emit_status(self._status_payload(controller="connected"))
         return changed
 
     def is_roll_pitch_level_enabled(self) -> bool:
@@ -418,6 +499,38 @@ class PilotPublisherService:
         new_state = not bool(self.current_modes().get("depth_hold", False))
         self.set_depth_hold_enabled(new_state)
         return new_state
+
+    def set_depth_hold_target(self, target_m: float, *, enable: bool = True) -> bool:
+        target = self._finite_float(target_m)
+        if target is None:
+            return False
+        with self._mode_lock:
+            ap = self._autopilot_modes_locked()
+            targets = dict(ap.get("targets") or {})
+            prev_target = self._finite_float(targets.get("depth_m"))
+            prev_enabled = bool(self._modes.get("depth_hold", False))
+            targets["depth_m"] = float(target)
+            ap["targets"] = targets
+            if enable:
+                self._modes["depth_hold"] = True
+                ap["depth"] = True
+            self._modes["autopilot"] = ap
+        changed = prev_target is None or abs(prev_target - target) > 1e-9 or (bool(enable) and not prev_enabled)
+        if changed:
+            self._emit_status(self._status_payload(controller="connected"))
+        return changed
+
+    def clear_depth_hold_target(self) -> bool:
+        with self._mode_lock:
+            ap = self._autopilot_modes_locked()
+            targets = dict(ap.get("targets") or {})
+            changed = "depth_m" in targets
+            targets.pop("depth_m", None)
+            ap["targets"] = targets
+            self._modes["autopilot"] = ap
+        if changed:
+            self._emit_status(self._status_payload(controller="connected"))
+        return changed
 
     def _status_payload(self, controller: str | None = None, error: str | None = None) -> dict:
         state = str(controller or (self._last_status or {}).get("controller") or ("connected" if self._controller is not None else "unknown"))

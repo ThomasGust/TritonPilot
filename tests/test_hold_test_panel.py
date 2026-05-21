@@ -43,6 +43,52 @@ class _PilotStub:
         return False
 
 
+class _PilotTargetStub:
+    def __init__(self):
+        self.calls = []
+        self._modes = {
+            "depth_hold": False,
+            "roll_pitch_level": False,
+            "yaw_hold": False,
+            "autopilot": {"depth": False, "roll": "off", "pitch": "off", "yaw": "off", "targets": {}},
+        }
+
+    def current_modes(self):
+        return {
+            **self._modes,
+            "autopilot": {
+                **self._modes["autopilot"],
+                "targets": dict(self._modes["autopilot"]["targets"]),
+            },
+        }
+
+    def set_depth_hold_target(self, target_m, enable=True):
+        self.calls.append(("depth_target", float(target_m), bool(enable)))
+        self._modes["depth_hold"] = bool(enable)
+        self._modes["autopilot"]["depth"] = bool(enable)
+        self._modes["autopilot"]["targets"]["depth_m"] = float(target_m)
+        return True
+
+    def set_depth_hold_enabled(self, enabled):
+        self.calls.append(("depth_enabled", bool(enabled)))
+        self._modes["depth_hold"] = bool(enabled)
+        self._modes["autopilot"]["depth"] = bool(enabled)
+        return True
+
+    def set_autopilot_axis_target(self, axis, target_deg, mode="hold"):
+        self.calls.append(("axis_target", axis, float(target_deg), mode))
+        self._modes["autopilot"][axis] = str(mode)
+        self._modes["autopilot"]["targets"][f"{axis}_deg"] = float(target_deg)
+        if axis == "yaw":
+            self._modes["yaw_hold"] = str(mode) == "hold"
+        return True
+
+    def set_autopilot_axis_mode(self, axis, mode):
+        self.calls.append(("axis_mode", axis, mode))
+        self._modes["autopilot"][axis] = str(mode)
+        return True
+
+
 def _app() -> QApplication:
     app = QApplication.instance()
     if app is None:
@@ -138,6 +184,8 @@ def test_hold_test_panel_uses_scroll_layout_and_shows_depth_debug(monkeypatch):
         assert "target 1.25 m" in panel._runtime_labels["runtime_depth_hold"].text()
         assert "available yes" in panel._runtime_labels["runtime_autopilot"].text()
         assert "active yes" in panel._runtime_labels["runtime_attitude"].text()
+        assert "error -2.0 deg" in panel._runtime_labels["runtime_roll_hold_detail"].text()
+        assert "error 1.0 deg" in panel._runtime_labels["runtime_pitch_hold_detail"].text()
         assert "current 5.0 deg" in panel._runtime_labels["runtime_yaw_hold_detail"].text()
         assert "target 1.0 deg" in panel._runtime_labels["runtime_yaw_hold_detail"].text()
         assert "error -4.0 deg" in panel._runtime_labels["runtime_yaw_hold_detail"].text()
@@ -147,6 +195,39 @@ def test_hold_test_panel_uses_scroll_layout_and_shows_depth_debug(monkeypatch):
         assert "stream age 0.07 s" in panel._runtime_labels["runtime_depth_sensor"].text()
         assert "error -0.020 m" in panel._runtime_labels["runtime_depth_debug"].text()
         assert "out 0.030" in panel._runtime_labels["runtime_depth_debug"].text()
+    finally:
+        panel.shutdown()
+        panel.close()
+        panel.deleteLater()
+        app.processEvents()
+
+
+def test_hold_test_panel_can_set_manual_targets(monkeypatch):
+    app = _app()
+    monkeypatch.setattr("gui.instruments.ManagementRpcService", _RpcStub)
+    pilot = _PilotTargetStub()
+
+    panel = HoldTestPanel(pilot_svc=pilot, endpoint="tcp://127.0.0.1:5556")
+    try:
+        app.processEvents()
+        panel.depth_target_spin.setValue(1.35)
+        panel._axis_target_spins["roll"].setValue(6.0)
+        panel._axis_target_spins["pitch"].setValue(-4.0)
+        panel._axis_target_spins["yaw"].setValue(90.0)
+
+        panel._hold_depth_target()
+        panel._hold_axis_target("roll")
+        panel._hold_axis_target("pitch")
+        panel._hold_axis_target("yaw")
+        panel._set_axis_mode("roll", "level")
+        panel._depth_hold_off()
+
+        assert ("depth_target", 1.35, True) in pilot.calls
+        assert ("axis_target", "roll", 6.0, "hold") in pilot.calls
+        assert ("axis_target", "pitch", -4.0, "hold") in pilot.calls
+        assert ("axis_target", "yaw", 90.0, "hold") in pilot.calls
+        assert ("axis_mode", "roll", "level") in pilot.calls
+        assert ("depth_enabled", False) in pilot.calls
     finally:
         panel.shutdown()
         panel.close()

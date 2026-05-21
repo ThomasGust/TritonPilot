@@ -13,6 +13,7 @@ from PyQt6.QtWidgets import (
     QVBoxLayout,
     QHBoxLayout,
     QPushButton,
+    QDoubleSpinBox,
     QProgressBar,
     QScrollArea,
     QSizePolicy,
@@ -236,6 +237,7 @@ class HoldTestPanel(QWidget):
         self._endpoint = str(endpoint or MANAGEMENT_RPC_ENDPOINT)
         self._lights_shortcut_text = str(LIGHTS_TOGGLE_SHORTCUT or "L").strip() or "L"
         self._runtime_labels: dict[str, QLabel] = {}
+        self._axis_target_spins: dict[str, QDoubleSpinBox] = {}
         self._runtime_request_pending = False
         self._svc = ManagementRpcService(endpoint=self._endpoint, on_result=self._on_rpc_result_from_thread)
         self._svc.start()
@@ -269,6 +271,40 @@ class HoldTestPanel(QWidget):
         self.yaw_hold_toggle_btn.clicked.connect(self._toggle_yaw_hold)
         button_row.addWidget(self.yaw_hold_toggle_btn)
         self.control_card.body.addLayout(button_row)
+
+        target_grid = QGridLayout()
+        target_grid.setHorizontalSpacing(8)
+        target_grid.setVerticalSpacing(6)
+
+        self.depth_target_spin = self._make_target_spin(-2.0, 100.0, 0.05, " m", 2)
+        self.depth_target_btn = QPushButton("Hold Target")
+        self.depth_target_btn.clicked.connect(self._hold_depth_target)
+        self.depth_off_btn = QPushButton("Off")
+        self.depth_off_btn.clicked.connect(self._depth_hold_off)
+        target_grid.addWidget(QLabel("Depth"), 0, 0)
+        target_grid.addWidget(self.depth_target_spin, 0, 1)
+        target_grid.addWidget(self.depth_target_btn, 0, 2)
+        target_grid.addWidget(self.depth_off_btn, 0, 3)
+
+        for row, axis in enumerate(("roll", "pitch", "yaw"), start=1):
+            spin = self._make_target_spin(-180.0, 180.0, 1.0, " deg", 1)
+            self._axis_target_spins[axis] = spin
+            hold_btn = QPushButton("Hold Target")
+            hold_btn.clicked.connect(lambda _checked=False, axis=axis: self._hold_axis_target(axis))
+            off_btn = QPushButton("Off")
+            off_btn.clicked.connect(lambda _checked=False, axis=axis: self._set_axis_mode(axis, "off"))
+            target_grid.addWidget(QLabel(axis.title()), row, 0)
+            target_grid.addWidget(spin, row, 1)
+            target_grid.addWidget(hold_btn, row, 2)
+            target_grid.addWidget(off_btn, row, 3)
+            setattr(self, f"{axis}_target_btn", hold_btn)
+            setattr(self, f"{axis}_off_btn", off_btn)
+            if axis in {"roll", "pitch"}:
+                level_btn = QPushButton("Level")
+                level_btn.clicked.connect(lambda _checked=False, axis=axis: self._set_axis_mode(axis, "level"))
+                target_grid.addWidget(level_btn, row, 4)
+                setattr(self, f"{axis}_level_btn", level_btn)
+        self.control_card.body.addLayout(target_grid)
 
         control_grid = QGridLayout()
         control_grid.setHorizontalSpacing(10)
@@ -305,6 +341,8 @@ class HoldTestPanel(QWidget):
                 ("Autopilot Runtime", "runtime_autopilot"),
                 ("Depth Hold Runtime", "runtime_depth_hold"),
                 ("Attitude Runtime", "runtime_attitude"),
+                ("Roll Hold Detail", "runtime_roll_hold_detail"),
+                ("Pitch Hold Detail", "runtime_pitch_hold_detail"),
                 ("Yaw Hold Detail", "runtime_yaw_hold_detail"),
                 ("Attitude Sensor", "runtime_attitude_sensor"),
                 ("Attitude Debug", "runtime_attitude_debug"),
@@ -365,6 +403,17 @@ class HoldTestPanel(QWidget):
         self._sync_local_hold_controls()
         QTimer.singleShot(0, self._poll_runtime_state)
 
+    @staticmethod
+    def _make_target_spin(vmin: float, vmax: float, step: float, suffix: str, decimals: int) -> QDoubleSpinBox:
+        spin = QDoubleSpinBox()
+        spin.setRange(float(vmin), float(vmax))
+        spin.setSingleStep(float(step))
+        spin.setDecimals(int(decimals))
+        spin.setSuffix(str(suffix or ""))
+        spin.setKeyboardTracking(False)
+        spin.setMinimumWidth(100)
+        return spin
+
     def shutdown(self) -> None:
         self._runtime_timer.stop()
         self._svc.stop()
@@ -395,15 +444,70 @@ class HoldTestPanel(QWidget):
                 modes = dict(self._pilot_svc.current_modes() or {})
             except Exception:
                 modes = {}
-        self._runtime_labels["pilot_depth_hold"].setText("ON" if modes.get("depth_hold") else "OFF")
-        self._runtime_labels["pilot_rp_level"].setText("ON" if modes.get("roll_pitch_level") else "OFF")
-        self._runtime_labels["pilot_yaw_hold"].setText("ON" if modes.get("yaw_hold") else "OFF")
+        ap = dict(modes.get("autopilot") or {})
+        targets = dict(ap.get("targets") or {})
+        self._runtime_labels["pilot_depth_hold"].setText(self._format_pilot_depth_mode(modes, targets))
+        self._runtime_labels["pilot_rp_level"].setText(self._format_pilot_rp_modes(modes, ap, targets))
+        self._runtime_labels["pilot_yaw_hold"].setText(self._format_pilot_axis_mode(modes, ap, targets, "yaw"))
+        self._sync_target_spins(targets)
         has_depth_controls = self._pilot_svc is not None and hasattr(self._pilot_svc, "toggle_depth_hold")
         has_rp_controls = self._pilot_svc is not None and hasattr(self._pilot_svc, "toggle_roll_pitch_level")
         has_yaw_controls = self._pilot_svc is not None and hasattr(self._pilot_svc, "toggle_yaw_hold")
+        has_depth_target = self._pilot_svc is not None and hasattr(self._pilot_svc, "set_depth_hold_target")
+        has_depth_off = self._pilot_svc is not None and hasattr(self._pilot_svc, "set_depth_hold_enabled")
+        has_axis_mode = self._pilot_svc is not None and hasattr(self._pilot_svc, "set_autopilot_axis_mode")
+        has_axis_target = self._pilot_svc is not None and hasattr(self._pilot_svc, "set_autopilot_axis_target")
         self.depth_hold_toggle_btn.setEnabled(bool(has_depth_controls))
         self.rp_level_toggle_btn.setEnabled(bool(has_rp_controls))
         self.yaw_hold_toggle_btn.setEnabled(bool(has_yaw_controls))
+        self.depth_target_btn.setEnabled(bool(has_depth_target))
+        self.depth_off_btn.setEnabled(bool(has_depth_off))
+        for axis in ("roll", "pitch", "yaw"):
+            getattr(self, f"{axis}_target_btn").setEnabled(bool(has_axis_target))
+            getattr(self, f"{axis}_off_btn").setEnabled(bool(has_axis_mode))
+            level_btn = getattr(self, f"{axis}_level_btn", None)
+            if level_btn is not None:
+                level_btn.setEnabled(bool(has_axis_mode))
+
+    def _sync_target_spins(self, targets: dict) -> None:
+        self._maybe_set_spin(self.depth_target_spin, targets.get("depth_m"))
+        for axis, spin in self._axis_target_spins.items():
+            self._maybe_set_spin(spin, targets.get(f"{axis}_deg"))
+
+    @staticmethod
+    def _maybe_set_spin(spin: QDoubleSpinBox, value) -> None:
+        if spin.hasFocus():
+            return
+        try:
+            v = float(value)
+        except Exception:
+            return
+        if math.isfinite(v) and abs(float(spin.value()) - v) > 1e-9:
+            spin.setValue(v)
+
+    def _format_pilot_depth_mode(self, modes: dict, targets: dict) -> str:
+        text = "ON" if modes.get("depth_hold") else "OFF"
+        target = self._fmt_num(targets.get("depth_m"), "m", decimals=2)
+        if target != "-":
+            text += f" target {target}"
+        return text
+
+    def _format_pilot_axis_mode(self, modes: dict, ap: dict, targets: dict, axis: str) -> str:
+        if not ap and modes.get(f"{axis}_hold"):
+            return "ON"
+        mode = str(ap.get(axis) or ("hold" if modes.get(f"{axis}_hold") else "off")).strip().lower()
+        text = mode.upper() if mode and mode != "off" else "OFF"
+        target = self._fmt_num(targets.get(f"{axis}_deg"), "deg", decimals=1)
+        if target != "-":
+            text += f" target {target}"
+        return text
+
+    def _format_pilot_rp_modes(self, modes: dict, ap: dict, targets: dict) -> str:
+        if modes.get("roll_pitch_level") and not ap:
+            return "ON"
+        roll = self._format_pilot_axis_mode(modes, ap, targets, "roll")
+        pitch = self._format_pilot_axis_mode(modes, ap, targets, "pitch")
+        return f"roll {roll} | pitch {pitch}"
 
     def _toggle_depth_hold(self) -> None:
         if self._pilot_svc is None or not hasattr(self._pilot_svc, "toggle_depth_hold"):
@@ -441,6 +545,62 @@ class HoldTestPanel(QWidget):
         self._sync_local_hold_controls()
         self._set_feedback(f"Yaw hold {'enabled' if enabled else 'disabled'} from topside.", tone="#9be89b")
 
+    def _hold_depth_target(self) -> None:
+        if self._pilot_svc is None or not hasattr(self._pilot_svc, "set_depth_hold_target"):
+            self._set_feedback("Depth target control is unavailable from this page.", tone="#ff8d8d")
+            return
+        target = float(self.depth_target_spin.value())
+        try:
+            self._pilot_svc.set_depth_hold_target(target, enable=True)
+        except Exception as exc:
+            self._set_feedback(f"Could not set depth target: {exc}", tone="#ff8d8d")
+            return
+        self._sync_local_hold_controls()
+        self._set_feedback(f"Depth hold target set to {target:.2f} m.", tone="#9be89b")
+
+    def _depth_hold_off(self) -> None:
+        if self._pilot_svc is None or not hasattr(self._pilot_svc, "set_depth_hold_enabled"):
+            self._set_feedback("Depth hold control is unavailable from this page.", tone="#ff8d8d")
+            return
+        try:
+            self._pilot_svc.set_depth_hold_enabled(False)
+        except Exception as exc:
+            self._set_feedback(f"Could not turn depth hold off: {exc}", tone="#ff8d8d")
+            return
+        self._sync_local_hold_controls()
+        self._set_feedback("Depth hold disabled from topside.", tone="#9be89b")
+
+    def _hold_axis_target(self, axis: str) -> None:
+        axis_key = str(axis or "").strip().lower()
+        spin = self._axis_target_spins.get(axis_key)
+        if spin is None:
+            return
+        if self._pilot_svc is None or not hasattr(self._pilot_svc, "set_autopilot_axis_target"):
+            self._set_feedback(f"{axis_key.title()} target control is unavailable from this page.", tone="#ff8d8d")
+            return
+        target = float(spin.value())
+        try:
+            self._pilot_svc.set_autopilot_axis_target(axis_key, target, mode="hold")
+        except Exception as exc:
+            self._set_feedback(f"Could not set {axis_key} target: {exc}", tone="#ff8d8d")
+            return
+        self._sync_local_hold_controls()
+        self._set_feedback(f"{axis_key.title()} hold target set to {target:.1f} deg.", tone="#9be89b")
+
+    def _set_axis_mode(self, axis: str, mode: str) -> None:
+        axis_key = str(axis or "").strip().lower()
+        mode_value = str(mode or "off").strip().lower() or "off"
+        if self._pilot_svc is None or not hasattr(self._pilot_svc, "set_autopilot_axis_mode"):
+            self._set_feedback(f"{axis_key.title()} mode control is unavailable from this page.", tone="#ff8d8d")
+            return
+        try:
+            self._pilot_svc.set_autopilot_axis_mode(axis_key, mode_value)
+        except Exception as exc:
+            self._set_feedback(f"Could not set {axis_key} mode: {exc}", tone="#ff8d8d")
+            return
+        self._sync_local_hold_controls()
+        self._set_feedback(f"{axis_key.title()} mode set to {mode_value}.", tone="#9be89b")
+
     def _set_feedback(self, text: str, *, tone: str) -> None:
         self.feedback_label.setText(str(text))
         self.feedback_label.setStyleSheet(f"color: {tone};")
@@ -469,6 +629,8 @@ class HoldTestPanel(QWidget):
             )
         )
         self._runtime_labels["runtime_attitude"].setText(self._format_attitude_runtime(attitude_runtime))
+        self._runtime_labels["runtime_roll_hold_detail"].setText(self._format_axis_detail(attitude_runtime, "roll"))
+        self._runtime_labels["runtime_pitch_hold_detail"].setText(self._format_axis_detail(attitude_runtime, "pitch"))
         self._runtime_labels["runtime_yaw_hold_detail"].setText(self._format_axis_detail(attitude_runtime, "yaw"))
         self._runtime_labels["runtime_attitude_sensor"].setText(self._format_attitude_sensor(attitude_sensor))
         self._runtime_labels["runtime_attitude_debug"].setText(self._format_attitude_debug(attitude_runtime))
