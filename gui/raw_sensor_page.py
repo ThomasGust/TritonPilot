@@ -74,6 +74,14 @@ def _num(value, *, decimals: int = 3, unit: str = "") -> str:
     return f"{text} {unit}".strip() if unit else text
 
 
+def _finite_float(value) -> Optional[float]:
+    try:
+        v = float(value)
+    except Exception:
+        return None
+    return v if math.isfinite(v) else None
+
+
 def _vec(msg: dict | None) -> tuple[Optional[float], Optional[float], Optional[float]]:
     if not isinstance(msg, dict):
         return None, None, None
@@ -137,6 +145,8 @@ class RollingVectorPlot(QWidget):
             "tilt": QColor(156, 226, 156),
             "accel_roll": QColor(228, 142, 255),
             "accel_pitch": QColor(255, 160, 122),
+            "depth": QColor(112, 194, 255),
+            "sensor": QColor(247, 198, 84),
         }
         self.setMinimumHeight(190)
         self.setAttribute(Qt.WidgetAttribute.WA_OpaquePaintEvent, True)
@@ -518,6 +528,9 @@ class RawSensorPage(QWidget):
         self._attitude_estimator = RollPitchEstimator()
         self._latest_attitude: dict | None = None
         self._last_onboard_attitude_recv_s: float | None = None
+        self._latest_depth_msg: dict | None = None
+        self._latest_depth_m: float | None = None
+        self._depth_zero_m: float | None = None
 
         title = QLabel("Raw Sensors")
         title_font = QFont(title.font())
@@ -562,6 +575,7 @@ class RawSensorPage(QWidget):
                 ("AK09915", "ak"),
                 ("MMC5983", "mmc"),
                 ("Depth", "depth"),
+                ("Depth Reference", "depth_ref"),
                 ("Environment", "env"),
                 ("ADC", "adc"),
                 ("Power", "power"),
@@ -588,6 +602,7 @@ class RawSensorPage(QWidget):
         self.mag_plot = RollingVectorPlot("Primary Magnetometer", ["x", "y", "z", "norm"], window_s=20.0)
         self.ak_plot = RollingVectorPlot("AK09915 Magnetometer", ["x", "y", "z", "norm"], window_s=20.0)
         self.mmc_plot = RollingVectorPlot("MMC5983 Magnetometer", ["x", "y", "z", "norm"], window_s=20.0)
+        self.depth_plot = RollingVectorPlot("Depth", ["depth", "sensor"], window_s=60.0, max_update_hz=10.0)
 
         attitude_card = _Card("Attitude Display")
         attitude_row = QHBoxLayout()
@@ -598,6 +613,7 @@ class RawSensorPage(QWidget):
         attitude_card.body.addLayout(attitude_row)
 
         plot_card = _Card("Rolling Raw Vectors")
+        plot_card.body.addWidget(self.depth_plot)
         plot_card.body.addWidget(self.accel_plot)
         plot_card.body.addWidget(self.gyro_plot)
         plot_card.body.addWidget(self.mag_plot)
@@ -674,6 +690,7 @@ class RawSensorPage(QWidget):
         self.stop_recording()
 
     def _reset_attitude_reference(self) -> None:
+        self._reset_depth_reference()
         self._attitude_estimator.reset()
         if self._using_onboard_attitude():
             self._set_label_text("attitude_ref", "local fallback rest reset | onboard attitude active")
@@ -683,6 +700,17 @@ class RawSensorPage(QWidget):
         self.attitude_view.clear()
         self.attitude_plot.update()
         self._refresh_attitude_status()
+
+    def _reset_depth_reference(self) -> None:
+        if self._latest_depth_m is None:
+            self._set_label_text("depth_ref", "waiting for valid depth")
+            return
+        self._depth_zero_m = float(self._latest_depth_m)
+        self.depth_plot.samples.clear()
+        self.depth_plot.update()
+        self._refresh_depth_reference_label()
+        if self._latest_depth_msg is not None:
+            self._update_depth(dict(self._latest_depth_msg), time.time())
 
     def _set_label_text(self, key: str, text: str) -> None:
         label = self._labels.get(key)
@@ -795,6 +823,19 @@ class RawSensorPage(QWidget):
         if norm is not None:
             out["norm"] = norm
         return out
+
+    def _relative_depth(self, depth_m: float | None) -> float | None:
+        if depth_m is None:
+            return None
+        if self._depth_zero_m is None:
+            return float(depth_m)
+        return float(depth_m) - float(self._depth_zero_m)
+
+    def _refresh_depth_reference_label(self) -> None:
+        if self._depth_zero_m is None:
+            self._set_label_text("depth_ref", "raw")
+        else:
+            self._set_label_text("depth_ref", f"zero {_num(self._depth_zero_m, decimals=3, unit='m')}")
 
     def _refresh_attitude_status(self) -> None:
         status = self._attitude_estimator.status()
@@ -938,13 +979,27 @@ class RawSensorPage(QWidget):
         if msg.get("error"):
             self._set_label_text("depth", f"ERR | {msg.get('error')}")
             return
+        depth_raw = _finite_float(msg.get("depth_m"))
+        sensor_raw = _finite_float(msg.get("depth_sensor_m"))
+        self._latest_depth_msg = dict(msg or {})
+        self._latest_depth_m = depth_raw
+        depth_display = self._relative_depth(depth_raw)
+        sensor_display = self._relative_depth(sensor_raw)
         parts = [
-            f"depth {_num(msg.get('depth_m'), decimals=3, unit='m')}",
-            f"sensor {_num(msg.get('depth_sensor_m'), decimals=3, unit='m')}",
+            f"depth {_num(depth_display, decimals=3, unit='m')}",
+            f"raw {_num(depth_raw, decimals=3, unit='m')}",
+            f"sensor {_num(sensor_display, decimals=3, unit='m')}",
             f"pressure {_num(msg.get('pressure_mbar'), decimals=1, unit='mbar')}",
             f"temp {_num(msg.get('temperature_c'), decimals=2, unit='C')}",
         ]
         self._set_label_text("depth", " | ".join(parts))
+        self._refresh_depth_reference_label()
+        values: dict[str, float] = {}
+        if depth_display is not None:
+            values["depth"] = depth_display
+        if sensor_display is not None:
+            values["sensor"] = sensor_display
+        self.depth_plot.add_sample(_now, values)
 
     def _update_env(self, msg: dict) -> None:
         self._set_label_text(

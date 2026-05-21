@@ -168,6 +168,56 @@ def test_raw_sensor_page_does_not_clear_mag_on_plain_imu(tmp_path):
         app.processEvents()
 
 
+def test_raw_sensor_page_depth_plot_and_rest_zero(tmp_path):
+    app = _app()
+    page = RawSensorPage(recording_session_provider=lambda: tmp_path)
+    try:
+        depth_msg = {
+            "ts": 50.0,
+            "sensor": "external_depth",
+            "type": "external_depth",
+            "depth_m": 1.25,
+            "depth_sensor_m": 1.40,
+            "pressure_mbar": 1125.0,
+            "temperature_c": 12.5,
+        }
+        page.update_from_sensor(depth_msg)
+        app.processEvents()
+
+        assert "depth 1.250 m" in page._labels["depth"].text()
+        assert "raw 1.250 m" in page._labels["depth"].text()
+        assert page.depth_plot.samples[-1][1]["depth"] == pytest.approx(1.25)
+
+        page._reset_attitude_reference()
+        app.processEvents()
+
+        assert "zero 1.250 m" in page._labels["depth_ref"].text()
+        assert "depth 0.000 m" in page._labels["depth"].text()
+        assert page.depth_plot.samples[-1][1]["depth"] == pytest.approx(0.0)
+        assert page.depth_plot.samples[-1][1]["sensor"] == pytest.approx(0.15)
+
+        page.update_from_sensor(
+            {
+                "ts": 50.1,
+                "sensor": "external_depth",
+                "type": "external_depth",
+                "depth_m": 1.40,
+                "depth_sensor_m": 1.55,
+                "pressure_mbar": 1140.0,
+                "temperature_c": 12.6,
+            }
+        )
+        app.processEvents()
+
+        assert "depth 0.150 m" in page._labels["depth"].text()
+        assert page.depth_plot.samples[-1][1]["depth"] == pytest.approx(0.15)
+    finally:
+        page.shutdown()
+        page.close()
+        page.deleteLater()
+        app.processEvents()
+
+
 def test_raw_sensor_page_prefers_onboard_attitude_over_local_fallback(tmp_path):
     app = _app()
     page = RawSensorPage(recording_session_provider=lambda: tmp_path)

@@ -299,7 +299,6 @@ class MainWindow(QMainWindow):
                     self.video_panel.setParent(None)
                 except Exception:
                     pass
-                self._suspend_video_panel_if_hidden()
             self._page_stack.setCurrentWidget(self._management_page)
             try:
                 self._management_page.refresh_state()
@@ -314,7 +313,6 @@ class MainWindow(QMainWindow):
                     self.video_panel.setParent(None)
                 except Exception:
                     pass
-                self._suspend_video_panel_if_hidden()
             self._page_stack.setCurrentWidget(self._raw_sensor_page)
         else:
             if self.video_panel is not None:
