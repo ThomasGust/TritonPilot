@@ -43,8 +43,34 @@ def _mag_sources(ts, sources, primary="ak09915"):
     }
 
 
+def _config(**kwargs):
+    kwargs.setdefault("vehicle_roll_axis", "x")
+    return RollPitchConfig(**kwargs)
+
+
+def test_roll_pitch_estimator_default_matches_rov_swapped_axes():
+    est = RollPitchEstimator(RollPitchConfig(calibration_samples=5, accel_correction=1.0))
+    for i in range(5):
+        assert est.update(_imu(float(i), (0.0, 0.0, 9.80665))) is None
+
+    theta = math.radians(12.0)
+    sensor_x_tilt = (math.sin(theta) * 9.80665, 0.0, math.cos(theta) * 9.80665)
+    out = est.update(_imu(5.05, sensor_x_tilt))
+
+    assert out is not None
+    assert out["roll_deg"] == pytest.approx(12.0, abs=0.15)
+    assert out["pitch_deg"] == pytest.approx(0.0, abs=0.15)
+
+    sensor_y_tilt = (0.0, math.sin(theta) * 9.80665, math.cos(theta) * 9.80665)
+    out = est.update(_imu(5.10, sensor_y_tilt))
+
+    assert out is not None
+    assert out["roll_deg"] == pytest.approx(0.0, abs=0.15)
+    assert out["pitch_deg"] == pytest.approx(12.0, abs=0.15)
+
+
 def test_roll_pitch_estimator_zeros_current_rest_pose():
-    est = RollPitchEstimator(RollPitchConfig(calibration_samples=8, accel_correction=1.0))
+    est = RollPitchEstimator(_config(calibration_samples=8, accel_correction=1.0))
     rest = (3.379, -9.315, -0.232)
     bias = (-0.0178, -0.0102, 0.0077)
 
@@ -60,7 +86,7 @@ def test_roll_pitch_estimator_zeros_current_rest_pose():
 
 
 def test_roll_pitch_estimator_reports_known_tilt_after_reference():
-    est = RollPitchEstimator(RollPitchConfig(calibration_samples=5, accel_correction=1.0))
+    est = RollPitchEstimator(_config(calibration_samples=5, accel_correction=1.0))
     for i in range(5):
         assert est.update(_imu(float(i), (0.0, 0.0, 9.80665))) is None
 
@@ -74,7 +100,7 @@ def test_roll_pitch_estimator_reports_known_tilt_after_reference():
 
 
 def test_roll_pitch_estimator_reports_exact_rest_frame_pitch():
-    est = RollPitchEstimator(RollPitchConfig(calibration_samples=5, accel_correction=1.0))
+    est = RollPitchEstimator(_config(calibration_samples=5, accel_correction=1.0))
     for i in range(5):
         assert est.update(_imu(float(i), (0.0, 0.0, 9.80665))) is None
 
@@ -89,7 +115,7 @@ def test_roll_pitch_estimator_reports_exact_rest_frame_pitch():
 
 
 def test_roll_pitch_estimator_reports_combined_roll_pitch_without_axis_bleed():
-    est = RollPitchEstimator(RollPitchConfig(calibration_samples=5, accel_correction=1.0))
+    est = RollPitchEstimator(_config(calibration_samples=5, accel_correction=1.0))
     for i in range(5):
         assert est.update(_imu(float(i), (0.0, 0.0, 9.80665))) is None
 
@@ -109,7 +135,7 @@ def test_roll_pitch_estimator_reports_combined_roll_pitch_without_axis_bleed():
 
 def test_roll_pitch_estimator_waits_for_stable_calibration():
     est = RollPitchEstimator(
-        RollPitchConfig(
+        _config(
             calibration_samples=5,
             calibration_max_tilt_std_deg=0.5,
             calibration_max_gyro_rms_dps=3.0,
@@ -137,7 +163,7 @@ def test_roll_pitch_estimator_waits_for_stable_calibration():
 
 def test_roll_pitch_estimator_refines_gyro_bias_while_stationary():
     est = RollPitchEstimator(
-        RollPitchConfig(
+        _config(
             calibration_samples=5,
             accel_correction=1.0,
             stationary_bias_tau_s=0.1,
@@ -158,7 +184,7 @@ def test_roll_pitch_estimator_refines_gyro_bias_while_stationary():
 
 
 def test_roll_pitch_estimator_reports_relative_mag_yaw():
-    est = RollPitchEstimator(RollPitchConfig(calibration_samples=5, accel_correction=1.0))
+    est = RollPitchEstimator(_config(calibration_samples=5, accel_correction=1.0))
     est.update_mag(_mag(0.0, (1.0, 0.0, 0.0)))
     for i in range(5):
         assert est.update(_imu(float(i), (0.0, 0.0, 9.80665))) is None
@@ -177,7 +203,7 @@ def test_roll_pitch_estimator_reports_relative_mag_yaw():
 
 def test_roll_pitch_estimator_gyro_propagates_yaw_between_mag_samples():
     est = RollPitchEstimator(
-        RollPitchConfig(
+        _config(
             calibration_samples=5,
             accel_correction=1.0,
             max_dt_s=2.0,
@@ -199,7 +225,7 @@ def test_roll_pitch_estimator_gyro_propagates_yaw_between_mag_samples():
 
 
 def test_roll_pitch_estimator_tilt_compensates_mag_yaw():
-    est = RollPitchEstimator(RollPitchConfig(calibration_samples=5, accel_correction=1.0))
+    est = RollPitchEstimator(_config(calibration_samples=5, accel_correction=1.0))
     est.update_mag(_mag(0.0, (1.0, 0.0, 0.0)))
     for i in range(5):
         assert est.update(_imu(float(i), (0.0, 0.0, 9.80665))) is None
@@ -219,7 +245,7 @@ def test_roll_pitch_estimator_tilt_compensates_mag_yaw():
 
 
 def test_roll_pitch_estimator_auto_prefers_mmc_yaw_when_available():
-    est = RollPitchEstimator(RollPitchConfig(calibration_samples=5, accel_correction=1.0))
+    est = RollPitchEstimator(_config(calibration_samples=5, accel_correction=1.0))
     est.update_mag(_mag_sources(0.0, {"ak09915": (1.0, 0.0, 0.0), "mmc5983": (1.0, 0.0, 0.0)}))
     for i in range(5):
         assert est.update(_imu(float(i), (0.0, 0.0, 9.80665))) is None
@@ -243,7 +269,7 @@ def test_roll_pitch_estimator_auto_prefers_mmc_yaw_when_available():
 
 
 def test_roll_pitch_estimator_auto_uses_fresh_yaw_source():
-    est = RollPitchEstimator(RollPitchConfig(calibration_samples=5, accel_correction=1.0))
+    est = RollPitchEstimator(_config(calibration_samples=5, accel_correction=1.0))
     est.update_mag(_mag_sources(0.0, {"ak09915": (1.0, 0.0, 0.0), "mmc5983": (1.0, 0.0, 0.0)}))
     for i in range(5):
         assert est.update(_imu(float(i), (0.0, 0.0, 9.80665))) is None
@@ -260,7 +286,7 @@ def test_roll_pitch_estimator_auto_uses_fresh_yaw_source():
 
 def test_roll_pitch_estimator_auto_uses_clean_yaw_source():
     est = RollPitchEstimator(
-        RollPitchConfig(
+        _config(
             calibration_samples=5,
             accel_correction=1.0,
             yaw_mag_norm_gate=0.2,

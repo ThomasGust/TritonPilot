@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import Callable, Optional
 
 from PyQt6.QtCore import QPointF, QRectF, Qt
-from PyQt6.QtGui import QColor, QFont, QPainter, QPainterPath, QPen
+from PyQt6.QtGui import QColor, QFont, QPainter, QPainterPath, QPen, QPolygonF
 from PyQt6.QtWidgets import (
     QFrame,
     QGridLayout,
@@ -254,6 +254,228 @@ class RollingVectorPlot(QWidget):
         )
 
 
+class Attitude3DWidget(QWidget):
+    """Small software-rendered attitude view for the ROV body frame."""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.roll_deg: float | None = None
+        self.pitch_deg: float | None = None
+        self.yaw_deg: float | None = None
+        self.source: str = ""
+        self.yaw_status: str = ""
+        self.setMinimumHeight(260)
+        self.setMinimumWidth(280)
+        self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
+
+    @staticmethod
+    def _finite(value) -> float | None:
+        try:
+            out = float(value)
+        except Exception:
+            return None
+        return out if math.isfinite(out) else None
+
+    def clear(self) -> None:
+        self.roll_deg = None
+        self.pitch_deg = None
+        self.yaw_deg = None
+        self.source = ""
+        self.yaw_status = ""
+        self.update()
+
+    def set_attitude(self, msg: dict | None) -> None:
+        msg = dict(msg or {})
+        self.roll_deg = self._finite(msg.get("roll_deg"))
+        self.pitch_deg = self._finite(msg.get("pitch_deg"))
+        self.yaw_deg = self._finite(msg.get("yaw_deg"))
+        self.source = str(msg.get("source") or "")
+        self.yaw_status = str(msg.get("yaw_status") or "")
+        self.update()
+
+    @staticmethod
+    def _dot(a: tuple[float, float, float], b: tuple[float, float, float]) -> float:
+        return a[0] * b[0] + a[1] * b[1] + a[2] * b[2]
+
+    @staticmethod
+    def _cross(a: tuple[float, float, float], b: tuple[float, float, float]) -> tuple[float, float, float]:
+        return (
+            a[1] * b[2] - a[2] * b[1],
+            a[2] * b[0] - a[0] * b[2],
+            a[0] * b[1] - a[1] * b[0],
+        )
+
+    @staticmethod
+    def _normalize(v: tuple[float, float, float]) -> tuple[float, float, float]:
+        n = math.sqrt(v[0] * v[0] + v[1] * v[1] + v[2] * v[2])
+        if n <= 1e-9:
+            return (0.0, 0.0, 0.0)
+        return (v[0] / n, v[1] / n, v[2] / n)
+
+    @staticmethod
+    def _rotate(
+        v: tuple[float, float, float],
+        roll_rad: float,
+        pitch_rad: float,
+        yaw_rad: float,
+    ) -> tuple[float, float, float]:
+        x, y, z = v
+
+        cr = math.cos(roll_rad)
+        sr = math.sin(roll_rad)
+        y, z = y * cr - z * sr, y * sr + z * cr
+
+        cp = math.cos(pitch_rad)
+        sp = math.sin(pitch_rad)
+        x, z = x * cp - z * sp, x * sp + z * cp
+
+        cy = math.cos(yaw_rad)
+        sy = math.sin(yaw_rad)
+        x, y = x * cy - y * sy, x * sy + y * cy
+        return (x, y, z)
+
+    def _projector(self, center: QPointF, scale: float):
+        camera = self._normalize((3.2, -4.4, 2.6))
+        right = self._normalize(self._cross((0.0, 0.0, 1.0), camera))
+        up = self._normalize(self._cross(camera, right))
+
+        def project(v: tuple[float, float, float]) -> tuple[QPointF, float]:
+            sx = self._dot(v, right) * scale
+            sy = self._dot(v, up) * scale
+            depth = self._dot(v, camera)
+            return QPointF(center.x() + sx, center.y() - sy), depth
+
+        return project
+
+    @staticmethod
+    def _fmt_angle(value: float | None) -> str:
+        return "-" if value is None else f"{value:+.1f}"
+
+    def paintEvent(self, _event):  # noqa: N802
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+
+        outer = QRectF(self.rect()).adjusted(6, 6, -6, -6)
+        if outer.width() <= 8 or outer.height() <= 8:
+            return
+
+        painter.setPen(QPen(QColor(42, 42, 50), 1))
+        painter.setBrush(QColor(12, 14, 18))
+        painter.drawRoundedRect(outer, 8.0, 8.0)
+
+        title_font = QFont(self.font())
+        title_font.setBold(True)
+        painter.setFont(title_font)
+        painter.setPen(QColor(232, 237, 245))
+        painter.drawText(outer.adjusted(10, 6, -10, 0), Qt.AlignmentFlag.AlignTop | Qt.AlignmentFlag.AlignLeft, "3D Attitude")
+
+        view = outer.adjusted(10, 34, -10, -34)
+        if view.width() <= 40 or view.height() <= 40:
+            return
+
+        painter.setPen(QPen(QColor(30, 34, 42), 1))
+        painter.setBrush(QColor(8, 10, 14))
+        painter.drawRoundedRect(view, 6.0, 6.0)
+
+        if self.roll_deg is None or self.pitch_deg is None:
+            painter.setPen(QColor(150, 158, 172))
+            painter.drawText(view, Qt.AlignmentFlag.AlignCenter, "Waiting for attitude")
+            return
+
+        roll = math.radians(float(self.roll_deg))
+        pitch = math.radians(float(self.pitch_deg))
+        yaw = math.radians(float(self.yaw_deg or 0.0))
+
+        center = QPointF(view.center().x(), view.center().y() + 10.0)
+        scale = max(28.0, min(view.width() / 4.4, view.height() / 3.2))
+        project = self._projector(center, scale)
+
+        grid_pen = QPen(QColor(30, 48, 58), 1)
+        grid_pen.setStyle(Qt.PenStyle.DotLine)
+        painter.setPen(grid_pen)
+        for i in range(-2, 3):
+            p0, _ = project((-2.0, float(i), -0.68))
+            p1, _ = project((2.0, float(i), -0.68))
+            painter.drawLine(p0, p1)
+            p2, _ = project((float(i), -2.0, -0.68))
+            p3, _ = project((float(i), 2.0, -0.68))
+            painter.drawLine(p2, p3)
+
+        half_l, half_w, half_h = 1.25, 0.62, 0.34
+        vertices = [
+            (-half_l, -half_w, -half_h),
+            (half_l, -half_w, -half_h),
+            (half_l, half_w, -half_h),
+            (-half_l, half_w, -half_h),
+            (-half_l, -half_w, half_h),
+            (half_l, -half_w, half_h),
+            (half_l, half_w, half_h),
+            (-half_l, half_w, half_h),
+        ]
+        rotated = [self._rotate(v, roll, pitch, yaw) for v in vertices]
+        projected = [project(v) for v in rotated]
+
+        faces = [
+            ([0, 1, 2, 3], QColor(35, 47, 60, 210)),
+            ([4, 5, 6, 7], QColor(55, 133, 154, 215)),
+            ([0, 1, 5, 4], QColor(47, 96, 126, 205)),
+            ([3, 2, 6, 7], QColor(62, 111, 92, 205)),
+            ([0, 3, 7, 4], QColor(46, 58, 76, 205)),
+            ([1, 2, 6, 5], QColor(229, 151, 72, 220)),
+        ]
+        face_depths = []
+        for indices, color in faces:
+            depth = sum(projected[i][1] for i in indices) / len(indices)
+            face_depths.append((depth, indices, color))
+
+        for _depth, indices, color in sorted(face_depths, key=lambda item: item[0]):
+            poly = QPolygonF([projected[i][0] for i in indices])
+            painter.setPen(QPen(QColor(13, 18, 24), 1))
+            painter.setBrush(color)
+            painter.drawPolygon(poly)
+
+        edge_pen = QPen(QColor(224, 232, 240), 1)
+        painter.setPen(edge_pen)
+        for a, b in ((0, 1), (1, 2), (2, 3), (3, 0), (4, 5), (5, 6), (6, 7), (7, 4), (0, 4), (1, 5), (2, 6), (3, 7)):
+            painter.drawLine(projected[a][0], projected[b][0])
+
+        nose_points = [
+            self._rotate((half_l, 0.0, 0.0), roll, pitch, yaw),
+            self._rotate((half_l + 0.52, 0.0, 0.0), roll, pitch, yaw),
+            self._rotate((half_l + 0.30, -0.18, 0.0), roll, pitch, yaw),
+            self._rotate((half_l + 0.30, 0.18, 0.0), roll, pitch, yaw),
+        ]
+        p_tail, _ = project(nose_points[0])
+        p_tip, _ = project(nose_points[1])
+        p_left, _ = project(nose_points[2])
+        p_right, _ = project(nose_points[3])
+        painter.setPen(QPen(QColor(255, 204, 99), 3))
+        painter.drawLine(p_tail, p_tip)
+        painter.setPen(QPen(QColor(255, 204, 99), 2))
+        painter.drawLine(p_tip, p_left)
+        painter.drawLine(p_tip, p_right)
+
+        pods = [
+            self._rotate((-0.70, -0.86, -0.05), roll, pitch, yaw),
+            self._rotate((0.70, -0.86, -0.05), roll, pitch, yaw),
+            self._rotate((-0.70, 0.86, -0.05), roll, pitch, yaw),
+            self._rotate((0.70, 0.86, -0.05), roll, pitch, yaw),
+        ]
+        pod_points = [project(p) for p in pods]
+        for point, _depth in sorted(pod_points, key=lambda item: item[1]):
+            painter.setPen(QPen(QColor(13, 18, 24), 1))
+            painter.setBrush(QColor(185, 196, 210, 220))
+            painter.drawEllipse(point, 5.0, 5.0)
+
+        painter.setPen(QColor(190, 198, 210))
+        readout = (
+            f"R {self._fmt_angle(self.roll_deg)} deg   "
+            f"P {self._fmt_angle(self.pitch_deg)} deg   "
+            f"Y {self._fmt_angle(self.yaw_deg)} deg"
+        )
+        painter.drawText(QRectF(outer.left() + 10, outer.bottom() - 24, outer.width() - 20, 18), Qt.AlignmentFlag.AlignCenter, readout)
+
+
 class RawSensorPage(QWidget):
     """Raw ROV telemetry dashboard with focused CSV capture."""
 
@@ -339,14 +561,22 @@ class RawSensorPage(QWidget):
             ["roll", "pitch", "yaw"],
             window_s=20.0,
         )
+        self.attitude_view = Attitude3DWidget()
         self.mag_plot = RollingVectorPlot("Primary Magnetometer", ["x", "y", "z", "norm"], window_s=20.0)
         self.ak_plot = RollingVectorPlot("AK09915 Magnetometer", ["x", "y", "z", "norm"], window_s=20.0)
         self.mmc_plot = RollingVectorPlot("MMC5983 Magnetometer", ["x", "y", "z", "norm"], window_s=20.0)
 
+        attitude_card = _Card("Attitude Display")
+        attitude_row = QHBoxLayout()
+        attitude_row.setContentsMargins(0, 0, 0, 0)
+        attitude_row.setSpacing(8)
+        attitude_row.addWidget(self.attitude_view, 1)
+        attitude_row.addWidget(self.attitude_plot, 1)
+        attitude_card.body.addLayout(attitude_row)
+
         plot_card = _Card("Rolling Raw Vectors")
         plot_card.body.addWidget(self.accel_plot)
         plot_card.body.addWidget(self.gyro_plot)
-        plot_card.body.addWidget(self.attitude_plot)
         plot_card.body.addWidget(self.mag_plot)
         plot_card.body.addWidget(self.ak_plot)
         plot_card.body.addWidget(self.mmc_plot)
@@ -358,6 +588,7 @@ class RawSensorPage(QWidget):
         content_lay.addWidget(title)
         content_lay.addWidget(self.record_card)
         content_lay.addWidget(self.summary_card)
+        content_lay.addWidget(attitude_card)
         content_lay.addWidget(plot_card)
         content_lay.addStretch(1)
 
@@ -426,6 +657,7 @@ class RawSensorPage(QWidget):
             return
         self._latest_attitude = None
         self.attitude_plot.samples.clear()
+        self.attitude_view.clear()
         self.attitude_plot.update()
         self._refresh_attitude_status()
 
@@ -538,6 +770,7 @@ class RawSensorPage(QWidget):
         if status.get("calibration_state") != "calibrated":
             self._labels["attitude"].setText(f"calibrating {count}/{target}")
             self._labels["attitude_ref"].setText("-")
+            self.attitude_view.clear()
             return
         ref = status.get("reference_accel")
         bias = status.get("gyro_bias")
@@ -549,6 +782,7 @@ class RawSensorPage(QWidget):
                 f"yaw {_num(last.get('yaw_deg'), decimals=2, unit='deg')}"
             )
             self._labels["attitude"].setText(text)
+            self.attitude_view.set_attitude(last)
         else:
             self._labels["attitude"].setText("calibrated")
         if isinstance(ref, tuple) and len(ref) == 3:
@@ -649,6 +883,7 @@ class RawSensorPage(QWidget):
             f"{_deg_value('x')}, {_deg_value('y')}, {_deg_value('z')} deg/s"
             f"{quality}"
         )
+        self.attitude_view.set_attitude(msg)
         self.attitude_plot.add_sample(
             float(msg.get("recv_time_s") or time.time()),
             {

@@ -10,7 +10,7 @@ pytest.importorskip("PyQt6")
 
 from PyQt6.QtWidgets import QApplication
 
-from gui.raw_sensor_page import RawSensorPage
+from gui.raw_sensor_page import Attitude3DWidget, RawSensorPage
 
 
 def _app() -> QApplication:
@@ -116,6 +116,7 @@ def test_raw_sensor_page_updates_separate_mag_and_attitude_rows(tmp_path):
         assert attitude["type"] == "attitude"
         assert abs(attitude["roll_deg"]) < 0.05
         assert len(page.attitude_plot.samples) >= 1
+        assert page.attitude_view.roll_deg == pytest.approx(attitude["roll_deg"])
 
         page.stop_recording()
         rows = list(csv.DictReader((tmp_path / "raw_sensor_timeseries.csv").open(newline="", encoding="utf-8")))
@@ -171,8 +172,30 @@ def test_raw_sensor_page_prefers_onboard_attitude_over_local_fallback(tmp_path):
         app.processEvents()
         assert "roll 1.00 deg" in page._labels["attitude"].text()
         assert "src onboard_imu_mag_relative" in page._labels["attitude_ref"].text()
+        assert page.attitude_view.roll_deg == pytest.approx(1.0)
+        assert page.attitude_view.pitch_deg == pytest.approx(2.0)
+        assert page.attitude_view.yaw_deg == pytest.approx(3.0)
     finally:
         page.shutdown()
         page.close()
         page.deleteLater()
+        app.processEvents()
+
+
+def test_attitude_3d_widget_tracks_and_clears_values():
+    app = _app()
+    widget = Attitude3DWidget()
+    try:
+        widget.set_attitude({"roll_deg": -4.0, "pitch_deg": 5.5, "yaw_deg": 12.0})
+        assert widget.roll_deg == pytest.approx(-4.0)
+        assert widget.pitch_deg == pytest.approx(5.5)
+        assert widget.yaw_deg == pytest.approx(12.0)
+
+        widget.clear()
+        assert widget.roll_deg is None
+        assert widget.pitch_deg is None
+        assert widget.yaw_deg is None
+    finally:
+        widget.close()
+        widget.deleteLater()
         app.processEvents()
