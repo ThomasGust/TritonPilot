@@ -108,7 +108,11 @@ class ManagementPage(QWidget):
     def __init__(self, endpoint: str = MANAGEMENT_RPC_ENDPOINT, parent=None):
         super().__init__(parent)
         self.endpoint = str(endpoint)
-        self._svc = ManagementRpcService(endpoint=self.endpoint, on_result=self._on_rpc_result_from_thread)
+        self._svc = ManagementRpcService(
+            endpoint=self.endpoint,
+            on_result=self._on_rpc_result_from_thread,
+            timeout_ms=180_000,
+        )
         self._svc.start()
 
         self._available_commands: set[str] = set()
@@ -243,6 +247,24 @@ class ManagementPage(QWidget):
         depth_buttons.addWidget(self.save_surface_btn)
         depth_card.body.addLayout(depth_buttons)
         root.addWidget(depth_card)
+
+        service_card = _SectionCard(
+            "ROV Code",
+            "Update the Pi checkout from GitHub and restart TritonOS without opening an SSH session.",
+        )
+        service_buttons = QHBoxLayout()
+        service_buttons.setSpacing(8)
+        self.update_code_btn = QPushButton("Force Update From GitHub")
+        self.update_code_btn.clicked.connect(lambda: self._confirm_update_code(restart=False))
+        self.update_restart_btn = QPushButton("Update + Restart")
+        self.update_restart_btn.clicked.connect(lambda: self._confirm_update_code(restart=True))
+        self.restart_service_btn = QPushButton("Restart TritonOS")
+        self.restart_service_btn.clicked.connect(self._confirm_restart_service)
+        service_buttons.addWidget(self.update_code_btn)
+        service_buttons.addWidget(self.update_restart_btn)
+        service_buttons.addWidget(self.restart_service_btn)
+        service_card.body.addLayout(service_buttons)
+        root.addWidget(service_card)
 
         config_card = _SectionCard(
             "Config Values",
@@ -389,6 +411,20 @@ class ManagementPage(QWidget):
                 f"Captured surface pressure {self._fmt_num(data.get('surface_pressure_mbar'), 'mbar', decimals=2)} "
                 f"and saved it to {str(data.get('path') or 'the depth reference file')}."
             )
+        elif cmd == "update_code":
+            stdout = str(data.get("stdout") or "").strip()
+            revision = ""
+            for line in reversed(stdout.splitlines()):
+                if line.strip():
+                    revision = line.strip()
+                    break
+            msg = "ROV code updated from GitHub."
+            if revision:
+                msg += f" Latest: {revision}"
+            if data.get("restart_scheduled"):
+                msg += " TritonOS restart scheduled."
+        elif cmd == "restart_service":
+            msg = "TritonOS restart scheduled. The management RPC will disconnect briefly."
         else:
             msg = f"{self._command_label(cmd)} succeeded."
 
@@ -406,6 +442,9 @@ class ManagementPage(QWidget):
         self.save_sensor_offset_btn.setEnabled((not busy) and can_set_config and sensor_offset_present)
         self.save_surface_btn.setEnabled((not busy) and ("set_surface_reference" in self._available_commands))
         self.capture_surface_btn.setEnabled((not busy) and ("capture_surface_reference" in self._available_commands))
+        self.update_code_btn.setEnabled((not busy) and ("update_code" in self._available_commands))
+        self.update_restart_btn.setEnabled((not busy) and ("update_code" in self._available_commands))
+        self.restart_service_btn.setEnabled((not busy) and ("restart_service" in self._available_commands))
 
         has_enabled_config_field = any(spin.isEnabled() for spin in self._config_spins.values())
         self.save_config_btn.setEnabled((not busy) and can_set_config and has_enabled_config_field)
@@ -414,6 +453,9 @@ class ManagementPage(QWidget):
             self.save_sensor_offset_btn.setEnabled(False)
             self.save_surface_btn.setEnabled(False)
             self.capture_surface_btn.setEnabled(False)
+            self.update_code_btn.setEnabled(False)
+            self.update_restart_btn.setEnabled(False)
+            self.restart_service_btn.setEnabled(False)
             self.save_config_btn.setEnabled(False)
 
     def _save_sensor_offset(self) -> None:
@@ -443,6 +485,35 @@ class ManagementPage(QWidget):
             {"samples": 20, "delay_s": 0.02},
             request_meta={"refresh_after_success": True},
         )
+
+    def _confirm_update_code(self, *, restart: bool) -> None:
+        action = "update code from GitHub and restart TritonOS" if restart else "update code from GitHub"
+        answer = QMessageBox.question(
+            self,
+            "Force Update From GitHub",
+            (
+                f"Force {action}?\n\n"
+                "This resets the Pi checkout to origin/main and removes untracked code files. "
+                "Runtime data directories such as calibration/ and recordings/ are preserved."
+            ),
+        )
+        if answer != QMessageBox.StandardButton.Yes:
+            return
+        self._queue_request(
+            "update_code",
+            {"branch": "main", "force": True, "restart": bool(restart), "timeout_s": 180.0},
+            request_meta={"refresh_after_success": not restart},
+        )
+
+    def _confirm_restart_service(self) -> None:
+        answer = QMessageBox.question(
+            self,
+            "Restart TritonOS",
+            "Restart the TritonOS ROV service now?\n\nThe management RPC and telemetry will disconnect briefly.",
+        )
+        if answer != QMessageBox.StandardButton.Yes:
+            return
+        self._queue_request("restart_service", {"delay_s": 1.0})
 
     def _save_config_values(self) -> None:
         updates = {}
@@ -560,6 +631,8 @@ class ManagementPage(QWidget):
             "set_config": "Save Config",
             "set_surface_reference": "Save Manual Surface Pressure",
             "capture_surface_reference": "Capture Surface Reference",
+            "update_code": "Force Update From GitHub",
+            "restart_service": "Restart TritonOS",
         }
         return labels.get(str(cmd), str(cmd) or "Request")
 
