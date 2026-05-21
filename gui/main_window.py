@@ -119,7 +119,7 @@ class MainWindow(QMainWindow):
 
     def _refresh_drive_status(self) -> None:
         direction = "REVERSE" if self._reverse_enabled else "FORWARD"
-        parts = [f"Mode: {direction}", self._depth_hold_status_text]
+        parts = [f"Mode: {direction}", self._depth_hold_status_text, self._attitude_hold_status_text]
         self._set_status(self._mode_lbl, " | ".join(parts))
         self._set_status_tone(self._mode_lbl, "alert" if self._reverse_enabled else None)
 
@@ -363,6 +363,7 @@ class MainWindow(QMainWindow):
         self._reverse_enabled: bool = False
         self._reverse_camera_name: str | None = None
         self._depth_hold_status_text: str = "Depth Hold: OFF"
+        self._attitude_hold_status_text: str = "RP Level: OFF"
 
         self._link_lbl = QLabel("Heartbeat: (no data)")
         self.statusBar().addPermanentWidget(self._link_lbl)
@@ -415,7 +416,7 @@ class MainWindow(QMainWindow):
             (self._ctrl_lbl, 220),
             (self._depth_lbl, 190),
             (self._gain_lbl, 150),
-            (self._mode_lbl, 320),
+            (self._mode_lbl, 420),
         ]:
             try:
                 _lbl.setMinimumWidth(int(_w))
@@ -858,6 +859,7 @@ class MainWindow(QMainWindow):
         try:
             modes = (msg or {}).get("modes", {}) or {}
             dh = bool(modes.get("depth_hold", False))
+            rp_level = bool(modes.get("roll_pitch_level", False))
             reverse = bool(modes.get("reverse", False))
             if reverse != self._reverse_enabled:
                 self._reverse_enabled = reverse
@@ -934,8 +936,11 @@ class MainWindow(QMainWindow):
             else:
                 self._depth_hold_status_text = "Depth Hold: OFF"
 
+            self._attitude_hold_status_text = "RP Level: ON" if rp_level else "RP Level: OFF"
+
         except Exception:
             self._depth_hold_status_text = "Depth Hold: -"
+            self._attitude_hold_status_text = "RP Level: -"
         self._refresh_drive_status()
         self._refresh_video_status()
 
@@ -943,6 +948,11 @@ class MainWindow(QMainWindow):
         self._last_ctrl_status = status or {'controller': 'unknown'}
         try:
             self._reverse_enabled = bool((status or {}).get('reverse', self._reverse_enabled))
+        except Exception:
+            pass
+        try:
+            if "roll_pitch_level" in (status or {}):
+                self._attitude_hold_status_text = "RP Level: ON" if bool((status or {}).get("roll_pitch_level")) else "RP Level: OFF"
         except Exception:
             pass
         self._sync_reverse_action()

@@ -247,7 +247,7 @@ class HoldTestPanel(QWidget):
         title_font.setPointSize(max(12, title_font.pointSize() + 1))
         title.setFont(title_font)
 
-        subtitle = QLabel("Single-camera piloting page with depth-hold controls, runtime telemetry, and live depth instruments.")
+        subtitle = QLabel("Single-camera piloting page with autopilot controls, runtime telemetry, and live depth instruments.")
         subtitle.setWordWrap(True)
         subtitle.setStyleSheet("color: #b6bac8;")
 
@@ -262,6 +262,9 @@ class HoldTestPanel(QWidget):
         self.depth_hold_toggle_btn = QPushButton("Toggle Depth Hold")
         self.depth_hold_toggle_btn.clicked.connect(self._toggle_depth_hold)
         button_row.addWidget(self.depth_hold_toggle_btn)
+        self.rp_level_toggle_btn = QPushButton("Roll/Pitch Level")
+        self.rp_level_toggle_btn.clicked.connect(self._toggle_roll_pitch_level)
+        button_row.addWidget(self.rp_level_toggle_btn)
         self.control_card.body.addLayout(button_row)
 
         control_grid = QGridLayout()
@@ -270,6 +273,7 @@ class HoldTestPanel(QWidget):
         for row, (label_text, key) in enumerate(
             [
                 ("Pilot Depth Hold", "pilot_depth_hold"),
+                ("Pilot Roll/Pitch Level", "pilot_rp_level"),
                 ("Runtime RPC", "runtime_rpc"),
             ]
         ):
@@ -294,7 +298,11 @@ class HoldTestPanel(QWidget):
             [
                 ("Control Loop", "runtime_loop"),
                 ("Armed", "runtime_armed"),
+                ("Autopilot Runtime", "runtime_autopilot"),
                 ("Depth Hold Runtime", "runtime_depth_hold"),
+                ("Attitude Runtime", "runtime_attitude"),
+                ("Attitude Sensor", "runtime_attitude_sensor"),
+                ("Attitude Debug", "runtime_attitude_debug"),
                 ("Depth Sensor", "runtime_depth_sensor"),
                 ("Depth Debug", "runtime_depth_debug"),
             ]
@@ -383,8 +391,11 @@ class HoldTestPanel(QWidget):
             except Exception:
                 modes = {}
         self._runtime_labels["pilot_depth_hold"].setText("ON" if modes.get("depth_hold") else "OFF")
-        has_controls = self._pilot_svc is not None and hasattr(self._pilot_svc, "toggle_depth_hold")
-        self.depth_hold_toggle_btn.setEnabled(bool(has_controls))
+        self._runtime_labels["pilot_rp_level"].setText("ON" if modes.get("roll_pitch_level") else "OFF")
+        has_depth_controls = self._pilot_svc is not None and hasattr(self._pilot_svc, "toggle_depth_hold")
+        has_rp_controls = self._pilot_svc is not None and hasattr(self._pilot_svc, "toggle_roll_pitch_level")
+        self.depth_hold_toggle_btn.setEnabled(bool(has_depth_controls))
+        self.rp_level_toggle_btn.setEnabled(bool(has_rp_controls))
 
     def _toggle_depth_hold(self) -> None:
         if self._pilot_svc is None or not hasattr(self._pilot_svc, "toggle_depth_hold"):
@@ -398,17 +409,34 @@ class HoldTestPanel(QWidget):
         self._sync_local_hold_controls()
         self._set_feedback(f"Depth hold {'enabled' if enabled else 'disabled'} from topside.", tone="#9be89b")
 
+    def _toggle_roll_pitch_level(self) -> None:
+        if self._pilot_svc is None or not hasattr(self._pilot_svc, "toggle_roll_pitch_level"):
+            self._set_feedback("Roll/pitch level control is unavailable from this page.", tone="#ff8d8d")
+            return
+        try:
+            enabled = bool(self._pilot_svc.toggle_roll_pitch_level())
+        except Exception as exc:
+            self._set_feedback(f"Could not toggle roll/pitch level: {exc}", tone="#ff8d8d")
+            return
+        self._sync_local_hold_controls()
+        self._set_feedback(f"Roll/pitch level {'enabled' if enabled else 'disabled'} from topside.", tone="#9be89b")
+
     def _set_feedback(self, text: str, *, tone: str) -> None:
         self.feedback_label.setText(str(text))
         self.feedback_label.setStyleSheet(f"color: {tone};")
 
     def _apply_runtime_state(self, runtime: dict) -> None:
+        autopilot = dict(runtime.get("autopilot") or {})
+        autopilot_status = dict(autopilot.get("status") or {})
+        attitude_runtime = dict(autopilot_status.get("attitude") or {})
+        attitude_sensor = dict(autopilot.get("attitude_sensor") or {})
         depth_hold = dict(runtime.get("depth_hold") or {})
         depth_status = dict(depth_hold.get("status") or {})
         depth_sensor = dict(depth_hold.get("sensor") or {})
 
         self._runtime_labels["runtime_loop"].setText("available" if runtime.get("control_loop_available") else "unavailable")
         self._runtime_labels["runtime_armed"].setText("yes" if runtime.get("armed") else "no")
+        self._runtime_labels["runtime_autopilot"].setText(self._format_autopilot_runtime(autopilot))
         self._runtime_labels["runtime_depth_hold"].setText(
             self._format_hold_runtime(
                 available=depth_hold.get("available"),
@@ -420,6 +448,9 @@ class HoldTestPanel(QWidget):
                 status_age_s=depth_hold.get("status_age_s"),
             )
         )
+        self._runtime_labels["runtime_attitude"].setText(self._format_attitude_runtime(attitude_runtime))
+        self._runtime_labels["runtime_attitude_sensor"].setText(self._format_attitude_sensor(attitude_sensor))
+        self._runtime_labels["runtime_attitude_debug"].setText(self._format_attitude_debug(attitude_runtime))
         self._runtime_labels["runtime_depth_sensor"].setText(self._format_depth_sensor(depth_sensor))
         self._runtime_labels["runtime_depth_debug"].setText(self._format_depth_debug(depth_status))
 
@@ -463,6 +494,62 @@ class HoldTestPanel(QWidget):
         if status_age_s is not None:
             parts.append(f"status age {self._fmt_num(status_age_s, 's', decimals=2)}")
         return " | ".join(parts)
+
+    def _format_autopilot_runtime(self, autopilot: dict) -> str:
+        parts = [
+            f"available {self._fmt_bool(autopilot.get('available'))}",
+            f"sensor {self._fmt_bool(autopilot.get('sensor_available'))}",
+        ]
+        status_age = autopilot.get("status_age_s")
+        if status_age is not None:
+            parts.append(f"status age {self._fmt_num(status_age, 's', decimals=2)}")
+        return " | ".join(parts)
+
+    def _format_attitude_runtime(self, attitude: dict) -> str:
+        parts = [
+            f"enabled_cmd {self._fmt_bool(attitude.get('enabled_cmd'))}",
+            f"active {self._fmt_bool(attitude.get('active'))}",
+        ]
+        if attitude.get("reason"):
+            parts.append(f"reason {attitude.get('reason')}")
+        if attitude.get("source"):
+            parts.append(f"src {attitude.get('source')}")
+        return " | ".join(parts)
+
+    def _format_attitude_sensor(self, sensor: dict) -> str:
+        parts: list[str] = [f"available {self._fmt_bool(sensor.get('available'))}"]
+        if sensor.get("source"):
+            parts.append(str(sensor.get("source")))
+        sample_age = sensor.get("sample_age_s")
+        if sample_age is not None:
+            parts.append(f"sample age {self._fmt_num(sample_age, 's', decimals=2)}")
+        raw = sensor.get("raw") if isinstance(sensor.get("raw"), dict) else {}
+        for label, key in (("r", "roll_deg"), ("p", "pitch_deg"), ("y", "yaw_deg")):
+            text = self._fmt_num(raw.get(key), "deg", decimals=1)
+            if text != "-":
+                parts.append(f"{label} {text}")
+        return " | ".join(parts) if parts else "-"
+
+    def _format_attitude_debug(self, attitude: dict) -> str:
+        axes = attitude.get("axes") if isinstance(attitude.get("axes"), dict) else {}
+        parts: list[str] = []
+        for axis in ("roll", "pitch", "yaw"):
+            st = axes.get(axis) if isinstance(axes.get(axis), dict) else {}
+            mode = str(st.get("mode") or "off")
+            if mode == "off" and not st.get("active"):
+                continue
+            bit = f"{axis} {mode}"
+            if st.get("active"):
+                err = self._fmt_num(st.get("error_deg"), "deg", decimals=2)
+                out = self._fmt_num(st.get("u_out"), "", decimals=3)
+                if err != "-":
+                    bit += f" err {err}"
+                if out != "-":
+                    bit += f" out {out}"
+            elif st.get("reason"):
+                bit += f" {st.get('reason')}"
+            parts.append(bit)
+        return " | ".join(parts) if parts else "-"
 
     def _format_depth_sensor(self, sensor: dict) -> str:
         parts: list[str] = []

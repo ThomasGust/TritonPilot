@@ -61,6 +61,14 @@ CONFIG_FIELD_SPECS = [
         "decimals": 4,
     },
     {"key": "EXTERNAL_DEPTH_RATE_HZ", "label": "External Depth Rate (Hz)", "min": 0.0, "max": 1000.0, "step": 0.1, "decimals": 2},
+    {"key": "AUTOPILOT_ROLL_KP", "label": "Roll Level Kp", "min": -10.0, "max": 10.0, "step": 0.001, "decimals": 5},
+    {"key": "AUTOPILOT_ROLL_KD", "label": "Roll Level Kd", "min": -10.0, "max": 10.0, "step": 0.001, "decimals": 5},
+    {"key": "AUTOPILOT_ROLL_OUT_LIMIT", "label": "Roll Output Limit", "min": 0.0, "max": 1.0, "step": 0.01, "decimals": 4},
+    {"key": "AUTOPILOT_ROLL_SIGN", "label": "Roll Sign", "min": -1.0, "max": 1.0, "step": 2.0, "decimals": 0},
+    {"key": "AUTOPILOT_PITCH_KP", "label": "Pitch Level Kp", "min": -10.0, "max": 10.0, "step": 0.001, "decimals": 5},
+    {"key": "AUTOPILOT_PITCH_KD", "label": "Pitch Level Kd", "min": -10.0, "max": 10.0, "step": 0.001, "decimals": 5},
+    {"key": "AUTOPILOT_PITCH_OUT_LIMIT", "label": "Pitch Output Limit", "min": 0.0, "max": 1.0, "step": 0.01, "decimals": 4},
+    {"key": "AUTOPILOT_PITCH_SIGN", "label": "Pitch Sign", "min": -1.0, "max": 1.0, "step": 2.0, "decimals": 0},
 ]
 
 

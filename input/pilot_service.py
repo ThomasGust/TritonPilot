@@ -93,6 +93,8 @@ class PilotPublisherService:
             PILOT_MAX_GAIN_STEP,
             REVERSE_MODE_DEFAULT,
             REVERSE_TOGGLE_BUTTON,
+            ROLL_PITCH_LEVEL_DEFAULT,
+            ROLL_PITCH_LEVEL_TOGGLE_BUTTON,
             T200_WRIST_GAIN_DEFAULT,
             T200_WRIST_GAIN_MIN,
             T200_WRIST_GAIN_MAX,
@@ -100,6 +102,7 @@ class PilotPublisherService:
         )
 
         self._depth_hold_toggle_button = str(DEPTH_HOLD_TOGGLE_BUTTON or "rstick").strip().lower()
+        self._roll_pitch_level_toggle_button = str(ROLL_PITCH_LEVEL_TOGGLE_BUTTON or "").strip().lower()
         self._lights_toggle_button = str(LIGHTS_TOGGLE_BUTTON or "").strip().lower()
         self._lights_toggle_edge = str(LIGHTS_TOGGLE_EDGE or "lights").strip().lower() or "lights"
         self._reverse_toggle_button = str(REVERSE_TOGGLE_BUTTON or "").strip().lower()
@@ -129,6 +132,13 @@ class PilotPublisherService:
             "depth_hold": bool(DEPTH_HOLD_DEFAULT),
             "max_gain": float(self._max_gain),
             "reverse": bool(REVERSE_MODE_DEFAULT),
+            "roll_pitch_level": bool(ROLL_PITCH_LEVEL_DEFAULT),
+            "autopilot": {
+                "depth": bool(DEPTH_HOLD_DEFAULT),
+                "roll": "level" if bool(ROLL_PITCH_LEVEL_DEFAULT) else "off",
+                "pitch": "level" if bool(ROLL_PITCH_LEVEL_DEFAULT) else "off",
+                "yaw": "off",
+            },
             "t200_wrist_gain": float(self._t200_wrist_gain),
         }
         self._prev_buttons: Optional[PilotButtons] = None
@@ -288,9 +298,65 @@ class PilotPublisherService:
         self.set_reverse_enabled(new_state)
         return new_state
 
+    def _autopilot_modes_locked(self) -> dict:
+        current = self._modes.get("autopilot")
+        if isinstance(current, dict):
+            ap = dict(current)
+        else:
+            ap = {}
+        ap.setdefault("depth", bool(self._modes.get("depth_hold", False)))
+        ap.setdefault("roll", "off")
+        ap.setdefault("pitch", "off")
+        ap.setdefault("yaw", "off")
+        return ap
+
+    def set_autopilot_axis_mode(self, axis: str, mode: str) -> bool:
+        axis_key = str(axis or "").strip().lower()
+        if axis_key not in {"roll", "pitch", "yaw"}:
+            return False
+        mode_value = str(mode or "off").strip().lower() or "off"
+        with self._mode_lock:
+            ap = self._autopilot_modes_locked()
+            prev = str(ap.get(axis_key, "off"))
+            ap[axis_key] = mode_value
+            if axis_key in {"roll", "pitch"}:
+                ap["roll_pitch_level"] = ap.get("roll") == "level" and ap.get("pitch") == "level"
+                self._modes["roll_pitch_level"] = bool(ap["roll_pitch_level"])
+            self._modes["autopilot"] = ap
+        changed = prev != mode_value
+        if changed:
+            self._emit_status(self._status_payload())
+        return changed
+
+    def is_roll_pitch_level_enabled(self) -> bool:
+        return bool(self.current_modes().get("roll_pitch_level", False))
+
+    def set_roll_pitch_level_enabled(self, enabled: bool) -> bool:
+        enabled = bool(enabled)
+        with self._mode_lock:
+            ap = self._autopilot_modes_locked()
+            prev = bool(self._modes.get("roll_pitch_level", False))
+            ap["roll"] = "level" if enabled else "off"
+            ap["pitch"] = "level" if enabled else "off"
+            ap["roll_pitch_level"] = enabled
+            self._modes["roll_pitch_level"] = enabled
+            self._modes["autopilot"] = ap
+        changed = prev != enabled
+        if changed:
+            self._emit_status(self._status_payload(controller="connected"))
+        return changed
+
+    def toggle_roll_pitch_level(self) -> bool:
+        new_state = not self.is_roll_pitch_level_enabled()
+        self.set_roll_pitch_level_enabled(new_state)
+        return new_state
+
     def _handle_mode_edges(self, edges: dict[str, str]) -> None:
         if edges.get(self._depth_hold_toggle_button) == "down":
             self.toggle_depth_hold()
+
+        if self._roll_pitch_level_toggle_button and edges.get(self._roll_pitch_level_toggle_button) == "down":
+            self.toggle_roll_pitch_level()
 
         if self._lights_toggle_button and edges.get(self._lights_toggle_button) == "down":
             edges[self._lights_toggle_edge] = "down"
@@ -310,6 +376,9 @@ class PilotPublisherService:
         with self._mode_lock:
             prev = bool(self._modes.get("depth_hold", False))
             self._modes["depth_hold"] = enabled
+            ap = self._autopilot_modes_locked()
+            ap["depth"] = enabled
+            self._modes["autopilot"] = ap
         changed = prev != enabled
         if changed:
             self._emit_status(self._status_payload(controller="connected"))

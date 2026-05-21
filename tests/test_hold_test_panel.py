@@ -31,9 +31,12 @@ class _RpcStub:
 
 class _PilotStub:
     def current_modes(self):
-        return {"depth_hold": True}
+        return {"depth_hold": True, "roll_pitch_level": True}
 
     def toggle_depth_hold(self):
+        return False
+
+    def toggle_roll_pitch_level(self):
         return False
 
 
@@ -54,11 +57,45 @@ def test_hold_test_panel_uses_scroll_layout_and_shows_depth_debug(monkeypatch):
         assert panel.minimumWidth() >= 520
         assert panel.findChild(QScrollArea) is not None
         assert panel._runtime_labels["pilot_depth_hold"].text() == "ON"
+        assert panel._runtime_labels["pilot_rp_level"].text() == "ON"
 
         panel._apply_runtime_state(
             {
                 "control_loop_available": True,
                 "armed": True,
+                "autopilot": {
+                    "available": True,
+                    "sensor_available": True,
+                    "status_age_s": 0.04,
+                    "status": {
+                        "attitude": {
+                            "enabled_cmd": True,
+                            "active": True,
+                            "reason": "active",
+                            "source": "onboard_imu_mag_relative",
+                            "axes": {
+                                "roll": {
+                                    "mode": "level",
+                                    "active": True,
+                                    "error_deg": -2.0,
+                                    "u_out": -0.02,
+                                },
+                                "pitch": {
+                                    "mode": "level",
+                                    "active": True,
+                                    "error_deg": 1.0,
+                                    "u_out": 0.01,
+                                },
+                            },
+                        },
+                    },
+                    "attitude_sensor": {
+                        "available": True,
+                        "sample_age_s": 0.03,
+                        "source": "onboard_imu_mag_relative",
+                        "raw": {"roll_deg": 2.0, "pitch_deg": -1.0, "yaw_deg": 5.0},
+                    },
+                },
                 "depth_hold": {
                     "available": True,
                     "sensor_available": True,
@@ -84,6 +121,10 @@ def test_hold_test_panel_uses_scroll_layout_and_shows_depth_debug(monkeypatch):
         )
 
         assert "target 1.25 m" in panel._runtime_labels["runtime_depth_hold"].text()
+        assert "available yes" in panel._runtime_labels["runtime_autopilot"].text()
+        assert "active yes" in panel._runtime_labels["runtime_attitude"].text()
+        assert "r 2.0 deg" in panel._runtime_labels["runtime_attitude_sensor"].text()
+        assert "roll level" in panel._runtime_labels["runtime_attitude_debug"].text()
         assert "stream age 0.07 s" in panel._runtime_labels["runtime_depth_sensor"].text()
         assert "error -0.020 m" in panel._runtime_labels["runtime_depth_debug"].text()
         assert "out 0.030" in panel._runtime_labels["runtime_depth_debug"].text()

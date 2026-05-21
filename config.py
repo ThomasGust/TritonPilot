@@ -172,6 +172,12 @@ CONTROLLER_WIN_BUTTONS = _parse_int_list_env("TRITON_CONTROLLER_WIN_BUTTONS", []
 DEPTH_HOLD_TOGGLE_BUTTON = os.environ.get("TRITON_DEPTH_HOLD_TOGGLE", "rstick").strip().lower()
 DEPTH_HOLD_DEFAULT = os.environ.get("TRITON_DEPTH_HOLD_DEFAULT", "0").strip().lower() in ("1", "true", "yes")
 
+# Roll/pitch leveling is sent as part of PilotFrame.modes["autopilot"].
+# It is intentionally GUI-first by default; set TRITON_RP_LEVEL_TOGGLE to a
+# controller button name if you want a physical toggle later.
+ROLL_PITCH_LEVEL_TOGGLE_BUTTON = os.environ.get("TRITON_RP_LEVEL_TOGGLE", "").strip().lower()
+ROLL_PITCH_LEVEL_DEFAULT = os.environ.get("TRITON_RP_LEVEL_DEFAULT", "0").strip().lower() in ("1", "true", "yes")
+
 # Lights are toggled by sending TritonOS its normal synthetic button edge.
 # Default controls: keyboard L or controller L3.
 LIGHTS_TOGGLE_SHORTCUT = os.environ.get("TRITON_LIGHTS_TOGGLE_SHORTCUT", "L").strip() or "L"
