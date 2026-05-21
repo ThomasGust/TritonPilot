@@ -92,8 +92,13 @@ def test_hold_test_panel_uses_scroll_layout_and_shows_depth_debug(monkeypatch):
                                 },
                                 "yaw": {
                                     "mode": "hold",
+                                    "enabled_cmd": True,
                                     "active": True,
+                                    "reason": "hold",
+                                    "angle_deg": 5.0,
+                                    "target_deg": 1.0,
                                     "error_deg": -4.0,
+                                    "rate_dps": 0.2,
                                     "u_out": -0.024,
                                 },
                             },
@@ -133,6 +138,9 @@ def test_hold_test_panel_uses_scroll_layout_and_shows_depth_debug(monkeypatch):
         assert "target 1.25 m" in panel._runtime_labels["runtime_depth_hold"].text()
         assert "available yes" in panel._runtime_labels["runtime_autopilot"].text()
         assert "active yes" in panel._runtime_labels["runtime_attitude"].text()
+        assert "current 5.0 deg" in panel._runtime_labels["runtime_yaw_hold_detail"].text()
+        assert "target 1.0 deg" in panel._runtime_labels["runtime_yaw_hold_detail"].text()
+        assert "error -4.0 deg" in panel._runtime_labels["runtime_yaw_hold_detail"].text()
         assert "r 2.0 deg" in panel._runtime_labels["runtime_attitude_sensor"].text()
         assert "roll level" in panel._runtime_labels["runtime_attitude_debug"].text()
         assert "yaw hold" in panel._runtime_labels["runtime_attitude_debug"].text()

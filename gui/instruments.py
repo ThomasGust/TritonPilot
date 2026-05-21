@@ -305,6 +305,7 @@ class HoldTestPanel(QWidget):
                 ("Autopilot Runtime", "runtime_autopilot"),
                 ("Depth Hold Runtime", "runtime_depth_hold"),
                 ("Attitude Runtime", "runtime_attitude"),
+                ("Yaw Hold Detail", "runtime_yaw_hold_detail"),
                 ("Attitude Sensor", "runtime_attitude_sensor"),
                 ("Attitude Debug", "runtime_attitude_debug"),
                 ("Depth Sensor", "runtime_depth_sensor"),
@@ -468,6 +469,7 @@ class HoldTestPanel(QWidget):
             )
         )
         self._runtime_labels["runtime_attitude"].setText(self._format_attitude_runtime(attitude_runtime))
+        self._runtime_labels["runtime_yaw_hold_detail"].setText(self._format_axis_detail(attitude_runtime, "yaw"))
         self._runtime_labels["runtime_attitude_sensor"].setText(self._format_attitude_sensor(attitude_sensor))
         self._runtime_labels["runtime_attitude_debug"].setText(self._format_attitude_debug(attitude_runtime))
         self._runtime_labels["runtime_depth_sensor"].setText(self._format_depth_sensor(depth_sensor))
@@ -548,6 +550,38 @@ class HoldTestPanel(QWidget):
             if text != "-":
                 parts.append(f"{label} {text}")
         return " | ".join(parts) if parts else "-"
+
+    def _format_axis_detail(self, attitude: dict, axis: str) -> str:
+        axes = attitude.get("axes") if isinstance(attitude.get("axes"), dict) else {}
+        st = axes.get(axis) if isinstance(axes.get(axis), dict) else {}
+        if not st:
+            return "-"
+
+        parts = [
+            f"mode {st.get('mode') or 'off'}",
+            f"enabled {self._fmt_bool(st.get('enabled_cmd'))}",
+            f"active {self._fmt_bool(st.get('active'))}",
+        ]
+        if st.get("reason"):
+            parts.append(f"reason {st.get('reason')}")
+
+        angle = self._fmt_num(st.get("angle_deg"), "deg", decimals=1)
+        target = self._fmt_num(st.get("target_deg"), "deg", decimals=1)
+        error = self._fmt_num(st.get("error_deg"), "deg", decimals=1)
+        rate = self._fmt_num(st.get("rate_dps"), "deg/s", decimals=1)
+        out = self._fmt_num(st.get("u_out"), "", decimals=3)
+
+        if angle != "-":
+            parts.append(f"current {angle}")
+        if target != "-":
+            parts.append(f"target {target}")
+        if error != "-":
+            parts.append(f"error {error}")
+        if rate != "-":
+            parts.append(f"rate {rate}")
+        if out != "-":
+            parts.append(f"out {out}")
+        return " | ".join(parts)
 
     def _format_attitude_debug(self, attitude: dict) -> str:
         axes = attitude.get("axes") if isinstance(attitude.get("axes"), dict) else {}
