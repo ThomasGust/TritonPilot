@@ -3,7 +3,17 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from typing import Tuple, List, Optional, Dict, Any
+import os
 import time
+import warnings
+
+os.environ.setdefault("PYGAME_HIDE_SUPPORT_PROMPT", "1")
+warnings.filterwarnings(
+    "ignore",
+    message=r"pkg_resources is deprecated as an API.*",
+    category=UserWarning,
+    module=r"pygame\.pkgdata",
+)
 
 try:
     import pygame  # type: ignore

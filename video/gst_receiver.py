@@ -25,6 +25,41 @@ if not logger.handlers:
     h.setFormatter(logging.Formatter("[%(asctime)s] %(levelname)s %(name)s: %(message)s"))
     logger.addHandler(h)
 logger.setLevel(logging.INFO)
+logger.propagate = False
+
+
+_GSTPYTHON_PLUGIN_WARNING_PHRASES = (
+    "gstpython.dll",
+    "This usually means Windows was unable to find a DLL dependency of the plugin",
+    "Please check that PATH is correct",
+    "dumpbin -dependents",
+    "third-party GUIs to list and debug DLL dependencies",
+)
+
+
+def _suppress_gst_stderr_line(line: str) -> bool:
+    """Hide the optional gstpython plugin warning without hiding real pipeline errors."""
+    text = str(line or "").strip()
+    if not text:
+        return True
+    if os.environ.get("TRITON_SHOW_GST_PLUGIN_WARNINGS", "").strip() == "1":
+        return False
+    return any(phrase in text for phrase in _GSTPYTHON_PLUGIN_WARNING_PHRASES)
+
+
+def _log_receiver_start(cfg: "RxConfig", cmd: List[str]) -> None:
+    if os.environ.get("TRITON_GST_LOG_COMMAND", "").strip() == "1":
+        logger.info("Starting receiver '%s': %s", cfg.name, " ".join(cmd))
+        return
+    logger.info(
+        "Starting receiver '%s' port=%s codec=%s mode=%s %dx%d",
+        cfg.name,
+        cfg.port,
+        cfg.codec,
+        cfg.mode,
+        cfg.width,
+        cfg.height,
+    )
 
 
 def _find_gst_launch() -> str:
@@ -183,11 +218,7 @@ class ReceiverProcess:
                 self._latest_frame_ts = 0.0
 
             cmd = self._build_cmd(self.cfg)
-            logger.info("Starting receiver '%s': %s", self.cfg.name, " ".join(cmd))
-            creationflags = 0
-            if os.name == "nt":
-                creationflags = subprocess.CREATE_NEW_PROCESS_GROUP
-            logger.info("Starting receiver '%s': %s", self.cfg.name, " ".join(cmd))
+            _log_receiver_start(self.cfg, cmd)
             creationflags = 0
             if os.name == "nt":
                 creationflags = subprocess.CREATE_NEW_PROCESS_GROUP
@@ -359,7 +390,9 @@ class ReceiverProcess:
         if not self.proc or not self.proc.stdout:
             return
         for line in iter(self.proc.stdout.readline, b""):
-            logger.info("[gst:%s] %s", self.cfg.name, line.decode(errors="replace").rstrip())
+            text = line.decode(errors="replace").rstrip()
+            if not _suppress_gst_stderr_line(text):
+                logger.info("[gst:%s] %s", self.cfg.name, text)
             if self.proc.poll() is not None:
                 break
 
@@ -368,7 +401,9 @@ class ReceiverProcess:
         if not self.proc or not self.proc.stderr:
             return
         for line in iter(self.proc.stderr.readline, b""):
-            logger.info("[gst:%s:ERR] %s", self.cfg.name, line.decode(errors="replace").rstrip())
+            text = line.decode(errors="replace").rstrip()
+            if not _suppress_gst_stderr_line(text):
+                logger.info("[gst:%s:ERR] %s", self.cfg.name, text)
             if self.proc.poll() is not None:
                 break
 
