@@ -527,6 +527,8 @@ class RawSensorPage(QWidget):
         self._rate_t0 = time.time()
         self._attitude_estimator = RollPitchEstimator()
         self._latest_attitude: dict | None = None
+        self._attitude_display_zero: dict[str, float] | None = None
+        self._attitude_display_zero_kind: str | None = None
         self._last_onboard_attitude_recv_s: float | None = None
         self._latest_depth_msg: dict | None = None
         self._latest_depth_m: float | None = None
@@ -544,7 +546,7 @@ class RawSensorPage(QWidget):
         record_row.setSpacing(8)
         self.record_btn = QPushButton("Start Raw CSV")
         self.record_btn.clicked.connect(self._toggle_recording)
-        self.attitude_rest_btn = QPushButton("Set Local Rest")
+        self.attitude_rest_btn = QPushButton("Set Rest")
         self.attitude_rest_btn.clicked.connect(self._reset_attitude_reference)
         self.record_state = QLabel("Recording: idle")
         self.record_path_lbl = QLabel("File: -")
@@ -693,8 +695,15 @@ class RawSensorPage(QWidget):
         self._reset_depth_reference()
         self._attitude_estimator.reset()
         if self._using_onboard_attitude():
-            self._set_label_text("attitude_ref", "local fallback rest reset | onboard attitude active")
+            if self._set_attitude_display_zero(self._latest_attitude):
+                self.attitude_plot.samples.clear()
+                self.attitude_plot.update()
+                self._update_attitude(dict(self._latest_attitude or {}))
+            else:
+                self._set_label_text("attitude_ref", "waiting for onboard attitude to zero display")
             return
+        self._attitude_display_zero = None
+        self._attitude_display_zero_kind = None
         self._latest_attitude = None
         self.attitude_plot.samples.clear()
         self.attitude_view.clear()
@@ -728,6 +737,47 @@ class RawSensorPage(QWidget):
         if now is None:
             now = time.time()
         return (float(now) - float(self._last_onboard_attitude_recv_s)) <= self.LOCAL_ATTITUDE_FALLBACK_STALE_S
+
+    @staticmethod
+    def _attitude_source_kind(msg: dict | None) -> str:
+        source = str((msg or {}).get("source", "") or "")
+        return "topside" if source.startswith("topside_") else "onboard"
+
+    @staticmethod
+    def _wrap_degrees(deg: float) -> float:
+        return ((float(deg) + 180.0) % 360.0) - 180.0
+
+    def _set_attitude_display_zero(self, msg: dict | None) -> bool:
+        if not isinstance(msg, dict):
+            return False
+        zero: dict[str, float] = {}
+        for key in ("roll_deg", "pitch_deg", "yaw_deg"):
+            value = _finite_float(msg.get(key))
+            if value is not None:
+                zero[key] = value
+        if not zero:
+            return False
+        self._attitude_display_zero = zero
+        self._attitude_display_zero_kind = self._attitude_source_kind(msg)
+        return True
+
+    def _display_attitude_msg(self, msg: dict) -> dict:
+        out = dict(msg or {})
+        zero = self._attitude_display_zero
+        if not zero or self._attitude_display_zero_kind != self._attitude_source_kind(out):
+            return out
+        for key in ("roll_deg", "pitch_deg"):
+            value = _finite_float(out.get(key))
+            ref = zero.get(key)
+            if value is not None and ref is not None:
+                out[key] = value - ref
+        value = _finite_float(out.get("yaw_deg"))
+        ref = zero.get("yaw_deg")
+        if value is not None and ref is not None:
+            out["yaw_deg"] = self._wrap_degrees(value - ref)
+        out["display_zeroed"] = True
+        out["display_zero_source_kind"] = self._attitude_display_zero_kind
+        return out
 
     def record_message(self, msg: dict) -> list[dict]:
         derived: list[dict] = []
@@ -848,7 +898,7 @@ class RawSensorPage(QWidget):
             return
         ref = status.get("reference_accel")
         bias = status.get("gyro_bias")
-        last = status.get("last_output") or self._latest_attitude or {}
+        last = self._display_attitude_msg(status.get("last_output") or self._latest_attitude or {})
         if last:
             text = (
                 f"roll {_num(last.get('roll_deg'), decimals=2, unit='deg')} | "
@@ -932,14 +982,16 @@ class RawSensorPage(QWidget):
             self.mmc_plot.add_sample(now, self._plot_values(mmc))
 
     def _update_attitude(self, msg: dict) -> None:
-        self._latest_attitude = dict(msg or {})
+        raw_msg = dict(msg or {})
+        self._latest_attitude = raw_msg
+        display_msg = self._display_attitude_msg(raw_msg)
         source = str(msg.get("source", ""))
         if not source.startswith("topside_"):
             self._last_onboard_attitude_recv_s = time.time()
         text = (
-            f"roll {_num(msg.get('roll_deg'), decimals=2, unit='deg')} | "
-            f"pitch {_num(msg.get('pitch_deg'), decimals=2, unit='deg')} | "
-            f"yaw {_num(msg.get('yaw_deg'), decimals=2, unit='deg')}"
+            f"roll {_num(display_msg.get('roll_deg'), decimals=2, unit='deg')} | "
+            f"pitch {_num(display_msg.get('pitch_deg'), decimals=2, unit='deg')} | "
+            f"yaw {_num(display_msg.get('yaw_deg'), decimals=2, unit='deg')}"
         )
         self._set_label_text("attitude", text)
         ref = msg.get("reference_accel") if isinstance(msg.get("reference_accel"), dict) else {}
@@ -958,6 +1010,8 @@ class RawSensorPage(QWidget):
             quality += f" | yaw {msg.get('yaw_source')}"
         if msg.get("yaw_status"):
             quality += f" ({msg.get('yaw_status')})"
+        if display_msg.get("display_zeroed"):
+            quality += " | display zeroed"
         self._set_label_text(
             "attitude_ref",
             f"g0 x {_num(ref.get('x'), decimals=3)} | y {_num(ref.get('y'), decimals=3)} | "
@@ -965,13 +1019,13 @@ class RawSensorPage(QWidget):
             f"{_deg_value('x')}, {_deg_value('y')}, {_deg_value('z')} deg/s"
             f"{quality}"
         )
-        self.attitude_view.set_attitude(msg)
+        self.attitude_view.set_attitude(display_msg)
         self.attitude_plot.add_sample(
             float(msg.get("recv_time_s") or time.time()),
             {
-                "roll": msg.get("roll_deg"),
-                "pitch": msg.get("pitch_deg"),
-                "yaw": msg.get("yaw_deg"),
+                "roll": display_msg.get("roll_deg"),
+                "pitch": display_msg.get("pitch_deg"),
+                "yaw": display_msg.get("yaw_deg"),
             },
         )
 

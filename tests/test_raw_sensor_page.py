@@ -264,6 +264,25 @@ def test_raw_sensor_page_prefers_onboard_attitude_over_local_fallback(tmp_path):
         assert page.attitude_view.roll_deg == pytest.approx(1.0)
         assert page.attitude_view.pitch_deg == pytest.approx(2.0)
         assert page.attitude_view.yaw_deg == pytest.approx(3.0)
+
+        page._reset_attitude_reference()
+        app.processEvents()
+
+        assert "yaw 0.00 deg" in page._labels["attitude"].text()
+        assert "display zeroed" in page._labels["attitude_ref"].text()
+        assert page.attitude_view.roll_deg == pytest.approx(0.0)
+        assert page.attitude_view.pitch_deg == pytest.approx(0.0)
+        assert page.attitude_view.yaw_deg == pytest.approx(0.0)
+
+        moved = dict(onboard)
+        moved.update({"roll_deg": 1.5, "pitch_deg": 1.5, "yaw_deg": 4.5, "recv_time_s": 41.0})
+        page.update_from_sensor(moved)
+        app.processEvents()
+
+        assert "roll 0.50 deg" in page._labels["attitude"].text()
+        assert "pitch -0.50 deg" in page._labels["attitude"].text()
+        assert "yaw 1.50 deg" in page._labels["attitude"].text()
+        assert page.attitude_view.yaw_deg == pytest.approx(1.5)
     finally:
         page.shutdown()
         page.close()
