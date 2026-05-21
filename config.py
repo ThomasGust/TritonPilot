@@ -183,7 +183,7 @@ YAW_HOLD_DEFAULT = os.environ.get("TRITON_YAW_HOLD_DEFAULT", "0").strip().lower(
 # Topside-only fallback attitude estimator convention. The onboard estimator is
 # authoritative when available; these settings keep the raw-sensor page aligned
 # during local fallback/replay.
-ATTITUDE_VEHICLE_ROLL_AXIS = os.environ.get("TRITON_ATTITUDE_VEHICLE_ROLL_AXIS", "y").strip() or "y"
+ATTITUDE_VEHICLE_ROLL_AXIS = os.environ.get("TRITON_ATTITUDE_VEHICLE_ROLL_AXIS", "z").strip() or "z"
 ATTITUDE_ROLL_SIGN = float(os.environ.get("TRITON_ATTITUDE_ROLL_SIGN", "1.0"))
 ATTITUDE_PITCH_SIGN = float(os.environ.get("TRITON_ATTITUDE_PITCH_SIGN", "1.0"))
 

@@ -1017,6 +1017,8 @@ class RawSensorPage(QWidget):
             quality += f" | yaw {msg.get('yaw_source')}"
         if msg.get("yaw_status"):
             quality += f" ({msg.get('yaw_status')})"
+        if msg.get("vehicle_roll_axis"):
+            quality += f" | axis {msg.get('vehicle_roll_axis')}"
         if display_msg.get("display_zeroed"):
             quality += " | display zeroed"
         self._set_label_text(

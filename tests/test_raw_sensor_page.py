@@ -78,10 +78,10 @@ def test_raw_sensor_page_updates_vectors_and_records_csv(tmp_path):
 
 def test_raw_sensor_page_fallback_estimator_uses_configured_vehicle_axis(tmp_path, monkeypatch):
     app = _app()
-    monkeypatch.setattr(config, "ATTITUDE_VEHICLE_ROLL_AXIS", "y")
+    monkeypatch.setattr(config, "ATTITUDE_VEHICLE_ROLL_AXIS", "z")
     page = RawSensorPage(recording_session_provider=lambda: tmp_path)
     try:
-        assert page._attitude_estimator.config.vehicle_roll_axis == "y"
+        assert page._attitude_estimator.config.vehicle_roll_axis == "z"
     finally:
         page.shutdown()
         page.close()
@@ -248,6 +248,7 @@ def test_raw_sensor_page_prefers_onboard_attitude_over_local_fallback(tmp_path):
             "gyro_bias": {"x": 0.0, "y": 0.0, "z": 0.0},
             "yaw_source": "mmc5983",
             "yaw_status": "ready",
+            "vehicle_roll_axis": "z",
         }
         assert page.record_message(onboard) == []
         page.update_from_sensor(onboard)
@@ -275,6 +276,7 @@ def test_raw_sensor_page_prefers_onboard_attitude_over_local_fallback(tmp_path):
         app.processEvents()
         assert "roll 1.00 deg" in page._labels["attitude"].text()
         assert "src onboard_imu_mag_relative" in page._labels["attitude_ref"].text()
+        assert "axis z" in page._labels["attitude_ref"].text()
         assert page.attitude_view.roll_deg == pytest.approx(1.0)
         assert page.attitude_view.pitch_deg == pytest.approx(2.0)
         assert page.attitude_view.yaw_deg == pytest.approx(3.0)
