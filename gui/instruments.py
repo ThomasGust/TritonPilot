@@ -265,6 +265,9 @@ class HoldTestPanel(QWidget):
         self.rp_level_toggle_btn = QPushButton("Roll/Pitch Level")
         self.rp_level_toggle_btn.clicked.connect(self._toggle_roll_pitch_level)
         button_row.addWidget(self.rp_level_toggle_btn)
+        self.yaw_hold_toggle_btn = QPushButton("Yaw Hold")
+        self.yaw_hold_toggle_btn.clicked.connect(self._toggle_yaw_hold)
+        button_row.addWidget(self.yaw_hold_toggle_btn)
         self.control_card.body.addLayout(button_row)
 
         control_grid = QGridLayout()
@@ -274,6 +277,7 @@ class HoldTestPanel(QWidget):
             [
                 ("Pilot Depth Hold", "pilot_depth_hold"),
                 ("Pilot Roll/Pitch Level", "pilot_rp_level"),
+                ("Pilot Yaw Hold", "pilot_yaw_hold"),
                 ("Runtime RPC", "runtime_rpc"),
             ]
         ):
@@ -392,10 +396,13 @@ class HoldTestPanel(QWidget):
                 modes = {}
         self._runtime_labels["pilot_depth_hold"].setText("ON" if modes.get("depth_hold") else "OFF")
         self._runtime_labels["pilot_rp_level"].setText("ON" if modes.get("roll_pitch_level") else "OFF")
+        self._runtime_labels["pilot_yaw_hold"].setText("ON" if modes.get("yaw_hold") else "OFF")
         has_depth_controls = self._pilot_svc is not None and hasattr(self._pilot_svc, "toggle_depth_hold")
         has_rp_controls = self._pilot_svc is not None and hasattr(self._pilot_svc, "toggle_roll_pitch_level")
+        has_yaw_controls = self._pilot_svc is not None and hasattr(self._pilot_svc, "toggle_yaw_hold")
         self.depth_hold_toggle_btn.setEnabled(bool(has_depth_controls))
         self.rp_level_toggle_btn.setEnabled(bool(has_rp_controls))
+        self.yaw_hold_toggle_btn.setEnabled(bool(has_yaw_controls))
 
     def _toggle_depth_hold(self) -> None:
         if self._pilot_svc is None or not hasattr(self._pilot_svc, "toggle_depth_hold"):
@@ -420,6 +427,18 @@ class HoldTestPanel(QWidget):
             return
         self._sync_local_hold_controls()
         self._set_feedback(f"Roll/pitch level {'enabled' if enabled else 'disabled'} from topside.", tone="#9be89b")
+
+    def _toggle_yaw_hold(self) -> None:
+        if self._pilot_svc is None or not hasattr(self._pilot_svc, "toggle_yaw_hold"):
+            self._set_feedback("Yaw hold control is unavailable from this page.", tone="#ff8d8d")
+            return
+        try:
+            enabled = bool(self._pilot_svc.toggle_yaw_hold())
+        except Exception as exc:
+            self._set_feedback(f"Could not toggle yaw hold: {exc}", tone="#ff8d8d")
+            return
+        self._sync_local_hold_controls()
+        self._set_feedback(f"Yaw hold {'enabled' if enabled else 'disabled'} from topside.", tone="#9be89b")
 
     def _set_feedback(self, text: str, *, tone: str) -> None:
         self.feedback_label.setText(str(text))

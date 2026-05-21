@@ -177,6 +177,8 @@ DEPTH_HOLD_DEFAULT = os.environ.get("TRITON_DEPTH_HOLD_DEFAULT", "0").strip().lo
 # controller button name if you want a physical toggle later.
 ROLL_PITCH_LEVEL_TOGGLE_BUTTON = os.environ.get("TRITON_RP_LEVEL_TOGGLE", "").strip().lower()
 ROLL_PITCH_LEVEL_DEFAULT = os.environ.get("TRITON_RP_LEVEL_DEFAULT", "0").strip().lower() in ("1", "true", "yes")
+YAW_HOLD_TOGGLE_BUTTON = os.environ.get("TRITON_YAW_HOLD_TOGGLE", "").strip().lower()
+YAW_HOLD_DEFAULT = os.environ.get("TRITON_YAW_HOLD_DEFAULT", "0").strip().lower() in ("1", "true", "yes")
 
 # Lights are toggled by sending TritonOS its normal synthetic button edge.
 # Default controls: keyboard L or controller L3.

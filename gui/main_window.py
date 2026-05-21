@@ -119,7 +119,12 @@ class MainWindow(QMainWindow):
 
     def _refresh_drive_status(self) -> None:
         direction = "REVERSE" if self._reverse_enabled else "FORWARD"
-        parts = [f"Mode: {direction}", self._depth_hold_status_text, self._attitude_hold_status_text]
+        parts = [
+            f"Mode: {direction}",
+            self._depth_hold_status_text,
+            self._attitude_hold_status_text,
+            self._yaw_hold_status_text,
+        ]
         self._set_status(self._mode_lbl, " | ".join(parts))
         self._set_status_tone(self._mode_lbl, "alert" if self._reverse_enabled else None)
 
@@ -364,6 +369,7 @@ class MainWindow(QMainWindow):
         self._reverse_camera_name: str | None = None
         self._depth_hold_status_text: str = "Depth Hold: OFF"
         self._attitude_hold_status_text: str = "RP Level: OFF"
+        self._yaw_hold_status_text: str = "Yaw Hold: OFF"
 
         self._link_lbl = QLabel("Heartbeat: (no data)")
         self.statusBar().addPermanentWidget(self._link_lbl)
@@ -416,7 +422,7 @@ class MainWindow(QMainWindow):
             (self._ctrl_lbl, 220),
             (self._depth_lbl, 190),
             (self._gain_lbl, 150),
-            (self._mode_lbl, 420),
+            (self._mode_lbl, 520),
         ]:
             try:
                 _lbl.setMinimumWidth(int(_w))
@@ -860,6 +866,7 @@ class MainWindow(QMainWindow):
             modes = (msg or {}).get("modes", {}) or {}
             dh = bool(modes.get("depth_hold", False))
             rp_level = bool(modes.get("roll_pitch_level", False))
+            yaw_hold = bool(modes.get("yaw_hold", False))
             reverse = bool(modes.get("reverse", False))
             if reverse != self._reverse_enabled:
                 self._reverse_enabled = reverse
@@ -937,10 +944,12 @@ class MainWindow(QMainWindow):
                 self._depth_hold_status_text = "Depth Hold: OFF"
 
             self._attitude_hold_status_text = "RP Level: ON" if rp_level else "RP Level: OFF"
+            self._yaw_hold_status_text = "Yaw Hold: ON" if yaw_hold else "Yaw Hold: OFF"
 
         except Exception:
             self._depth_hold_status_text = "Depth Hold: -"
             self._attitude_hold_status_text = "RP Level: -"
+            self._yaw_hold_status_text = "Yaw Hold: -"
         self._refresh_drive_status()
         self._refresh_video_status()
 
@@ -953,6 +962,8 @@ class MainWindow(QMainWindow):
         try:
             if "roll_pitch_level" in (status or {}):
                 self._attitude_hold_status_text = "RP Level: ON" if bool((status or {}).get("roll_pitch_level")) else "RP Level: OFF"
+            if "yaw_hold" in (status or {}):
+                self._yaw_hold_status_text = "Yaw Hold: ON" if bool((status or {}).get("yaw_hold")) else "Yaw Hold: OFF"
         except Exception:
             pass
         self._sync_reverse_action()

@@ -31,12 +31,15 @@ class _RpcStub:
 
 class _PilotStub:
     def current_modes(self):
-        return {"depth_hold": True, "roll_pitch_level": True}
+        return {"depth_hold": True, "roll_pitch_level": True, "yaw_hold": True}
 
     def toggle_depth_hold(self):
         return False
 
     def toggle_roll_pitch_level(self):
+        return False
+
+    def toggle_yaw_hold(self):
         return False
 
 
@@ -58,6 +61,7 @@ def test_hold_test_panel_uses_scroll_layout_and_shows_depth_debug(monkeypatch):
         assert panel.findChild(QScrollArea) is not None
         assert panel._runtime_labels["pilot_depth_hold"].text() == "ON"
         assert panel._runtime_labels["pilot_rp_level"].text() == "ON"
+        assert panel._runtime_labels["pilot_yaw_hold"].text() == "ON"
 
         panel._apply_runtime_state(
             {
@@ -85,6 +89,12 @@ def test_hold_test_panel_uses_scroll_layout_and_shows_depth_debug(monkeypatch):
                                     "active": True,
                                     "error_deg": 1.0,
                                     "u_out": 0.01,
+                                },
+                                "yaw": {
+                                    "mode": "hold",
+                                    "active": True,
+                                    "error_deg": -4.0,
+                                    "u_out": -0.024,
                                 },
                             },
                         },
@@ -125,6 +135,7 @@ def test_hold_test_panel_uses_scroll_layout_and_shows_depth_debug(monkeypatch):
         assert "active yes" in panel._runtime_labels["runtime_attitude"].text()
         assert "r 2.0 deg" in panel._runtime_labels["runtime_attitude_sensor"].text()
         assert "roll level" in panel._runtime_labels["runtime_attitude_debug"].text()
+        assert "yaw hold" in panel._runtime_labels["runtime_attitude_debug"].text()
         assert "stream age 0.07 s" in panel._runtime_labels["runtime_depth_sensor"].text()
         assert "error -0.020 m" in panel._runtime_labels["runtime_depth_debug"].text()
         assert "out 0.030" in panel._runtime_labels["runtime_depth_debug"].text()

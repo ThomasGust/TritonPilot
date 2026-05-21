@@ -186,6 +186,7 @@ def test_hold_modes_are_exposed_and_toggleable(monkeypatch):
     assert svc.current_modes()["depth_hold"] is False
     assert svc.current_modes()["autopilot"]["depth"] is False
     assert svc.current_modes()["roll_pitch_level"] is False
+    assert svc.current_modes()["yaw_hold"] is False
 
     assert svc.toggle_depth_hold() is True
     assert svc.current_modes()["depth_hold"] is True
@@ -197,3 +198,10 @@ def test_hold_modes_are_exposed_and_toggleable(monkeypatch):
     assert modes["autopilot"]["roll"] == "level"
     assert modes["autopilot"]["pitch"] == "level"
     assert modes["autopilot"]["yaw"] == "off"
+
+    assert svc.toggle_yaw_hold() is True
+    modes = svc.current_modes()
+    assert modes["yaw_hold"] is True
+    assert modes["autopilot"]["yaw"] == "hold"
+    assert modes["autopilot"]["roll"] == "level"
+    assert modes["autopilot"]["pitch"] == "level"

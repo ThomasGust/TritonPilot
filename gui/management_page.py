@@ -69,6 +69,11 @@ CONFIG_FIELD_SPECS = [
     {"key": "AUTOPILOT_PITCH_KD", "label": "Pitch Level Kd", "min": -10.0, "max": 10.0, "step": 0.001, "decimals": 5},
     {"key": "AUTOPILOT_PITCH_OUT_LIMIT", "label": "Pitch Output Limit", "min": 0.0, "max": 1.0, "step": 0.01, "decimals": 4},
     {"key": "AUTOPILOT_PITCH_SIGN", "label": "Pitch Sign", "min": -1.0, "max": 1.0, "step": 2.0, "decimals": 0},
+    {"key": "AUTOPILOT_YAW_KP", "label": "Yaw Hold Kp", "min": -10.0, "max": 10.0, "step": 0.001, "decimals": 5},
+    {"key": "AUTOPILOT_YAW_KD", "label": "Yaw Hold Kd", "min": -10.0, "max": 10.0, "step": 0.001, "decimals": 5},
+    {"key": "AUTOPILOT_YAW_OUT_LIMIT", "label": "Yaw Output Limit", "min": 0.0, "max": 1.0, "step": 0.01, "decimals": 4},
+    {"key": "AUTOPILOT_YAW_SIGN", "label": "Yaw Sign", "min": -1.0, "max": 1.0, "step": 2.0, "decimals": 0},
+    {"key": "AUTOPILOT_MIX_DEADBAND", "label": "Autopilot Mix Deadband", "min": 0.0, "max": 1.0, "step": 0.01, "decimals": 4},
 ]
 
 
