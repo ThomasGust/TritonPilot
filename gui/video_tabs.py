@@ -170,7 +170,7 @@ class VideoTabs(QWidget):
             self._ensure_stream_started(name)
 
         if self.stream_names:
-            self._warmup_timer.start(700)
+            self._warmup_timer.start(0)
 
     def _allowed_layout_count(self, requested: int | None) -> int:
         if requested == 4:
@@ -376,14 +376,9 @@ class VideoTabs(QWidget):
     def _warmup_next(self) -> None:
         if not self.stream_names:
             return
-        for _ in range(len(self.stream_names)):
-            idx = self._warmup_index % len(self.stream_names)
-            self._warmup_index += 1
-            name = self.stream_names[idx]
+        for name in self.stream_names:
             if self._widgets.get(name) is None:
                 self._ensure_stream_started(name)
-                self._warmup_timer.start(700)
-                return
 
     def resume_visible_streams(self) -> None:
         for name in self.visible_stream_names():
@@ -391,7 +386,7 @@ class VideoTabs(QWidget):
         if self.stream_names:
             try:
                 if not self._warmup_timer.isActive():
-                    self._warmup_timer.start(700)
+                    self._warmup_timer.start(0)
             except Exception:
                 pass
 

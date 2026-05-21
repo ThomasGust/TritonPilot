@@ -88,6 +88,11 @@ SENSOR_SUB_ENDPOINT = os.environ.get("ROV_SENSOR_EP", f"tcp://{ROV_HOST}:6001")
 VIDEO_RPC_ENDPOINT = os.environ.get("ROV_VIDEO_RPC", f"tcp://{ROV_HOST}:5555")
 MANAGEMENT_RPC_ENDPOINT = os.environ.get("ROV_MANAGEMENT_RPC", f"tcp://{ROV_HOST}:5556")
 
+# Video reconnect policy. Four 1080p streams can take a few seconds to settle,
+# especially while the Pi is starting every camera pipeline at once.
+VIDEO_STALL_TIMEOUT_S = float(os.environ.get("TRITON_VIDEO_STALL_TIMEOUT_S", "8.0"))
+VIDEO_FIRST_FRAME_TIMEOUT_S = float(os.environ.get("TRITON_VIDEO_FIRST_FRAME_TIMEOUT_S", "14.0"))
+
 # Where your JSON with stream definitions lives
 STREAMS_FILE = Path(__file__).parent / "data" / "streams.json"
 

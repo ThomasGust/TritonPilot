@@ -157,20 +157,11 @@ class RemoteCv2Camera:
 
 
 
-        resp = self.rov.start_stream(**start_kwargs)
-        if isinstance(resp, dict) and resp.get("messages"):
-            try:
-                self.start_messages = [str(m) for m in (resp.get("messages") or [])]
-                for m in self.start_messages:
-                    logger.warning("ROV video start notice (%s): %s", self.name, m)
-            except Exception:
-                self.start_messages = []
-
-
-
         tx_is_h264 = (start_kwargs.get("video_format") == "h264") or (str(start_kwargs.get("encode", "")).lower() == "h264")
 
-        # 2) start local receiver in RAW mode so we can get numpy
+        # 2) start local receiver in RAW mode so we can get numpy. Do this
+        # before asking the ROV to transmit so every visible stream can have a
+        # UDP listener ready at nearly the same time.
         # Bind receiver to the chosen host so we *only* accept video arriving on that interface.
         bind_rx = True
         if stream_opts and ("bind_receiver_to_host" in stream_opts):
@@ -189,6 +180,23 @@ class RemoteCv2Camera:
         )
         self.rx = ReceiverProcess(rx_cfg)
         self.rx.start()
+
+        try:
+            resp = self.rov.start_stream(**start_kwargs)
+        except Exception:
+            try:
+                self.rx.stop(grace_s=0.05)
+            except Exception:
+                pass
+            raise
+
+        if isinstance(resp, dict) and resp.get("messages"):
+            try:
+                self.start_messages = [str(m) for m in (resp.get("messages") or [])]
+                for m in self.start_messages:
+                    logger.warning("ROV video start notice (%s): %s", self.name, m)
+            except Exception:
+                self.start_messages = []
 
     def read(self):
         """
@@ -282,18 +290,26 @@ class RemoteCameraManager:
             stream_opts = dict(self._defaults)
             stream_opts.update(s)
 
-            cam = RemoteCv2Camera(
-                rov=self.rov,
-                name=s['name'],
-                device=s['device'],
-                width=s['width'],
-                height=s['height'],
-                fps=s['fps'],
-                video_format=s.get('video_format', 'mjpeg'),
-                port=s.get('port', 5000),
-                windows_host=self.windows_host,
-                stream_opts=stream_opts,
-            )
+        cam = RemoteCv2Camera(
+            rov=self.rov,
+            name=s['name'],
+            device=s['device'],
+            width=s['width'],
+            height=s['height'],
+            fps=s['fps'],
+            video_format=s.get('video_format', 'mjpeg'),
+            port=s.get('port', 5000),
+            windows_host=self.windows_host,
+            stream_opts=stream_opts,
+        )
+        with self._mgr_lock:
+            existing = self._opened.get(name)
+            if existing is not None:
+                try:
+                    cam.release()
+                except Exception:
+                    pass
+                return existing
             self._opened[name] = cam
             return cam
 

@@ -25,6 +25,8 @@ from config import (
     WATER_CORRECTION_K3,
     WATER_CORRECTION_AIR_HFOV_DEG,
     WATER_CORRECTION_TARGET_HFOV_DEG,
+    VIDEO_FIRST_FRAME_TIMEOUT_S,
+    VIDEO_STALL_TIMEOUT_S,
 )
 
 
@@ -135,10 +137,10 @@ class VideoWidget(QWidget):
         self._last_error: str | None = None
         self._retry_backoff_s: float = 0.5
         self._next_retry_ts: float = 0.0
-        self._stall_timeout_s: float = 2.0
+        self._stall_timeout_s: float = max(2.0, float(VIDEO_STALL_TIMEOUT_S))
         # If we connect successfully but never receive a first frame, treat it as a stall
         # after a slightly longer grace period.
-        self._first_frame_timeout_s: float = 4.0
+        self._first_frame_timeout_s: float = max(self._stall_timeout_s, float(VIDEO_FIRST_FRAME_TIMEOUT_S))
 
         # When disconnected/stalled we don't want to leave a stale frame visible.
         # If no new frames arrive, we clear the pixmap and show a status message.
