@@ -856,7 +856,7 @@ class RawSensorPage(QWidget):
     def _refresh_rates(self) -> None:
         if not self._type_rates:
             return
-        order = ["imu", "mag", "attitude", "external_depth", "env", "adc", "power", "leak", "heartbeat", "net"]
+        order = ["imu", "mag", "attitude", "autopilot_status", "external_depth", "env", "adc", "power", "leak", "heartbeat", "net"]
         parts = []
         for typ in order:
             if typ in self._type_rates:
