@@ -2,6 +2,11 @@
 
 Topside control, video, recording, and telemetry code for the TritonPilot ROV project.
 
+Mission-specific analysis applets are intentionally not part of this repo. They
+live in the sibling `TritonAnalysis` repository and run on the competition-day
+analysis laptop against saved images, video files, or manually entered task
+data.
+
 ## Raw Sensor Bringup
 
 The main topside app includes a `Raw Sensors` page for live IMU/depth/power
@@ -53,46 +58,3 @@ Then, on the Pi, only switch the default route after the tether gateway answers:
 sudo bash bin/configure_tether_gateway.sh --probe
 sudo bash bin/configure_tether_gateway.sh --persistent
 ```
-
-Mac setup for analysis applets:
-
-```sh
-python3 -m venv .venv
-source .venv/bin/activate
-python -m pip install --upgrade pip
-python -m pip install -r requirements-macos.txt
-```
-
-Standalone crab competition analyzer:
-`python -m analysis.main_crab_detection [image-folder-or-video ...]`
-
-The analyzer can run a photo directly, scrub to a selected video frame, or scan a
-video time range and show the best frame with species labels, masks, and counts.
-
-Standalone iceberg tracking threat applet:
-`python -m analysis.main_iceberg_tracking`
-
-Standalone coral garden CAD model applet:
-`python -m analysis.main_coral_garden_model`
-
-Standalone eDNA frequency analysis applet:
-`python -m analysis.main_edna_analysis`
-
-Standalone iceberg measurement applet:
-`python -m analysis.main_iceberg_measurement`
-
-Standalone planar height measurement applet:
-`python -m analysis.main_planar_height_measurement`
-
-Standalone multi-rectangle length measurement applet:
-`python -m analysis.main_multi_rect_length_measurement`
-
-Underwater color correction / frame export applet:
-`python -m analysis.color_corr`
-
-The analysis applets live under `analysis/` so a competition-day laptop can find
-the task-specific tools without digging through the pilot interface. The old
-top-level launcher names still forward to these modules for compatibility.
-The Qt applets size themselves to the active display and put wide toolbars in
-scrollable strips, which keeps the controls reachable on smaller Mac laptop
-screens as well as larger Windows monitors.

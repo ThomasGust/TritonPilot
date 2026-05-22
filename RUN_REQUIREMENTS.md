@@ -17,7 +17,7 @@ It launches a PyQt6 GUI that:
 - subscribes to sensor telemetry from the ROV over ZeroMQ
 - starts/stops ROV video streams through a ZeroMQ RPC service
 - receives video locally through GStreamer UDP pipelines
-- uses OpenCV and NumPy for frame handling, recording, water correction, and crab detection
+- uses OpenCV and NumPy for frame handling, recording, and water correction
 
 ## Required software
 
@@ -34,7 +34,7 @@ This code uses modern Python type syntax such as `str | None` and `list[int]`, s
 Install these packages into your virtual environment:
 
 ```powershell
-pip install PyQt6 pyzmq pygame numpy opencv-python
+pip install PyQt6 matplotlib pyzmq pygame numpy opencv-python
 ```
 
 Optional but recommended for validation:
@@ -194,6 +194,6 @@ If the GUI opens but video is missing, controller input is unavailable, or telem
 
 ## Notes for maintainers
 
-- There is currently no checked-in `requirements.txt` or `pyproject.toml`, so the Python dependency list above was inferred from the current imports in the repo.
+- Python dependencies are checked in through `requirements.txt` and the platform wrapper files.
 - The topside video receiver implementation is Windows-specific because it shells out to `gst-launch-1.0.exe` and includes Windows process handling.
 - This repo now includes `setup_windows.ps1` and `requirements-windows.txt` to make Windows onboarding easier.

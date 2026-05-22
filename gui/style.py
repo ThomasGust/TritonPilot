@@ -72,54 +72,6 @@ def apply_modern_style(app: QApplication) -> None:
     QStatusBar QLabel[tone="warn"] {
         color: #ffe6ae;
     }
-    QLabel#summaryCard {
-        background: #202028;
-        border: 1px solid #2f2f3a;
-        border-radius: 10px;
-        padding: 2px 4px;
-        font-size: 13px;
-    }
-    QLabel#summaryCard[tone="alert"] {
-        background: #3b2525;
-        border: 1px solid #9c4a4a;
-        color: #ffd9d9;
-        font-weight: 700;
-    }
-    QLabel#summaryCard[tone="warn"] {
-        background: #332b1d;
-        border: 1px solid #a07e34;
-        color: #ffe6ae;
-    }
-    QLabel#summaryHint {
-        color: #b6bac8;
-        padding: 2px 4px 6px 4px;
-    }
-    QWidget#crabVideoControls {
-        background: #202028;
-        border: 1px solid #2f2f3a;
-        border-radius: 8px;
-        padding: 6px;
-    }
-    QWidget#crabVideoControls QPushButton {
-        padding: 5px 10px;
-    }
-    QWidget#crabVideoControls QDoubleSpinBox {
-        padding: 3px 6px;
-        border: 1px solid #343442;
-        border-radius: 6px;
-        background: #15161d;
-    }
-    QWidget#crabVideoControls QSlider::groove:horizontal {
-        height: 6px;
-        border-radius: 3px;
-        background: #303342;
-    }
-    QWidget#crabVideoControls QSlider::handle:horizontal {
-        width: 16px;
-        margin: -5px 0;
-        border-radius: 8px;
-        background: #5f8cff;
-    }
     QWidget#videoLayoutBar {
         background: transparent;
         border: none;

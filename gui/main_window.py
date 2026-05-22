@@ -55,9 +55,6 @@ from gui.video_tabs import VideoTabs
 from gui.sensor_panel import SensorPanel
 from gui.instruments import InstrumentPanel, HoldTestPanel
 from gui.raw_sensor_page import RawSensorPage
-from analysis.gui.crab_detection_window import CrabDetectionWindow
-from analysis.gui.edna_analysis_window import EDNAAnalysisWindow
-from analysis.gui.iceberg_tracking_window import IcebergTrackingWindow
 from gui.management_page import ManagementPage
 
 
@@ -663,7 +660,6 @@ class MainWindow(QMainWindow):
             pass
 
         self.resize(1440, 860)
-        self._task_windows: list[QWidget] = []
 
 
     def _servo_wrist_keyboard_targets(self) -> tuple[float, float]:
@@ -1616,7 +1612,6 @@ class MainWindow(QMainWindow):
         file_menu = bar.addMenu("&File")
         rec_menu = bar.addMenu("&Record")
         view_menu = bar.addMenu("&View")
-        task_menu = bar.addMenu("&Tasks")
 
         self._save_dir_act = QAction("Set Save Directory...", self)
         self._save_dir_act.triggered.connect(self._choose_save_directory)
@@ -1653,21 +1648,6 @@ class MainWindow(QMainWindow):
             act = QAction(label, self)
             act.triggered.connect(lambda _checked=False, panes=pane_count: self._set_video_layout(panes))
             layout_menu.addAction(act)
-
-        crab_act = QAction("Crab Detection", self)
-        crab_act.setToolTip("Capture the current stream frame and open side-by-side crab identification views.")
-        crab_act.triggered.connect(self._run_crab_detection_task)
-        task_menu.addAction(crab_act)
-
-        iceberg_tracking_act = QAction("Iceberg Tracking", self)
-        iceberg_tracking_act.setToolTip("Open the iceberg survey and threat-level assessment applet.")
-        iceberg_tracking_act.triggered.connect(self._run_iceberg_tracking_task)
-        task_menu.addAction(iceberg_tracking_act)
-
-        edna_act = QAction("eDNA Analysis", self)
-        edna_act.setToolTip("Open the eDNA count entry and percent-frequency judge display.")
-        edna_act.triggered.connect(self._run_edna_analysis_task)
-        task_menu.addAction(edna_act)
 
         # Stream log (JSONL)
         start_log = QAction("Start Stream Log", self)
@@ -1815,54 +1795,6 @@ class MainWindow(QMainWindow):
             self.statusBar().showMessage(f"Saved snapshot: {path}{self._save_location_note(location)}", 5000)
         else:
             self.statusBar().showMessage("No frame yet (snapshot not saved)", 3000)
-
-    def _run_crab_detection_task(self):
-        vw = self._current_video_widget()
-        if vw is None or vw.last_frame is None:
-            self.statusBar().showMessage("No frame available for crab detection", 3000)
-            return
-
-        try:
-            frame = vw.last_frame.copy()
-            stream_name = getattr(vw, "stream_name", None) or "Current stream"
-
-            window = CrabDetectionWindow(parent=self)
-            summary_text = window.load_frame(
-                frame,
-                source_label=f"Captured frame from {stream_name}",
-            )
-            self._task_windows.append(window)
-            window.destroyed.connect(lambda *_: self._task_windows.remove(window) if window in self._task_windows else None)
-            window.show()
-            window.raise_()
-            window.activateWindow()
-            self.statusBar().showMessage(summary_text, 8000)
-        except Exception as e:
-            QMessageBox.critical(self, "Crab Detection", f"Crab detection failed:\n{e}")
-
-    def _run_iceberg_tracking_task(self):
-        try:
-            window = IcebergTrackingWindow(parent=self)
-            self._task_windows.append(window)
-            window.destroyed.connect(lambda *_: self._task_windows.remove(window) if window in self._task_windows else None)
-            window.show()
-            window.raise_()
-            window.activateWindow()
-            self.statusBar().showMessage("Iceberg tracking applet opened.", 4000)
-        except Exception as e:
-            QMessageBox.critical(self, "Iceberg Tracking", f"Iceberg tracking failed:\n{e}")
-
-    def _run_edna_analysis_task(self):
-        try:
-            window = EDNAAnalysisWindow(parent=self)
-            self._task_windows.append(window)
-            window.destroyed.connect(lambda *_: self._task_windows.remove(window) if window in self._task_windows else None)
-            window.show()
-            window.raise_()
-            window.activateWindow()
-            self.statusBar().showMessage("eDNA analysis applet opened.", 4000)
-        except Exception as e:
-            QMessageBox.critical(self, "eDNA Analysis", f"eDNA analysis failed:\n{e}")
 
     def _start_video_recording(self):
         vw = self._current_video_widget()
