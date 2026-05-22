@@ -2,6 +2,7 @@ import json
 import time
 import uuid
 
+import pytest
 import zmq
 
 from input.pilot_service import PilotPublisherService
@@ -28,6 +29,7 @@ class FakeController:
         )
 
 
+@pytest.mark.network
 def test_pilot_publisher_sends_frames(monkeypatch):
     ep = f"inproc://pilot_pub_{uuid.uuid4().hex}"
 

@@ -3,7 +3,7 @@
 The TritonPilot test suite is designed to run without physical ROV hardware.
 Use it before field work and after changing shared behavior.
 
-## Run The Full Test Suite
+## Run The Quick Trust Check
 
 From the TritonPilot repository root:
 
@@ -15,10 +15,42 @@ python -m pytest
 If `pytest` is not installed:
 
 ```powershell
-python -m pip install pytest
+python -m pip install -r requirements-dev.txt
 ```
 
-`pytest.ini` sets `tests/` as the test root and quiet output by default.
+`pytest.ini` sets `tests/` as the test root, quiet output, and strict marker
+validation. The default suite is the fast trust check: it skips tests that are
+marked `network`, `hardware`, `slow`, or `groundtruth` so a normal code-quality
+check does not depend on sockets, real ROV services, physical hardware, or large
+local datasets.
+
+The helper script exposes the same tiers with easier names:
+
+```powershell
+python .\tools\trust_check.py quick
+python .\tools\trust_check.py network
+python .\tools\trust_check.py extended
+python .\tools\trust_check.py hardware
+python .\tools\trust_check.py full
+```
+
+Equivalent direct pytest commands:
+
+| Goal | Command |
+| --- | --- |
+| Fast software-only check | `python -m pytest` |
+| Local socket/ZMQ tests | `python -m pytest --run-network -m network` |
+| All non-hardware optional tiers | `python -m pytest --run-extended` |
+| Physical ROV/hardware tests | `python -m pytest --run-hardware -m hardware` |
+| Everything | `python -m pytest --run-all-trust` |
+| Coverage report, if `pytest-cov` is installed | `python .\tools\trust_check.py coverage` |
+
+Environment variables work for CI or shell profiles:
+
+- `TRITON_RUN_NETWORK=1`
+- `TRITON_RUN_GROUNDTRUTH=1`
+- `TRITON_RUN_SLOW=1`
+- `TRITON_RUN_HARDWARE=1`
 
 ## Focused Test Areas
 
@@ -44,6 +76,19 @@ The tests cover:
 - Video tab layout behavior
 - Recording paths and writer helpers
 - Main-window backup controls
+
+## Test Marker Policy
+
+Use the default suite for deterministic tests that can run on any developer
+machine. Mark new tests when they leave that boundary:
+
+- `network`: opens sockets, uses ZMQ over TCP, or depends on active networking.
+- `hardware`: touches physical ROV hardware or live system services.
+- `slow`: intentionally takes long enough that it should not block quick checks.
+- `groundtruth`: depends on optional saved media or datasets outside the normal
+  repository fixtures.
+- `integration`: crosses module/service boundaries but remains deterministic and
+  hardware-free.
 
 ## Hardware-Free Diagnostics
 

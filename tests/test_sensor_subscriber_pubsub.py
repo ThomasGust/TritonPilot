@@ -1,9 +1,14 @@
 import json
 import socket
 import time
+
+import pytest
 import zmq
 
 from telemetry.sensor_service import SensorSubscriberService
+
+
+pytestmark = pytest.mark.network
 
 
 def _free_port() -> int:
