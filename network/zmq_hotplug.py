@@ -2,7 +2,7 @@
 
 Helpers to make ZeroMQ links *hotpluggable*.
 
-ROV ↔︎ topside power cycles can create TCP half-open connections. A SUB socket
+ROV/topside power cycles can create TCP half-open connections. A SUB socket
 that only receives may not detect the dead peer quickly (default TCP keepalive
 can be hours), so it may not reconnect promptly when the ROV comes back.
 

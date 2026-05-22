@@ -1,3 +1,5 @@
+"""CSV logging for flattened raw telemetry and derived attitude rows."""
+
 from __future__ import annotations
 
 import csv

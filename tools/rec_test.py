@@ -1,3 +1,5 @@
+"""Manual smoke test for opening a remote camera and displaying frames."""
+
 from video.cam import RemoteCameraManager
 import cv2
 import time

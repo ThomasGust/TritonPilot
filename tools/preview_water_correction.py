@@ -1,3 +1,5 @@
+"""Generate a still-image preview grid for the water-correction remap."""
+
 from __future__ import annotations
 
 import argparse
@@ -35,6 +37,7 @@ def _label(frame: np.ndarray, text: str) -> np.ndarray:
 
 
 def main() -> int:
+    """Run the preview CLI."""
     parser = argparse.ArgumentParser(description="Preview DWE bench-to-water correction on a still image.")
     parser.add_argument("image", help="Path to the input image.")
     parser.add_argument(

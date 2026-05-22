@@ -1,4 +1,10 @@
-# input/controller.py
+"""Controller discovery, mapping, and snapshot normalization.
+
+The rest of TritonPilot should not care about SDL/pygame axis numbering. This
+module absorbs platform-specific joystick quirks and returns a stable
+``ControllerSnapshot`` matching the shared pilot schema.
+"""
+
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -23,16 +29,18 @@ except Exception:  # pragma: no cover
 
 @dataclass
 class ControllerSnapshot:
-    # axes (mapped schema)
+    """Single normalized read from an Xbox-style controller."""
+
+    # Axes in the stable schema order used by PilotFrame.
     lx: float
     ly: float
     rx: float
     ry: float
     lt: float
     rt: float
-    # dpad
+    # D-pad hat value as (x, y).
     dpad: Tuple[int, int]
-    # buttons (xbox-ish schema)
+    # Button values in the Xbox-style schema.
     a: bool
     b: bool
     x: bool

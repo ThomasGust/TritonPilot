@@ -1,22 +1,29 @@
+"""Remote camera wrappers for ROV RTP streams.
+
+This module bridges the TritonOS video RPC service and the local GStreamer
+receiver process. Callers get a small OpenCV-like camera object while the
+implementation handles stream startup, local UDP binding, frame reads, and
+cleanup.
+"""
+
 import json
-import socket
 import logging
+import socket
 import threading
+
 import numpy as np
-from config import VIDEO_RPC_ENDPOINT
 
 from network.net_select import parse_zmq_endpoint, choose_video_receive_ip
-
+from config import VIDEO_RPC_ENDPOINT
 from video.gst_receiver import ReceiverProcess, RxConfig
 from video.frame_rotation import normalize_rotation_deg
-from video.rov_streams import ROVStreams  # your class above
+from video.rov_streams import ROVStreams
 
 logger = logging.getLogger(__name__)
 
+
 class RemoteCv2Camera:
-    """
-    cv2-ish wrapper for: Pi camera -> RTP -> Windows GStreamer -> numpy frame
-    """
+    """OpenCV-like reader for one ROV camera stream."""
 
     def __init__(
         self,
@@ -51,7 +58,7 @@ class RemoteCv2Camera:
         self.start_messages: list[str] = []
 
         # Detect the best local IP to receive video if not provided.
-        # IMPORTANT: the previous approach used 8.8.8.8 which tends to pick Wi‑Fi.
+        # IMPORTANT: the previous approach used 8.8.8.8, which tends to pick Wi-Fi.
         # Here we select the local IP that can reach the ROV video RPC host,
         # preferring wired/tether when possible.
         if windows_host is None:
@@ -76,93 +83,42 @@ class RemoteCv2Camera:
         self.windows_host = windows_host
 
         stream_opts = stream_opts or {}
-        # Allow config to override receiver-side jitter buffer setting
-        self.latency_ms = int(stream_opts.get('latency_ms', self.latency_ms))
-
-
-        # 1) tell Pi to start sending
-
+        # Allow config to override receiver-side jitter buffer setting.
+        self.latency_ms = int(stream_opts.get("latency_ms", self.latency_ms))
 
         start_kwargs = dict(
-
-
             name=self.name,
-
-
             device=self.device,
-
-
             width=self.width,
-
-
             height=self.height,
-
-
             fps=self.fps,
-
-
             video_format=self.video_format,
-
-
             host=self.windows_host,
-
-
             port=self.port,
-
-
         )
 
-
-
-        # Pass-through optional transcoding / transport knobs from config
-
-
+        # Pass through optional transcoding and transport knobs from config.
         for k in (
-
-
             "encode",
-
-
             "h264_bitrate",
-
-
             "h264_gop",
-
-
             "transport",
-
-
             "rtp_pt_jpeg",
-
-
             "rtp_pt_h264",
-
-
             "latency_ms",
-
-
             "sync",
-
-
             "extra",
-
-
         ):
-
-
             if k in stream_opts and stream_opts[k] is not None:
-
-
                 start_kwargs[k] = stream_opts[k]
 
+        tx_is_h264 = (
+            start_kwargs.get("video_format") == "h264"
+            or str(start_kwargs.get("encode", "")).lower() == "h264"
+        )
 
-
-        tx_is_h264 = (start_kwargs.get("video_format") == "h264") or (str(start_kwargs.get("encode", "")).lower() == "h264")
-
-        # 2) start local receiver in RAW mode so we can get numpy. Do this
-        # before asking the ROV to transmit so every visible stream can have a
-        # UDP listener ready at nearly the same time.
-        # Bind receiver to the chosen host so we *only* accept video arriving on that interface.
+        # Start the local receiver before asking the ROV to transmit so every
+        # visible stream has a UDP listener ready at nearly the same time.
         bind_rx = True
         if stream_opts and ("bind_receiver_to_host" in stream_opts):
             bind_rx = bool(stream_opts.get("bind_receiver_to_host"))
@@ -199,9 +155,7 @@ class RemoteCv2Camera:
                 self.start_messages = []
 
     def read(self):
-        """
-        cv2.VideoCapture-like: returns (ok, frame)
-        """
+        """Return ``(ok, frame)`` like ``cv2.VideoCapture.read``."""
         fr = self.rx.read_frame()
         if fr is None:
             return False, None
@@ -209,6 +163,7 @@ class RemoteCv2Camera:
         return True, img
 
     def release(self, rx_grace_s: float = 0.15):
+        """Stop the local receiver and ask TritonOS to stop transmitting."""
         # Stop local receiver first (tends to unblock quickly even if ROV is slow).
         try:
             self.rx.stop(grace_s=rx_grace_s)
@@ -223,7 +178,10 @@ class RemoteCv2Camera:
         except Exception as e:
             logger.warning("Failed to stop ROV stream '%s': %s", self.name, e)
 
+
 class RemoteCameraManager:
+    """Load stream definitions and manage active ``RemoteCv2Camera`` objects."""
+
     def __init__(self, config_path: str):
         with open(config_path, "r") as f:
             cfg = json.load(f)
@@ -260,6 +218,7 @@ class RemoteCameraManager:
         self._mgr_lock = threading.RLock()
 
     def list_available(self):
+        """Return enabled stream names in the configured default pane order."""
         enabled_names = [
             name
             for name, s in self.stream_defs.items()
@@ -276,6 +235,7 @@ class RemoteCameraManager:
         return ordered_names
 
     def open(self, name: str) -> RemoteCv2Camera:
+        """Open a named stream or return the existing active camera."""
         with self._mgr_lock:
             if name in self._opened:
                 return self._opened[name]
@@ -286,7 +246,7 @@ class RemoteCameraManager:
             if not s.get('enabled', True):
                 raise ValueError(f"Stream '{name}' is disabled in config")
 
-            # Merge stream options with top-level defaults
+            # Merge stream options with top-level defaults.
             stream_opts = dict(self._defaults)
             stream_opts.update(s)
 
@@ -314,6 +274,7 @@ class RemoteCameraManager:
             return cam
 
     def close(self, name: str):
+        """Close a named stream if it is currently active."""
         with self._mgr_lock:
             cam = self._opened.pop(name, None)
         if cam:

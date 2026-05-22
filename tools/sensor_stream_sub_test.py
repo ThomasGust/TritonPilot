@@ -108,6 +108,7 @@ def _format_msg(msg: dict) -> str:
 
 
 def run_raw(sock: zmq.Socket, jsonl_path: Optional[str] = None) -> None:
+    """Print every telemetry message as text and optionally mirror to JSONL."""
     f = open(jsonl_path, "a", encoding="utf-8") if jsonl_path else None
     if f:
         print(f"[sensor-sub] writing jsonl to {jsonl_path}", flush=True)
@@ -132,6 +133,7 @@ def run_raw(sock: zmq.Socket, jsonl_path: Optional[str] = None) -> None:
 
 
 def run_dashboard(sock: zmq.Socket, require_types: list[str], require_timeout_s: float, jsonl_path: Optional[str]) -> None:
+    """Run the text dashboard until interrupted or required message types arrive."""
     try:
         import curses
     except Exception:
@@ -255,6 +257,7 @@ def run_dashboard(sock: zmq.Socket, require_types: list[str], require_timeout_s:
 
 
 def run_qt(endpoint: str) -> None:
+    """Open a tiny Qt telemetry table backed by ``SensorSubscriberService``."""
     # Late imports so the terminal dashboard doesn't require PyQt6.
     from PyQt6.QtCore import pyqtSignal, QObject
     from PyQt6.QtWidgets import QApplication, QMainWindow
@@ -290,6 +293,7 @@ def run_qt(endpoint: str) -> None:
 
 
 def main() -> int:
+    """Run the telemetry subscriber diagnostic CLI."""
     ap = argparse.ArgumentParser(description="Topside sensor streaming subscriber test")
     ap.add_argument("--endpoint", default=_default_endpoint(), help="ZMQ endpoint to connect, e.g. tcp://{ROV_HOST}:6001")
     ap.add_argument("--rov-host", default=None, help="Shortcut: set host/IP and use tcp://<host>:6001")

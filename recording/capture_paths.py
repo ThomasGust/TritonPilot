@@ -1,3 +1,5 @@
+"""Filename helpers for snapshots and video captures."""
+
 from __future__ import annotations
 
 import re
@@ -10,6 +12,7 @@ _SEPARATOR_CHARS = re.compile(r"[\s_]+")
 
 
 def safe_filename_component(value: object, fallback: str = "capture") -> str:
+    """Return ``value`` as a filesystem-safe single path component."""
     text = str(value or "").strip()
     text = _UNSAFE_FILENAME_CHARS.sub("_", text)
     text = _SEPARATOR_CHARS.sub("_", text)
@@ -18,6 +21,7 @@ def safe_filename_component(value: object, fallback: str = "capture") -> str:
 
 
 def timestamped_camera_stem(camera_name: object, purpose: str | None = None) -> str:
+    """Build a sortable capture stem from current time, camera, and purpose."""
     parts = [
         time.strftime("%Y%m%d-%H%M%S"),
         safe_filename_component(camera_name, fallback="camera"),
@@ -28,6 +32,7 @@ def timestamped_camera_stem(camera_name: object, purpose: str | None = None) -> 
 
 
 def unique_capture_path(directory: str | Path, stem: str, suffix: str) -> Path:
+    """Return a non-existing path by adding a numeric suffix when needed."""
     output_dir = Path(directory)
     ext = suffix if str(suffix).startswith(".") else f".{suffix}"
     candidate = output_dir / f"{stem}{ext}"

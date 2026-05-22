@@ -46,13 +46,16 @@ DEADZONE = 0.10  # purely for highlighting "near zero" axes; raw still shown
 # ---------------------------- helpers --------------------------------
 
 def clamp01(x: float) -> float:
+    """Clamp a normalized value to ``0.0`` through ``1.0``."""
     return 0.0 if x < 0.0 else (1.0 if x > 1.0 else x)
 
 def fmt_float(v: float) -> str:
+    """Format a controller axis value with sign and three decimals."""
     # Stable formatting for twitchy axis values
     return f"{v:+.3f}"
 
 def safe_get_guid(js: pygame.joystick.Joystick) -> str:
+    """Return a joystick GUID without failing on older pygame objects."""
     # pygame 2 has get_guid; older versions may not.
     return getattr(js, "get_guid", lambda: "n/a")()
 
@@ -60,6 +63,8 @@ def safe_get_guid(js: pygame.joystick.Joystick) -> str:
 # ---------------------------- probe app -------------------------------
 
 class ControllerProbe:
+    """Pygame-based graphical controller mapping inspector."""
+
     def __init__(self) -> None:
         pygame.init()
         pygame.joystick.init()
@@ -299,7 +304,7 @@ class ControllerProbe:
         # Footer tips
         foot_y = WINDOW_H - 70
         self._draw_text(14, foot_y, "Tip: Press one physical control at a time and watch 'Last change' for the index/value.")
-        self._draw_text(14, foot_y + 22, "If your triggers show up as axes, you’ll see them in Axes; if they’re buttons, they’ll light up in Buttons.")
+        self._draw_text(14, foot_y + 22, "If your triggers show up as axes, you'll see them in Axes; if they're buttons, they'll light up in Buttons.")
 
         pygame.display.flip()
 
@@ -316,6 +321,7 @@ class ControllerProbe:
 
 
 def main() -> None:
+    """Run the pygame controller probe window."""
     app = ControllerProbe()
     app.run()
 

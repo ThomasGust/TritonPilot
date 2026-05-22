@@ -1,3 +1,10 @@
+"""Topside fallback attitude estimator for raw-sensor diagnostics.
+
+TritonOS attitude telemetry is authoritative when available. This estimator is
+for the Raw Sensors page, replay, and CSV logging when only raw IMU/mag samples
+are present on the topside computer.
+"""
+
 from __future__ import annotations
 
 import math
@@ -171,6 +178,8 @@ def _rotate_between_unit(v: Vec3, src: Vec3, dst: Vec3) -> Vec3:
 
 @dataclass(frozen=True)
 class RollPitchConfig:
+    """Tuning values and axis conventions for ``RollPitchEstimator``."""
+
     calibration_samples: int = 30
     max_dt_s: float = 0.25
     accel_correction: float | None = None

@@ -1,3 +1,5 @@
+"""Raw telemetry inspection and CSV logging page."""
+
 from __future__ import annotations
 
 import math
@@ -116,6 +118,8 @@ def _fmt_vec(msg: dict | None, *, decimals: int = 3, unit: str = "") -> str:
 
 
 class RollingVectorPlot(QWidget):
+    """Small scrolling plot for three-axis telemetry values."""
+
     def __init__(
         self,
         title: str,

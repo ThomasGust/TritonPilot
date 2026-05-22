@@ -53,6 +53,7 @@ def _tcp_send_req(s: socket.socket, req: dict) -> None:
 
 
 def udp_rtt_loss(host: str, port: int, count: int, interval_s: float, payload_size: int, timeout_s: float) -> None:
+    """Measure UDP round-trip time and packet loss against the diagnostics server."""
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     sock.settimeout(timeout_s)
     addr = (host, int(port))
@@ -107,6 +108,7 @@ def udp_rtt_loss(host: str, port: int, count: int, interval_s: float, payload_si
 
 
 def tcp_uplink(host: str, port: int, seconds: float, chunk_size: int) -> None:
+    """Measure pilot-to-ROV TCP throughput."""
     s = _tcp_connect(host, port)
     req = {"mode": "rx", "seconds": float(seconds), "chunk_size": int(chunk_size)}
     _tcp_send_req(s, req)
@@ -150,13 +152,13 @@ def tcp_uplink(host: str, port: int, seconds: float, chunk_size: int) -> None:
     dur = resp.get("duration_s")
     if isinstance(bytes_meas, (int, float)) and isinstance(dur, (int, float)) and dur > 0:
         thr = float(bytes_meas) / float(dur)
-        print("TCP uplink (pilot → ROV)")
-        print(f"  sent≈{sent}B server_counted={int(bytes_meas)}B duration={dur:.2f}s")
+        print("TCP uplink (pilot -> ROV)")
+        print(f"  sent~={sent}B server_counted={int(bytes_meas)}B duration={dur:.2f}s")
         print(f"  throughput={_human_bps(thr)}")
     else:
         # Fallback to local timing (less accurate)
-        print("TCP uplink (pilot → ROV)")
-        print(f"  sent≈{sent}B")
+        print("TCP uplink (pilot -> ROV)")
+        print(f"  sent~={sent}B")
 
 
 def _split_meta(payload: bytes) -> Tuple[bytes, Optional[dict]]:
@@ -174,6 +176,7 @@ def _split_meta(payload: bytes) -> Tuple[bytes, Optional[dict]]:
 
 
 def tcp_downlink(host: str, port: int, seconds: float, chunk_size: int) -> None:
+    """Measure ROV-to-pilot TCP throughput."""
     s = _tcp_connect(host, port)
     req = {"mode": "tx", "seconds": float(seconds), "chunk_size": int(chunk_size)}
     _tcp_send_req(s, req)
@@ -199,7 +202,7 @@ def tcp_downlink(host: str, port: int, seconds: float, chunk_size: int) -> None:
     dur = max(1e-6, t1 - t0)
     thr = bytes_rx / dur
 
-    print("TCP downlink (ROV → pilot)")
+    print("TCP downlink (ROV -> pilot)")
     print(f"  received={bytes_rx}B duration={dur:.2f}s")
     print(f"  throughput={_human_bps(thr)}")
     if isinstance(meta, dict) and meta.get("ok"):
@@ -212,6 +215,7 @@ def tcp_downlink(host: str, port: int, seconds: float, chunk_size: int) -> None:
 
 
 def main() -> None:
+    """Run the selected network diagnostic command."""
     ap = argparse.ArgumentParser(description="Tether network diagnostics client")
     ap.add_argument("mode", choices=["udp", "tcp-rx", "tcp-tx"], help="test type")
     ap.add_argument("--host", default=None, help="ROV host/IP (default: from config.py ROV_HOST)")

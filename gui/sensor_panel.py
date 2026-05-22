@@ -1,4 +1,5 @@
-# gui/sensor_panel.py
+"""Compact live telemetry table for the main pilot page."""
+
 from __future__ import annotations
 
 from PyQt6.QtWidgets import (
@@ -13,10 +14,8 @@ from PyQt6.QtCore import Qt
 import time
 
 class SensorPanel(QWidget):
-    """
-    Very simple table:
-      sensor | type | value
-    """
+    """Simple ``sensor | type | value`` table with tooltip-preserved values."""
+
     def __init__(self, parent=None):
         super().__init__(parent)
 

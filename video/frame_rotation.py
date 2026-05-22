@@ -1,3 +1,5 @@
+"""Small utilities for stream rotation values and BGR frame rotation."""
+
 from __future__ import annotations
 
 import numpy as np

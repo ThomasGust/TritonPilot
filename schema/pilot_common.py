@@ -1,14 +1,27 @@
-# pilot_common.py
+"""Shared pilot-command wire schema used by TritonPilot and TritonOS.
+
+The dataclasses in this module are intentionally small and JSON-friendly. They
+represent operator intent, not final thruster output; TritonOS remains
+responsible for arming checks, mixing, hold controllers, and hardware limits.
+"""
+
 from __future__ import annotations
+
 from dataclasses import dataclass, field, asdict
-from typing import Dict, Tuple, Any
 import time
+from typing import Any, Dict, Tuple
 
 PILOT_SCHEMA_VERSION = 1
 
 
 @dataclass
 class PilotAxes:
+    """Normalized controller axes in the stable pilot schema.
+
+    Stick axes are expected to be in the range ``-1.0`` to ``1.0``. Triggers
+    are normalized by the controller layer before the frame is serialized.
+    """
+
     lx: float = 0.0
     ly: float = 0.0
     rx: float = 0.0
@@ -19,6 +32,8 @@ class PilotAxes:
 
 @dataclass
 class PilotButtons:
+    """Xbox-style button state carried with each pilot frame."""
+
     a: bool = False
     b: bool = False
     x: bool = False
@@ -33,6 +48,8 @@ class PilotButtons:
 
 @dataclass
 class PilotFrame:
+    """One timestamped pilot-control message sent to the ROV."""
+
     schema: int = PILOT_SCHEMA_VERSION
     seq: int = 0
     ts: float = field(default_factory=lambda: time.time())
@@ -44,6 +61,7 @@ class PilotFrame:
     aux: Dict[str, float] = field(default_factory=dict)
 
     def to_dict(self) -> dict:
+        """Serialize this frame into the JSON shape expected by TritonOS."""
         return {
             "type": "pilot",
             "schema": self.schema,
@@ -59,6 +77,7 @@ class PilotFrame:
 
     @classmethod
     def from_dict(cls, d: dict) -> "PilotFrame":
+        """Build a frame from a received JSON-like dictionary."""
         return cls(
             schema=d.get("schema", PILOT_SCHEMA_VERSION),
             seq=d.get("seq", 0),

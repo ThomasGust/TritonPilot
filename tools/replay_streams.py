@@ -18,6 +18,7 @@ import zmq
 
 
 def main():
+    """Replay selected JSONL streams to caller-provided PUB endpoints."""
     ap = argparse.ArgumentParser()
     ap.add_argument("jsonl", help="Path to streams.jsonl")
     ap.add_argument("--pilot-endpoint", default=None, help="PUB endpoint for pilot frames (tcp://*:6000)")

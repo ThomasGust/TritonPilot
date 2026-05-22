@@ -1,3 +1,5 @@
+"""Responsive Qt layout helpers shared by pilot panels."""
+
 from __future__ import annotations
 
 from PyQt6.QtCore import Qt

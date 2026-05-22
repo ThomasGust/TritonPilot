@@ -1,3 +1,5 @@
+"""Vehicle setup page backed by the TritonOS management RPC service."""
+
 from __future__ import annotations
 
 import time
@@ -103,6 +105,8 @@ class _SectionCard(QFrame):
 
 
 class ManagementPage(QWidget):
+    """Operator-facing controls for live ROV configuration and calibration."""
+
     rpc_result_sig = pyqtSignal(dict)
 
     def __init__(self, endpoint: str = MANAGEMENT_RPC_ENDPOINT, parent=None):

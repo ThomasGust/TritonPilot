@@ -1,4 +1,10 @@
-# telemetry/sensor_service.py
+"""Telemetry subscriber service for TritonOS sensor messages.
+
+The service owns a ZeroMQ SUB socket in a background thread and delivers parsed
+JSON dictionaries to the GUI/recording callbacks. Socket recreation is built in
+so the pilot UI can survive ROV restarts and tether interruptions.
+"""
+
 from __future__ import annotations
 
 import json
@@ -53,6 +59,7 @@ class SensorSubscriberService:
         self._sock: Optional[zmq.Socket] = None
 
     def start(self):
+        """Start the background receiver thread if it is not already running."""
         if self._thread and self._thread.is_alive():
             return
         self._stop.clear()
@@ -60,6 +67,7 @@ class SensorSubscriberService:
         self._thread.start()
 
     def stop(self):
+        """Stop the receiver thread and close its socket."""
         self._stop.set()
         if self._thread:
             self._thread.join(timeout=1.0)

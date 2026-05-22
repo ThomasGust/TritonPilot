@@ -1,3 +1,5 @@
+"""Multi-pane video layout controller for the pilot UI."""
+
 from __future__ import annotations
 
 from PyQt6.QtCore import QSettings, Qt, QTimer, pyqtSignal
@@ -63,6 +65,8 @@ class _VideoPane(QFrame):
 
 
 class VideoTabs(QWidget):
+    """Owns camera widgets, pane assignment, and layout switching."""
+
     selectionChanged = pyqtSignal()
     LAYOUT_OPTIONS: tuple[tuple[str, int], ...] = (
         ("Single", 1),

@@ -1,4 +1,5 @@
-# input/pilot_publisher.py
+"""CLI wrapper for publishing controller frames without the full GUI."""
+
 from __future__ import annotations
 
 import argparse
@@ -10,7 +11,8 @@ from input.controller import list_controllers
 
 
 def main():
-    ap = argparse.ArgumentParser(description="Topside pilot publisher (controller → ROV)")
+    """Parse CLI options, start ``PilotPublisherService``, and block until Ctrl+C."""
+    ap = argparse.ArgumentParser(description="Topside pilot publisher (controller -> ROV)")
     ap.add_argument(
         "--endpoint",
         default=PILOT_PUB_ENDPOINT,
@@ -140,7 +142,7 @@ def main():
                 time.sleep(0.25)
 
     except KeyboardInterrupt:
-        print("[pilot] stopping…")
+        print("[pilot] stopping...")
         svc.stop()
 
 

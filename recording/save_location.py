@@ -1,3 +1,5 @@
+"""Save-location validation and fallback handling for pilot recordings."""
+
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -12,6 +14,8 @@ DEFAULT_RECORDINGS_DIR = REPO_ROOT / "recordings"
 
 @dataclass(frozen=True)
 class SaveLocation:
+    """Resolved recording directory plus any fallback explanation."""
+
     path: Path
     used_fallback: bool = False
     reason: str = ""

@@ -1,4 +1,5 @@
-# recording/stream_recorder.py
+"""Threaded JSONL recorder for pilot and telemetry message streams."""
+
 from __future__ import annotations
 
 import json
@@ -15,6 +16,8 @@ from recording.save_location import DEFAULT_RECORDINGS_DIR
 
 @dataclass
 class RecordEvent:
+    """One queued message waiting to be written to the stream log."""
+
     t: float
     stream: str
     msg: Dict[str, Any]

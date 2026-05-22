@@ -1,4 +1,5 @@
-# gui/video_widget.py
+"""Single camera widget with connection, display, snapshot, and recording logic."""
+
 from __future__ import annotations
 
 import time
@@ -146,7 +147,7 @@ class VideoWidget(QWidget):
         # If no new frames arrive, we clear the pixmap and show a status message.
         self._clear_stale_frame: bool = True
 
-        self.label = QLabel(f"{self.stream_name}\nWaiting for stream…")
+        self.label = QLabel(f"{self.stream_name}\nWaiting for stream...")
         self.label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.label.setWordWrap(True)
         self.label.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
@@ -289,7 +290,7 @@ class VideoWidget(QWidget):
             return
 
         self._state = "connecting"
-        self._show_message(f"{self.stream_name}\nConnecting…")
+        self._show_message(f"{self.stream_name}\nConnecting...")
         self._connect_worker = _ConnectWorker(self.manager, self.stream_name, parent=self)
         self._connect_worker.connected.connect(self._on_connected)
         self._connect_worker.failed.connect(self._on_connect_failed)
@@ -321,10 +322,10 @@ class VideoWidget(QWidget):
             # Keep it short so it fits in the widget before the first frame arrives.
             tail = notices[-3:]
             self._show_message(
-                f"{self.stream_name}\nConnected (ROV recovery):\n" + "\n".join(tail) + "\n\nWaiting for frames…"
+                f"{self.stream_name}\nConnected (ROV recovery):\n" + "\n".join(tail) + "\n\nWaiting for frames..."
             )
         else:
-            self._show_message(f"{self.stream_name}\nWaiting for frames…")
+            self._show_message(f"{self.stream_name}\nWaiting for frames...")
 
         self.worker = _VideoWorker(self.camera, fps=30.0)
         if self._correction_enabled and self._correction is not None:
@@ -340,7 +341,7 @@ class VideoWidget(QWidget):
         self._schedule_retry(self._retry_backoff_s)
 
         # Friendly message
-        msg = f"{self.stream_name}\nStream not available. Retrying…\n\n{err}"
+        msg = f"{self.stream_name}\nStream not available. Retrying...\n\n{err}"
         self._show_message(msg)
 
     def _stop_worker_only(self):
@@ -361,7 +362,7 @@ class VideoWidget(QWidget):
         self._connected_ts = 0.0
         # Clear any stale frame immediately so the user doesn't think the
         # stream is still live.
-        self._show_message(f"{self.stream_name}\nDisconnected — attempting to reconnect…")
+        self._show_message(f"{self.stream_name}\nDisconnected - attempting to reconnect...")
         self.shutdown(release_only=True)  # keep widget alive + clear pixmap
         self._retry_backoff_s = 0.5
         self._schedule_retry(0.2)

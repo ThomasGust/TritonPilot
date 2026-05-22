@@ -1,3 +1,10 @@
+"""GStreamer runtime discovery and environment bootstrapping.
+
+The pilot GUI shells out to ``gst-launch-1.0`` for video receive pipelines.
+This module centralizes the Windows-first search logic so GUI code and tests do
+not duplicate install-path heuristics.
+"""
+
 from __future__ import annotations
 
 import os
@@ -23,6 +30,8 @@ _PROCESS_ENV_KEYS = (
 
 @dataclass(frozen=True)
 class GStreamerRuntime:
+    """Discovered GStreamer install paths needed by receiver processes."""
+
     root: Path
     bin_dir: Path
     gst_launch: Path
@@ -31,6 +40,7 @@ class GStreamerRuntime:
     plugin_dir: Path | None
 
     def apply_to_env(self, env: dict[str, str]) -> None:
+        """Populate process environment variables for this runtime."""
         env["GST_LAUNCH"] = str(self.gst_launch)
         env["GSTREAMER_1_0_ROOT_MSVC_X86_64"] = str(self.root)
 
@@ -213,6 +223,7 @@ def find_gstreamer_runtime(
     command_lookup=which,
     registry_roots: Iterable[Path] | None = None,
 ) -> GStreamerRuntime | None:
+    """Return the first usable GStreamer runtime found for ``env``."""
     env_map = dict(os.environ if env is None else env)
     for root in _iter_candidate_roots(env_map, command_lookup, registry_roots):
         runtime = _runtime_from_root(root)
@@ -222,6 +233,7 @@ def find_gstreamer_runtime(
 
 
 def bootstrap_gstreamer_env(env: dict[str, str] | None = None) -> GStreamerRuntime | None:
+    """Find GStreamer and apply its paths to ``env`` or ``os.environ``."""
     runtime = find_gstreamer_runtime(env=env)
     if runtime is None:
         return None

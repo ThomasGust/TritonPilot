@@ -1,8 +1,10 @@
-# gui/style.py
+"""Shared Qt palette and stylesheet for TritonPilot."""
+
 from __future__ import annotations
 
 from PyQt6.QtGui import QPalette, QColor
 from PyQt6.QtWidgets import QApplication
+
 
 def apply_modern_style(app: QApplication) -> None:
     """Apply a clean, modern dark-ish Fusion theme.

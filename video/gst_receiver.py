@@ -158,6 +158,8 @@ def _win_kill_udp_port_users(
 
 @dataclass
 class RxConfig:
+    """Configuration for one local GStreamer receiver process."""
+
     name: str
     codec: str = "jpeg"       # 'jpeg' or 'h264'
     port: int = 5000
@@ -171,12 +173,15 @@ class RxConfig:
     mode: str = "window"      # "window" or "raw"
     width: int = 1280
     height: int = 720
-    # NEW: we won’t apply this in the reader thread, only when the user asks for the frame
+    # The reader thread stores raw frames; channel reordering happens only when
+    # the caller asks for a frame.
     channel_order: str = "BGR"
     extra: Dict[str, Any] = field(default_factory=dict)
 
 
 class ReceiverProcess:
+    """Own and monitor one ``gst-launch-1.0`` receiver subprocess."""
+
     _VALID_ORDERS = {"BGR", "RGB", "BRG", "RBG", "GBR", "GRB"}
 
     def __init__(self, cfg: RxConfig):
@@ -207,7 +212,7 @@ class ReceiverProcess:
                 logger.warning("Receiver '%s' already running", self.cfg.name)
                 return
 
-            # 👇 NEW: make sure no old receiver is sitting on this UDP port
+            # Make sure no old receiver is sitting on this UDP port.
             _win_kill_udp_port_users(self.cfg.port)
 
             # Reset frame bookkeeping so the first frame after (re)start is treated as new.
@@ -325,7 +330,7 @@ class ReceiverProcess:
             frame = read_exact(self._frame_size)
             if frame is None:
                 break
-            # just store it — no per-byte work here
+            # Just store it; no per-byte work here.
             with self._raw_buffer_lock:
                 self._latest_frame = frame
                 self._latest_seq += 1
@@ -484,6 +489,8 @@ class ReceiverProcess:
 
 
 class ReceiverManager:
+    """Small registry for multiple active ``ReceiverProcess`` instances."""
+
     def __init__(self):
         self._procs: Dict[str, ReceiverProcess] = {}
         self._lock = threading.Lock()

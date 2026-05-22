@@ -1,4 +1,11 @@
-# input/pilot_service.py
+"""Background publisher that turns controller state into PilotFrame messages.
+
+``PilotPublisherService`` is the topside half of the live-control path. It
+polls pygame in its own thread, tracks pilot-side toggles, merges GUI-provided
+auxiliary axes/edges, and publishes JSON frames over ZeroMQ. It deliberately
+does not mix thrusters or make hardware-safety decisions; TritonOS owns those.
+"""
+
 from __future__ import annotations
 
 import json
@@ -766,7 +773,7 @@ class PilotPublisherService:
                     )
                     self._last_debug = t0
 
-                # raw dump (very useful when “sticks/buttons dead”)
+                # Raw dump, useful when sticks/buttons appear dead.
                 if self.dump_raw_every_s > 0 and (t0 - self._last_raw_dump) > self.dump_raw_every_s:
                     raw = self._controller.read_raw_state()
                     axes = [f"{v:+.3f}" for v in raw["axes"]]

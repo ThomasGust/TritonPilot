@@ -1,4 +1,11 @@
-# gui/main_window.py
+"""Main TritonPilot window and top-level service composition.
+
+``MainWindow`` is the operator shell. It starts controller publishing,
+telemetry subscription, video widgets, recording controls, raw sensor views,
+and management tools, then routes background-thread updates back onto Qt's UI
+thread.
+"""
+
 from __future__ import annotations
 
 import os
@@ -59,9 +66,12 @@ from gui.management_page import ManagementPage
 
 
 class MainWindow(QMainWindow):
+    """Topside control window for live piloting and data capture."""
+
     SAVE_DIR_SETTINGS_KEY = "recording/save_dir"
 
-    # we'll receive sensor messages from a background thread → emit to UI thread
+    # Background services emit through these signals so widgets update on the
+    # Qt UI thread.
     sensor_msg_sig = pyqtSignal(dict)
     pilot_status_sig = pyqtSignal(dict)
     pilot_msg_sig = pyqtSignal(dict)
@@ -809,7 +819,7 @@ class MainWindow(QMainWindow):
             pass
         return super().eventFilter(obj, event)
 
-    # background → UI
+    # Background thread to UI thread.
     def _on_sensor_msg_from_thread(self, msg: dict):
         # called in sensor thread
         if self._stream_recorder is not None:
@@ -930,8 +940,8 @@ class MainWindow(QMainWindow):
                 if self._dh_target_m is not None:
                     t_txt = f"{float(self._dh_target_m):.2f}m"
 
-                #s = f"Mode: DEPTH HOLD (z {z_txt} → set {t_txt})"
-                s = f"z {z_txt} → set {t_txt}"
+                #s = f"Mode: DEPTH HOLD (z {z_txt} -> set {t_txt})"
+                s = f"z {z_txt} -> set {t_txt}"
                 s = f"Depth Hold: z {z_txt} -> set {t_txt}"
                 if depth_stale:
                     s += " [DEPTH STALE]"
@@ -1478,7 +1488,7 @@ class MainWindow(QMainWindow):
         if rtt_part:
             parts += ["|", rtt_part]
         if warns:
-            parts += ["|", "⚠ " + "; ".join(warns)]
+            parts += ["|", "WARN " + "; ".join(warns)]
 
         self._set_status(self._net_lbl, " ".join(parts))
 

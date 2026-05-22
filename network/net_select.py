@@ -1,16 +1,16 @@
-from __future__ import annotations
-
 """Topside network selection helpers.
 
-Goal: keep Wi‑Fi enabled (SSH, internet, etc.) while *preferring the tether*
+Goal: keep Wi-Fi enabled (SSH, internet, etc.) while *preferring the tether*
 for high-bandwidth video.
 
 We do this by choosing a local IP address that:
   1) Can reach the ROV video RPC host, and
-  2) Is on a non‑Wi‑Fi interface when possible.
+  2) Is on a non-Wi-Fi interface when possible.
 
 This module is best-effort across Windows/Linux/macOS and stays stdlib-only.
 """
+
+from __future__ import annotations
 
 import os
 import re
@@ -67,6 +67,8 @@ def _tcp_can_connect_from(local_ip: str, remote_host: str, remote_port: int, tim
 
 @dataclass
 class LocalAddr:
+    """One local IPv4 address with optional interface metadata."""
+
     ip: str
     iface: str | None = None
     is_wifi: bool | None = None
@@ -195,6 +197,7 @@ def _list_local_ipv4_windows() -> list[LocalAddr]:
 
 
 def list_local_ipv4_addrs() -> list[LocalAddr]:
+    """Return local non-loopback IPv4 addresses using the best platform probe."""
     if os.name == "nt":
         return _list_local_ipv4_windows()
     return _list_local_ipv4_linux()
@@ -211,9 +214,9 @@ def choose_video_receive_ip(
     We test candidates by attempting a TCP connect to the ROV video RPC port
     while binding to each local IP.
 
-    This works well when Wi‑Fi and tether are both up:
+    This works well when Wi-Fi and tether are both up:
       - If tether can reach the ROV host, it will be preferred.
-      - Wi‑Fi stays enabled for SSH and other tasks.
+      - Wi-Fi stays enabled for SSH and other tasks.
     """
 
     # 1) Enumerate candidates

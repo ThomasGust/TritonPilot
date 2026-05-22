@@ -1,3 +1,11 @@
+"""Prepare underwater video frames and RealityScan command files.
+
+This utility is an offline media-prep tool for recorded footage. It samples
+video frames, scores image quality, writes preprocessing variants, and prepares
+RealityScan/RealityCapture command files so model-building experiments are
+repeatable.
+"""
+
 from __future__ import annotations
 
 import argparse
@@ -34,6 +42,8 @@ DEFAULT_REALITYSCAN_GLOBS = (
 
 @dataclass(frozen=True)
 class VideoInfo:
+    """Basic metadata read from an input video file."""
+
     fps: float
     frame_count: int
     width: int
@@ -43,6 +53,8 @@ class VideoInfo:
 
 @dataclass
 class FrameMetric:
+    """Quality and bookkeeping fields for one candidate video frame."""
+
     frame_index: int
     timestamp_s: float
     sharpness: float
@@ -57,6 +69,8 @@ class FrameMetric:
 
 @dataclass(frozen=True)
 class VariantSpec:
+    """One preprocessing/alignment variant to write and evaluate."""
+
     name: str
     geometry_mode: str
     rectify_water: bool = False
@@ -69,6 +83,8 @@ class VariantSpec:
 
 @dataclass(frozen=True)
 class VariantPaths:
+    """Filesystem layout for one RealityScan alignment variant."""
+
     name: str
     frames: Path
     rscmd: Path
@@ -81,6 +97,8 @@ class VariantPaths:
 
 @dataclass(frozen=True)
 class AlignmentResult:
+    """Parsed quality summary from one RealityScan alignment run."""
+
     name: str
     score: float
     component_count: int
@@ -95,6 +113,8 @@ class AlignmentResult:
 
 @dataclass(frozen=True)
 class OutputPaths:
+    """All output directories and files created for one pipeline run."""
+
     root: Path
     frames: Path
     variants: Path
@@ -112,6 +132,7 @@ class OutputPaths:
 
 
 def _positive_float(value: str) -> float:
+    """Parse a strictly positive CLI float value."""
     parsed = float(value)
     if parsed <= 0:
         raise argparse.ArgumentTypeError("value must be greater than zero")
@@ -119,6 +140,7 @@ def _positive_float(value: str) -> float:
 
 
 def _nonnegative_float(value: str) -> float:
+    """Parse a CLI float value that may be zero but not negative."""
     parsed = float(value)
     if parsed < 0:
         raise argparse.ArgumentTypeError("value must be zero or greater")
@@ -126,10 +148,12 @@ def _nonnegative_float(value: str) -> float:
 
 
 def _path_for_cli(path: Path) -> str:
+    """Return a quoted absolute path for RealityScan command files."""
     return f'"{path.resolve()}"'
 
 
 def _safe_slug(text: str) -> str:
+    """Return a conservative filesystem slug for an output workspace."""
     allowed = []
     for char in text:
         if char.isalnum():
@@ -143,6 +167,7 @@ def _safe_slug(text: str) -> str:
 
 
 def discover_realityscan() -> Path | None:
+    """Locate a RealityScan/RealityCapture executable on this workstation."""
     env_path = os.environ.get("REALITYSCAN_EXE")
     if env_path:
         path = Path(env_path)
@@ -174,6 +199,7 @@ def discover_realityscan() -> Path | None:
 
 
 def open_video(video_path: Path) -> tuple[cv2.VideoCapture, VideoInfo]:
+    """Open a video and return its capture handle with normalized metadata."""
     cap = cv2.VideoCapture(str(video_path))
     if not cap.isOpened():
         raise RuntimeError(f"Could not open video: {video_path}")
@@ -189,6 +215,7 @@ def open_video(video_path: Path) -> tuple[cv2.VideoCapture, VideoInfo]:
 
 
 def score_frame(frame: np.ndarray, frame_index: int, fps: float) -> FrameMetric:
+    """Compute quality metrics used to choose useful photogrammetry frames."""
     h, w = frame.shape[:2]
     target_w = 480
     scale = target_w / max(w, 1)
@@ -221,6 +248,7 @@ def score_frame(frame: np.ndarray, frame_index: int, fps: float) -> FrameMetric:
 
 
 def _normalize(values: list[float]) -> list[float]:
+    """Normalize metric values with percentile clipping for robust scoring."""
     if not values:
         return []
     lo = float(np.percentile(values, 10))
@@ -231,6 +259,7 @@ def _normalize(values: list[float]) -> list[float]:
 
 
 def assign_quality(metrics: list[FrameMetric]) -> None:
+    """Populate each frame metric with a blended quality score."""
     sharp = _normalize([m.sharpness for m in metrics])
     contrast = _normalize([m.contrast for m in metrics])
     features = _normalize([math.log1p(m.feature_count) for m in metrics])
@@ -245,6 +274,7 @@ def assign_quality(metrics: list[FrameMetric]) -> None:
 
 
 def read_candidate_metrics(video_path: Path, candidate_fps: float) -> tuple[VideoInfo, list[FrameMetric]]:
+    """Decode candidate frames from a video and score each candidate."""
     cap, info = open_video(video_path)
     stride = max(1, int(round(info.fps / candidate_fps)))
     metrics: list[FrameMetric] = []
@@ -267,12 +297,14 @@ def read_candidate_metrics(video_path: Path, candidate_fps: float) -> tuple[Vide
 
 
 def _mean_abs_delta(a: np.ndarray | None, b: np.ndarray | None) -> float:
+    """Return a small grayscale fingerprint distance between two frames."""
     if a is None or b is None:
         return 999.0
     return float(np.mean(cv2.absdiff(a, b)))
 
 
 def estimate_dark_border_crop(video_path: Path, max_crop: float, sample_count: int = 18) -> float:
+    """Estimate how much fixed dark lens/housing border to crop away."""
     if max_crop <= 0:
         return 0.0
     cap, info = open_video(video_path)
@@ -339,6 +371,7 @@ def select_frames(
     min_motion: float,
     max_still_gap_s: float,
 ) -> list[FrameMetric]:
+    """Choose high-quality, temporally distributed frames for reconstruction."""
     bucket_s = 1.0 / target_fps
     by_bucket: dict[int, FrameMetric] = {}
     for metric in metrics:
@@ -396,6 +429,7 @@ def select_frames(
 
 
 def crop_frame(frame: np.ndarray, fraction: float) -> np.ndarray:
+    """Crop an equal fraction from all image edges."""
     if fraction <= 0:
         return frame
     h, w = frame.shape[:2]
@@ -407,6 +441,7 @@ def crop_frame(frame: np.ndarray, fraction: float) -> np.ndarray:
 
 
 def gray_world_white_balance(frame: np.ndarray, max_gain: float) -> np.ndarray:
+    """Apply bounded gray-world channel balancing to an underwater frame."""
     arr = frame.astype(np.float32)
     means = arr.reshape(-1, 3).mean(axis=0)
     target = float(means.mean())
@@ -415,6 +450,7 @@ def gray_world_white_balance(frame: np.ndarray, max_gain: float) -> np.ndarray:
 
 
 def enhance_underwater(frame: np.ndarray, *, wb_gain: float, clahe_clip: float, sharpen: float) -> np.ndarray:
+    """Create a color-enhanced frame for texture or standard geometry export."""
     balanced = gray_world_white_balance(frame, wb_gain)
     lab = cv2.cvtColor(balanced, cv2.COLOR_BGR2LAB)
     l_channel, a_channel, b_channel = cv2.split(lab)
@@ -436,6 +472,7 @@ def make_luma_geometry(
     sharpen: float,
     flatten_turbidity: bool,
 ) -> np.ndarray:
+    """Build a contrast-focused luminance frame for RealityScan alignment."""
     balanced = gray_world_white_balance(frame, wb_gain)
     lab = cv2.cvtColor(balanced, cv2.COLOR_BGR2LAB)
     l_channel = lab[:, :, 0]
@@ -462,6 +499,7 @@ def make_geometry_frame(
     clahe_clip: float,
     sharpen: float,
 ) -> np.ndarray:
+    """Create the frame image used for geometry under the selected mode."""
     if geometry_mode == "enhanced":
         return enhance_underwater(frame, wb_gain=wb_gain, clahe_clip=clahe_clip, sharpen=sharpen)
     if geometry_mode == "luma":
@@ -484,6 +522,7 @@ def make_geometry_frame(
 
 
 def make_cv_foreground_mask(color_frame: np.ndarray, geometry_frame: np.ndarray) -> np.ndarray:
+    """Create a conservative foreground mask for texture/feature variants."""
     gray = cv2.cvtColor(geometry_frame, cv2.COLOR_BGR2GRAY)
     gray = cv2.GaussianBlur(gray, (3, 3), 0)
     median = float(np.median(gray))
@@ -527,6 +566,7 @@ def make_cv_foreground_mask(color_frame: np.ndarray, geometry_frame: np.ndarray)
 
 
 def maybe_rectify(frame: np.ndarray, enabled: bool, corrector: object | None) -> np.ndarray:
+    """Apply optional water-refraction rectification to a frame."""
     if not enabled:
         return frame
     if corrector is None:
@@ -535,6 +575,7 @@ def maybe_rectify(frame: np.ndarray, enabled: bool, corrector: object | None) ->
 
 
 def make_water_corrector(enabled: bool) -> object | None:
+    """Construct the TritonPilot water-correction helper when requested."""
     if not enabled:
         return None
     from config import (
@@ -558,6 +599,7 @@ def make_water_corrector(enabled: bool) -> object | None:
 
 
 def prepare_output_paths(video_path: Path, output_root: Path | None, overwrite: bool) -> OutputPaths:
+    """Create the output workspace layout for a pipeline run."""
     if output_root is None:
         stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         output_root = REPO_ROOT / "results" / "realityscan" / f"{_safe_slug(video_path.stem)}_{stamp}"
@@ -595,6 +637,7 @@ def prepare_output_paths(video_path: Path, output_root: Path | None, overwrite: 
 
 
 def make_variant_paths(paths: OutputPaths, spec: VariantSpec) -> VariantPaths:
+    """Create filesystem paths for one alignment/preprocessing variant."""
     frames = paths.frames if spec.name == "enhanced_brown4" else paths.variants / spec.name
     frames.mkdir(parents=True, exist_ok=True)
     paths.alignments.mkdir(parents=True, exist_ok=True)
@@ -625,6 +668,7 @@ def write_variant_frames(
     jpeg_quality: int,
     texture_layers: bool,
 ) -> list[Path]:
+    """Write selected frames for one RealityScan preprocessing variant."""
     selected_by_index = {m.frame_index: m for m in selected}
     written: list[Path] = []
     cap, _ = open_video(video_path)
@@ -688,6 +732,7 @@ def write_selected_frames(
     sharpen: float,
     jpeg_quality: int,
 ) -> list[Path]:
+    """Write the default enhanced frame set without tournament variants."""
     spec = VariantSpec(
         name="enhanced_brown4",
         geometry_mode="enhanced",
@@ -710,6 +755,7 @@ def write_selected_frames(
 
 
 def write_metrics_csv(metrics: list[FrameMetric], selected: Iterable[FrameMetric], paths: OutputPaths) -> None:
+    """Persist frame scores and selection flags for audit/debugging."""
     selected_ids = {m.frame_index for m in selected}
     with paths.metrics_csv.open("w", newline="", encoding="utf-8") as fh:
         writer = csv.writer(fh)
@@ -743,6 +789,7 @@ def write_metrics_csv(metrics: list[FrameMetric], selected: Iterable[FrameMetric
 
 
 def make_contact_sheet(frame_paths: list[Path], selected: list[FrameMetric], out_path: Path, max_tiles: int = 30) -> None:
+    """Write a compact visual preview of selected reconstruction frames."""
     if not frame_paths:
         return
     if len(frame_paths) <= max_tiles:
@@ -778,6 +825,7 @@ def make_contact_sheet(frame_paths: list[Path], selected: list[FrameMetric], out
 
 
 def write_connectivity_csv(frame_paths: list[Path], selected: list[FrameMetric], out_path: Path) -> None:
+    """Write adjacent-frame feature matching diagnostics."""
     if len(frame_paths) < 2:
         return
     out_path.parent.mkdir(parents=True, exist_ok=True)
@@ -842,6 +890,7 @@ def write_connectivity_csv(frame_paths: list[Path], selected: list[FrameMetric],
 
 
 def build_variant_specs(args: argparse.Namespace) -> list[VariantSpec]:
+    """Build the preprocessing/alignment variants requested by CLI options."""
     base = VariantSpec(
         name="enhanced_brown4",
         geometry_mode="enhanced",
@@ -924,6 +973,7 @@ def build_variant_specs(args: argparse.Namespace) -> list[VariantSpec]:
 
 
 def overview_template_path(realityscan_exe: Path | None) -> Path | None:
+    """Find RealityScan's bundled overview report template when available."""
     candidates: list[Path] = []
     if realityscan_exe is not None:
         candidates.append(realityscan_exe.parent / "Reports" / "Overview.html")
@@ -935,6 +985,7 @@ def overview_template_path(realityscan_exe: Path | None) -> Path | None:
 
 
 def alignment_setting_commands(args: argparse.Namespace, spec: VariantSpec | None = None) -> list[str]:
+    """Return common RealityScan alignment setting commands."""
     distortion_model = spec.distortion_model if spec and spec.distortion_model else args.distortion_model
     detector_sensitivity = spec.detector_sensitivity if spec and spec.detector_sensitivity else args.detector_sensitivity
     images_overlap = spec.images_overlap if spec and spec.images_overlap else args.images_overlap
@@ -961,6 +1012,7 @@ def write_alignment_command_file(
     args: argparse.Namespace,
     overview_template: Path | None,
 ) -> None:
+    """Write an RSCMD file that aligns one tournament variant."""
     commands = [
         "# Generated by tools/realityscan_underwater_pipeline.py",
         f"# Alignment tournament variant: {spec.name}",
@@ -995,12 +1047,14 @@ def write_alignment_command_file(
 
 
 def _strip_report_text(value: str) -> str:
+    """Remove HTML tags/entities from a RealityScan report fragment."""
     text = re.sub(r"<[^>]+>", " ", value)
     text = html.unescape(text)
     return re.sub(r"\s+", " ", text).strip()
 
 
 def _parse_float(value: str) -> float:
+    """Extract the first float-like number from a report value."""
     match = re.search(r"[-+]?\d+(?:\.\d+)?", value.replace(",", ""))
     return float(match.group(0)) if match else 0.0
 
@@ -1012,6 +1066,7 @@ def parse_alignment_report(
     selected_image_count: int,
     project: Path,
 ) -> AlignmentResult:
+    """Parse RealityScan's overview report into a sortable alignment result."""
     if not report_path.exists():
         return AlignmentResult(
             name=name,
@@ -1072,6 +1127,7 @@ def parse_alignment_report(
 
 
 def write_alignment_results(paths: OutputPaths, results: list[AlignmentResult]) -> None:
+    """Write alignment tournament results as CSV and JSON summaries."""
     csv_path = paths.reports / "alignment_results.csv"
     json_path = paths.reports / "alignment_results.json"
     with csv_path.open("w", newline="", encoding="utf-8") as fh:
@@ -1129,6 +1185,7 @@ def write_alignment_results(paths: OutputPaths, results: list[AlignmentResult]) 
 
 
 def model_command(quality: str) -> str:
+    """Map a CLI model quality label to the RealityScan command name."""
     return {
         "preview": "-calculatePreviewModel",
         "normal": "-calculateNormalModel",
@@ -1144,6 +1201,7 @@ def write_realityscan_command_file(
     spec: VariantSpec | None = None,
     overview_template: Path | None = None,
 ) -> None:
+    """Write the final RealityScan reconstruction command file."""
     frames_dir = frames_dir or paths.frames
     base_model_name = "Model 1"
     simplified_model_name = "Model 2" if args.simplify_triangles > 0 else base_model_name
@@ -1227,6 +1285,7 @@ def write_manifest(
     alignment_results: list[AlignmentResult] | None = None,
     best_alignment: AlignmentResult | None = None,
 ) -> None:
+    """Write a machine-readable manifest for the generated workspace."""
     manifest = {
         "video": str(video_path.resolve()),
         "video_info": {
@@ -1301,6 +1360,7 @@ def wait_for_detached_realityscan(
     *,
     label: str,
 ) -> None:
+    """Poll progress/output files until a detached RealityScan run settles."""
     deadline = time.monotonic() + timeout_hours * 3600.0
     idle_required_s = 45.0
     last_size = -1
@@ -1349,6 +1409,7 @@ def run_realityscan_rscmd(
     timeout_hours: float,
     label: str,
 ) -> int:
+    """Launch RealityScan with an RSCMD file and stream its console output."""
     crash_reports.mkdir(parents=True, exist_ok=True)
     progress.parent.mkdir(parents=True, exist_ok=True)
     stdout_log.parent.mkdir(parents=True, exist_ok=True)
@@ -1400,6 +1461,7 @@ def run_realityscan_rscmd(
 
 
 def run_realityscan(paths: OutputPaths, realityscan_exe: Path, timeout_hours: float) -> int:
+    """Run the final reconstruction command file."""
     return run_realityscan_rscmd(
         rscmd=paths.rscmd,
         progress=paths.progress,
@@ -1420,6 +1482,7 @@ def run_alignment_tournament(
     realityscan_exe: Path,
     args: argparse.Namespace,
 ) -> list[AlignmentResult]:
+    """Execute and score all requested alignment tournament variants."""
     results: list[AlignmentResult] = []
     for spec in variant_specs:
         if args.alignment_tournament == "off":
@@ -1456,6 +1519,7 @@ def run_alignment_tournament(
 
 
 def build_arg_parser() -> argparse.ArgumentParser:
+    """Build the command-line parser for the video-to-RealityScan pipeline."""
     parser = argparse.ArgumentParser(
         description="Autonomous underwater video to RealityScan textured model pipeline.",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
@@ -1509,6 +1573,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: list[str] | None = None) -> int:
+    """Run the end-to-end frame preparation and optional reconstruction flow."""
     total_start = time.perf_counter()
     parser = build_arg_parser()
     args = parser.parse_args(argv)

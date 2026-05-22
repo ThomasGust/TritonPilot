@@ -1,3 +1,5 @@
+"""RPC client for TritonOS video stream management."""
+
 from __future__ import annotations
 
 from config import VIDEO_RPC_ENDPOINT

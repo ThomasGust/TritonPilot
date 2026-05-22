@@ -1,3 +1,5 @@
+"""Tkinter gamepad inspector for quick controller bringup."""
+
 import pygame
 import tkinter as tk
 from tkinter import ttk
@@ -74,12 +76,13 @@ for i in range(NUM_HATS):
     lbl.grid(row=i, column=0, sticky="w", pady=2)
     hat_labels.append(lbl)
 
-status_lbl = tk.Label(root, text="Move/press anything…", font=DEFAULT_FONT)
+status_lbl = tk.Label(root, text="Move/press anything...", font=DEFAULT_FONT)
 status_lbl.pack(pady=(5, 10))
 
 
 # --- Update loop --------------------------------------------------
 def update_inputs():
+    """Poll pygame and refresh all displayed axis/button/hat values."""
     # read current joystick state
     pygame.event.pump()
 

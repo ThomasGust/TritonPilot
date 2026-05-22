@@ -1,3 +1,5 @@
+"""Operator instrument widgets for depth, power, hold tests, and gauges."""
+
 from __future__ import annotations
 
 import math
@@ -68,6 +70,8 @@ class _Card(QFrame):
 
 
 class VerticalGaugeWidget(QWidget):
+    """Compact vertical gauge used by the pilot instrument panel."""
+
     def __init__(self, *, label: str, unit: str, vmin: float, vmax: float, invert: bool = False, parent=None):
         super().__init__(parent)
         self.label = label

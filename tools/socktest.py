@@ -1,9 +1,13 @@
 #!/usr/bin/env python3
+"""Small TCP stream client for low-level ROV socket testing."""
+
 import socket
 import time
 import argparse
 
+
 def main():
+    """Connect to a TCP endpoint and send timestamped test lines."""
     ap = argparse.ArgumentParser(description="TCP client stream test")
     ap.add_argument("--host", required=True, help="ROV IP address, e.g. {ROV_HOST}")
     ap.add_argument("--port", type=int, default=6000)

@@ -1,3 +1,9 @@
+"""Client-side helpers for TritonOS management RPC calls.
+
+Management RPC is used for lower-rate setup and calibration tasks from the GUI.
+It is intentionally separate from the high-rate pilot command stream.
+"""
+
 from __future__ import annotations
 
 import queue
@@ -62,6 +68,7 @@ class ROVManagementRPC:
         self.sock = self._make_sock()
 
     def call(self, cmd: str, args: Optional[dict] = None):
+        """Call one management RPC command and return its ``data`` payload."""
         payload = {"cmd": str(cmd)}
         if args:
             payload["args"] = dict(args)
@@ -123,6 +130,7 @@ class ManagementRpcService:
             self._thread.join(timeout=1.0)
 
     def request(self, cmd: str, args: Optional[dict] = None, meta: Optional[dict] = None) -> int:
+        """Queue a management command for the worker and return its request id."""
         with self._id_lock:
             request_id = int(self._next_request_id)
             self._next_request_id += 1

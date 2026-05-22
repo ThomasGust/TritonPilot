@@ -1,4 +1,5 @@
-# recording/video_recorder.py
+"""Best-effort video and snapshot writers used by the pilot GUI."""
+
 from __future__ import annotations
 
 import os
