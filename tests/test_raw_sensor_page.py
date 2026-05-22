@@ -232,6 +232,72 @@ def test_raw_sensor_page_depth_plot_and_rest_zero(tmp_path):
         app.processEvents()
 
 
+def test_raw_sensor_page_visible_set_rest_requests_persistent_local_rest(tmp_path, monkeypatch):
+    app = _app()
+    calls = []
+
+    class _RpcStub:
+        def __init__(self, endpoint, on_result):
+            self.endpoint = endpoint
+            self.on_result = on_result
+
+        def start(self):
+            calls.append(("start", self.endpoint))
+
+        def stop(self):
+            calls.append(("stop", self.endpoint))
+
+        def request(self, cmd, args):
+            calls.append((cmd, dict(args or {})))
+            return 7
+
+    monkeypatch.setattr("gui.raw_sensor_page.ManagementRpcService", _RpcStub)
+    page = RawSensorPage(recording_session_provider=lambda: tmp_path)
+    try:
+        page.show()
+        app.processEvents()
+        page.update_from_sensor(
+            {
+                "ts": 50.0,
+                "sensor": "external_depth",
+                "type": "external_depth",
+                "depth_m": 0.25,
+                "depth_sensor_m": 0.40,
+                "pressure_mbar": 1018.0,
+                "temperature_c": 12.5,
+            }
+        )
+
+        page._reset_attitude_reference()
+        app.processEvents()
+
+        assert ("start", config.MANAGEMENT_RPC_ENDPOINT) in calls
+        assert ("capture_local_rest", {"samples": 20, "delay_s": 0.02, "include_depth": True}) in calls
+        assert page._rest_request_pending is True
+        assert "zero 0.250 m" in page._labels["depth_ref"].text()
+
+        page._handle_rest_rpc_result(
+            {
+                "cmd": "capture_local_rest",
+                "ok": True,
+                "data": {
+                    "depth": {"surface_pressure_mbar": 1018.0},
+                    "errors": {},
+                },
+            }
+        )
+        app.processEvents()
+
+        assert page._rest_request_pending is False
+        assert "saved onboard rest" in page._labels["attitude_ref"].text()
+        assert "surface 1018.00 mbar" in page._labels["attitude_ref"].text()
+    finally:
+        page.shutdown()
+        page.close()
+        page.deleteLater()
+        app.processEvents()
+
+
 def test_raw_sensor_page_prefers_onboard_attitude_over_local_fallback(tmp_path):
     app = _app()
     page = RawSensorPage(recording_session_provider=lambda: tmp_path)

@@ -208,6 +208,7 @@ class ManagementPage(QWidget):
             ("Config Path", "config_path"),
             ("Last Refresh", "last_refresh"),
             ("Depth Reference", "depth_reference"),
+            ("Attitude Reference", "attitude_reference"),
             ("Surface Pressure", "surface_pressure"),
             ("Sensor To Top", "sensor_to_top"),
             ("Available Commands", "commands"),
@@ -244,10 +245,13 @@ class ManagementPage(QWidget):
         self.save_sensor_offset_btn.clicked.connect(self._save_sensor_offset)
         self.capture_surface_btn = QPushButton("Capture Surface Reference")
         self.capture_surface_btn.clicked.connect(self._capture_surface_reference)
+        self.capture_local_rest_btn = QPushButton("Capture Local Rest")
+        self.capture_local_rest_btn.clicked.connect(self._capture_local_rest)
         self.save_surface_btn = QPushButton("Save Manual Surface Pressure")
         self.save_surface_btn.clicked.connect(self._save_manual_surface_reference)
         depth_buttons.addWidget(self.save_sensor_offset_btn)
         depth_buttons.addWidget(self.capture_surface_btn)
+        depth_buttons.addWidget(self.capture_local_rest_btn)
         depth_buttons.addWidget(self.save_surface_btn)
         depth_card.body.addLayout(depth_buttons)
         root.addWidget(depth_card)
@@ -360,6 +364,12 @@ class ManagementPage(QWidget):
                 refs.get("depth_reference_path"),
             )
         )
+        self._status_labels["attitude_reference"].setText(
+            self._format_path_state(
+                bool(refs.get("attitude_reference_exists")),
+                refs.get("attitude_reference_path"),
+            )
+        )
         self._status_labels["surface_pressure"].setText(self._fmt_num(refs.get("surface_pressure_mbar"), "mbar", decimals=2))
         self._status_labels["sensor_to_top"].setText(self._fmt_num(refs.get("depth_sensor_to_top_m"), "m", decimals=4))
         commands_text = ", ".join(sorted(self._available_commands)) if self._available_commands else "-"
@@ -415,6 +425,21 @@ class ManagementPage(QWidget):
                 f"Captured surface pressure {self._fmt_num(data.get('surface_pressure_mbar'), 'mbar', decimals=2)} "
                 f"and saved it to {str(data.get('path') or 'the depth reference file')}."
             )
+        elif cmd == "capture_local_rest":
+            depth = dict(data.get("depth") or {})
+            attitude = dict(data.get("attitude") or {})
+            bits = []
+            if attitude:
+                bits.append(f"attitude -> {str(attitude.get('attitude_reference_path') or 'attitude reference file')}")
+            if depth:
+                bits.append(
+                    f"surface {self._fmt_num(depth.get('surface_pressure_mbar'), 'mbar', decimals=2)} "
+                    f"-> {str(depth.get('path') or 'depth reference file')}"
+                )
+            msg = "Captured local rest: " + ("; ".join(bits) if bits else "no reference data reported")
+            errors = dict(data.get("errors") or {})
+            if errors:
+                msg += " | warnings: " + "; ".join(f"{k}: {v}" for k, v in errors.items())
         elif cmd == "update_code":
             stdout = str(data.get("stdout") or "").strip()
             revision = ""
@@ -446,6 +471,7 @@ class ManagementPage(QWidget):
         self.save_sensor_offset_btn.setEnabled((not busy) and can_set_config and sensor_offset_present)
         self.save_surface_btn.setEnabled((not busy) and ("set_surface_reference" in self._available_commands))
         self.capture_surface_btn.setEnabled((not busy) and ("capture_surface_reference" in self._available_commands))
+        self.capture_local_rest_btn.setEnabled((not busy) and ("capture_local_rest" in self._available_commands))
         self.update_code_btn.setEnabled((not busy) and ("update_code" in self._available_commands))
         self.update_restart_btn.setEnabled((not busy) and ("update_code" in self._available_commands))
         self.restart_service_btn.setEnabled((not busy) and ("restart_service" in self._available_commands))
@@ -457,6 +483,7 @@ class ManagementPage(QWidget):
             self.save_sensor_offset_btn.setEnabled(False)
             self.save_surface_btn.setEnabled(False)
             self.capture_surface_btn.setEnabled(False)
+            self.capture_local_rest_btn.setEnabled(False)
             self.update_code_btn.setEnabled(False)
             self.update_restart_btn.setEnabled(False)
             self.restart_service_btn.setEnabled(False)
@@ -487,6 +514,20 @@ class ManagementPage(QWidget):
         self._queue_request(
             "capture_surface_reference",
             {"samples": 20, "delay_s": 0.02},
+            request_meta={"refresh_after_success": True},
+        )
+
+    def _capture_local_rest(self) -> None:
+        answer = QMessageBox.question(
+            self,
+            "Capture Local Rest",
+            "Capture the current ROV pose and surface pressure as the persistent local rest reference?\n\nKeep the vehicle still in its chosen rest pose, with the top of the ROV at the water surface.",
+        )
+        if answer != QMessageBox.StandardButton.Yes:
+            return
+        self._queue_request(
+            "capture_local_rest",
+            {"samples": 20, "delay_s": 0.02, "include_depth": True},
             request_meta={"refresh_after_success": True},
         )
 
@@ -635,6 +676,7 @@ class ManagementPage(QWidget):
             "set_config": "Save Config",
             "set_surface_reference": "Save Manual Surface Pressure",
             "capture_surface_reference": "Capture Surface Reference",
+            "capture_local_rest": "Capture Local Rest",
             "update_code": "Force Update From GitHub",
             "restart_service": "Restart TritonOS",
         }

@@ -9,7 +9,7 @@ from collections import deque
 from pathlib import Path
 from typing import Callable, Optional
 
-from PyQt6.QtCore import QPointF, QRectF, Qt
+from PyQt6.QtCore import QPointF, QRectF, Qt, pyqtSignal
 from PyQt6.QtGui import QColor, QFont, QPainter, QPainterPath, QPen, QPolygonF
 from PyQt6.QtWidgets import (
     QFrame,
@@ -27,6 +27,7 @@ import config
 from recording.raw_sensor_csv import RawSensorCsvLogger
 from recording.stream_recorder import StreamRecorder
 from telemetry.roll_pitch_estimator import RollPitchConfig, RollPitchEstimator
+from network.management_rpc import ManagementRpcService
 
 
 class _Card(QFrame):
@@ -517,6 +518,7 @@ class Attitude3DWidget(QWidget):
 class RawSensorPage(QWidget):
     """Raw ROV telemetry dashboard with focused CSV capture."""
 
+    rest_result_sig = pyqtSignal(dict)
     LOCAL_ATTITUDE_FALLBACK_STALE_S = 2.0
 
     def __init__(self, parent=None, recording_session_provider: Callable[[], Path] | None = None):
@@ -544,6 +546,8 @@ class RawSensorPage(QWidget):
         self._latest_depth_msg: dict | None = None
         self._latest_depth_m: float | None = None
         self._depth_zero_m: float | None = None
+        self._mgmt_svc: ManagementRpcService | None = None
+        self._rest_request_pending = False
 
         title = QLabel("Raw Sensors")
         title_font = QFont(title.font())
@@ -653,6 +657,7 @@ class RawSensorPage(QWidget):
         root = QVBoxLayout(self)
         root.setContentsMargins(0, 0, 0, 0)
         root.addWidget(scroll)
+        self.rest_result_sig.connect(self._handle_rest_rpc_result)
 
     def set_recording_session_provider(self, provider: Callable[[], Path] | None) -> None:
         self._recording_session_provider = provider
@@ -701,9 +706,13 @@ class RawSensorPage(QWidget):
 
     def shutdown(self) -> None:
         self.stop_recording()
+        if self._mgmt_svc is not None:
+            self._mgmt_svc.stop()
+            self._mgmt_svc = None
 
     def _reset_attitude_reference(self) -> None:
         self._reset_depth_reference()
+        self._request_persistent_local_rest()
         self._attitude_estimator.reset()
         if self._using_onboard_attitude():
             if self._set_attitude_display_zero(self._latest_attitude):
@@ -720,6 +729,52 @@ class RawSensorPage(QWidget):
         self.attitude_view.clear()
         self.attitude_plot.update()
         self._refresh_attitude_status()
+
+    def _ensure_management_service(self) -> ManagementRpcService:
+        if self._mgmt_svc is None:
+            self._mgmt_svc = ManagementRpcService(
+                endpoint=getattr(config, "MANAGEMENT_RPC_ENDPOINT"),
+                on_result=self._on_rest_rpc_result_from_thread,
+            )
+            self._mgmt_svc.start()
+        return self._mgmt_svc
+
+    def _request_persistent_local_rest(self) -> None:
+        # Unit tests and hidden/offscreen pages may call the same method for
+        # local display zeroing. Only the visible operator action should reach
+        # out to the ROV and persist references.
+        if not self.isVisible() or self._rest_request_pending:
+            return
+        self._rest_request_pending = True
+        self._set_widget_text(self.attitude_rest_btn, "Setting Rest...")
+        self._set_label_text("attitude_ref", "saving local rest to ROV")
+        svc = self._ensure_management_service()
+        svc.request("capture_local_rest", {"samples": 20, "delay_s": 0.02, "include_depth": True})
+
+    def _on_rest_rpc_result_from_thread(self, result: dict) -> None:
+        self.rest_result_sig.emit(result)
+
+    def _handle_rest_rpc_result(self, result: dict) -> None:
+        if str(result.get("cmd") or "") != "capture_local_rest":
+            return
+        self._rest_request_pending = False
+        self._set_widget_text(self.attitude_rest_btn, "Set Rest")
+        if not result.get("ok"):
+            err = str(result.get("error") or "unknown error")
+            self._set_label_text("attitude_ref", f"ROV rest save failed | local display zero active | {err}")
+            return
+
+        data = dict(result.get("data") or {})
+        errors = dict(data.get("errors") or {})
+        self._attitude_display_zero = None
+        self._attitude_display_zero_kind = None
+        bits = ["saved onboard rest"]
+        depth = dict(data.get("depth") or {})
+        if depth.get("surface_pressure_mbar") is not None:
+            bits.append(f"surface {_num(depth.get('surface_pressure_mbar'), decimals=2, unit='mbar')}")
+        if errors:
+            bits.append("warnings " + "; ".join(f"{k}: {v}" for k, v in errors.items()))
+        self._set_label_text("attitude_ref", " | ".join(bits))
 
     def _reset_depth_reference(self) -> None:
         if self._latest_depth_m is None:
