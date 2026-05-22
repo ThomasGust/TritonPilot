@@ -119,7 +119,7 @@ class ROVStreams:
         return self._call("list_devices")
 
     def list_status(self):
-        return self._call("status")
+        return self._call("list_streams")
 
     def net_info(self):
         """Return ROV-side interface/IP info (best-effort)."""

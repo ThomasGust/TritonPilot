@@ -210,10 +210,10 @@ def test_hold_test_panel_can_set_manual_targets(monkeypatch):
     panel = HoldTestPanel(pilot_svc=pilot, endpoint="tcp://127.0.0.1:5556")
     try:
         app.processEvents()
-        panel.depth_target_spin.setValue(1.35)
-        panel._axis_target_spins["roll"].setValue(6.0)
+        panel.depth_target_spin.setValue(-0.35)
+        panel._axis_target_spins["roll"].setValue(-6.0)
         panel._axis_target_spins["pitch"].setValue(-4.0)
-        panel._axis_target_spins["yaw"].setValue(90.0)
+        panel._axis_target_spins["yaw"].setValue(-90.0)
 
         panel._hold_depth_target()
         panel._hold_axis_target("roll")
@@ -222,12 +222,40 @@ def test_hold_test_panel_can_set_manual_targets(monkeypatch):
         panel._set_axis_mode("roll", "level")
         panel._depth_hold_off()
 
-        assert ("depth_target", 1.35, True) in pilot.calls
-        assert ("axis_target", "roll", 6.0, "hold") in pilot.calls
+        assert panel.depth_target_spin.minimum() < 0.0
+        for spin in panel._axis_target_spins.values():
+            assert spin.minimum() < 0.0
+        assert ("depth_target", -0.35, True) in pilot.calls
+        assert ("axis_target", "roll", -6.0, "hold") in pilot.calls
         assert ("axis_target", "pitch", -4.0, "hold") in pilot.calls
-        assert ("axis_target", "yaw", 90.0, "hold") in pilot.calls
+        assert ("axis_target", "yaw", -90.0, "hold") in pilot.calls
         assert ("axis_mode", "roll", "level") in pilot.calls
         assert ("depth_enabled", False) in pilot.calls
+    finally:
+        panel.shutdown()
+        panel.close()
+        panel.deleteLater()
+        app.processEvents()
+
+
+def test_hold_test_panel_does_not_overwrite_spinbox_while_line_edit_has_focus(monkeypatch):
+    app = _app()
+    monkeypatch.setattr("gui.instruments.ManagementRpcService", _RpcStub)
+    pilot = _PilotTargetStub()
+    pilot.set_autopilot_axis_target("yaw", 45.0)
+
+    panel = HoldTestPanel(pilot_svc=pilot, endpoint="tcp://127.0.0.1:5556")
+    try:
+        app.processEvents()
+        spin = panel._axis_target_spins["yaw"]
+        spin.lineEdit().setFocus()
+        spin.lineEdit().selectAll()
+        spin.lineEdit().setText("-90.0")
+        app.processEvents()
+
+        panel._sync_target_spins({"yaw_deg": 45.0})
+
+        assert spin.lineEdit().text().startswith("-90")
     finally:
         panel.shutdown()
         panel.close()

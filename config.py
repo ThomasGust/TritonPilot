@@ -92,6 +92,13 @@ MANAGEMENT_RPC_ENDPOINT = os.environ.get("ROV_MANAGEMENT_RPC", f"tcp://{ROV_HOST
 # especially while the Pi is starting every camera pipeline at once.
 VIDEO_STALL_TIMEOUT_S = float(os.environ.get("TRITON_VIDEO_STALL_TIMEOUT_S", "8.0"))
 VIDEO_FIRST_FRAME_TIMEOUT_S = float(os.environ.get("TRITON_VIDEO_FIRST_FRAME_TIMEOUT_S", "14.0"))
+VIDEO_WARM_HIDDEN_STREAMS = os.environ.get("TRITON_VIDEO_WARM_HIDDEN_STREAMS", "0").strip().lower() in (
+    "1",
+    "true",
+    "yes",
+    "on",
+)
+VIDEO_WARMUP_INTERVAL_MS = int(os.environ.get("TRITON_VIDEO_WARMUP_INTERVAL_MS", "750"))
 
 # Where your JSON with stream definitions lives
 STREAMS_FILE = Path(__file__).parent / "data" / "streams.json"

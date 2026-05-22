@@ -13,6 +13,7 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 
+from config import VIDEO_WARM_HIDDEN_STREAMS, VIDEO_WARMUP_INTERVAL_MS
 from gui.video_widget import VideoWidget
 from video.cam import RemoteCameraManager
 
@@ -173,7 +174,7 @@ class VideoTabs(QWidget):
         for name in self.visible_stream_names():
             self._ensure_stream_started(name)
 
-        if self.stream_names:
+        if VIDEO_WARM_HIDDEN_STREAMS and self.stream_names:
             self._warmup_timer.start(0)
 
     def _allowed_layout_count(self, requested: int | None) -> int:
@@ -380,14 +381,19 @@ class VideoTabs(QWidget):
     def _warmup_next(self) -> None:
         if not self.stream_names:
             return
-        for name in self.stream_names:
+        while self._warmup_index < len(self.stream_names):
+            name = self.stream_names[self._warmup_index]
+            self._warmup_index += 1
             if self._widgets.get(name) is None:
                 self._ensure_stream_started(name)
+                break
+        if self._warmup_index < len(self.stream_names):
+            self._warmup_timer.start(max(0, int(VIDEO_WARMUP_INTERVAL_MS)))
 
     def resume_visible_streams(self) -> None:
         for name in self.visible_stream_names():
             self._ensure_stream_started(name)
-        if self.stream_names:
+        if VIDEO_WARM_HIDDEN_STREAMS and self.stream_names:
             try:
                 if not self._warmup_timer.isActive():
                     self._warmup_timer.start(0)

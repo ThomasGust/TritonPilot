@@ -479,8 +479,15 @@ class HoldTestPanel(QWidget):
             self._maybe_set_spin(spin, targets.get(f"{axis}_deg"))
 
     @staticmethod
-    def _maybe_set_spin(spin: QDoubleSpinBox, value) -> None:
+    def _spin_is_being_edited(spin: QDoubleSpinBox) -> bool:
         if spin.hasFocus():
+            return True
+        editor = spin.lineEdit()
+        return bool(editor is not None and editor.hasFocus())
+
+    @staticmethod
+    def _maybe_set_spin(spin: QDoubleSpinBox, value) -> None:
+        if HoldTestPanel._spin_is_being_edited(spin):
             return
         try:
             v = float(value)
