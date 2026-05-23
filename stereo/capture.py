@@ -65,7 +65,8 @@ class StereoCaptureSession:
         self._started_wall_ts = time.time()
         self._left_camera = self.manager.open(self.pair.left)
         self._right_camera = self.manager.open(self.pair.right)
-        self._manifest = self._base_manifest()
+        self._manifest = self._load_existing_manifest() or self._base_manifest()
+        self._resume_frame_state()
         self._write_manifest()
         return self.session_dir
 
@@ -171,6 +172,54 @@ class StereoCaptureSession:
             },
             "frames": [],
         }
+
+    def _load_existing_manifest(self) -> dict[str, Any] | None:
+        if not self.manifest_path.exists():
+            return None
+        try:
+            manifest = json.loads(self.manifest_path.read_text(encoding="utf-8"))
+        except Exception as exc:
+            raise StereoCaptureError(f"Could not read existing stereo manifest: {exc}") from exc
+        if manifest.get("schema") != "tritonpilot.stereo_capture_manifest":
+            raise StereoCaptureError("Existing stereo manifest has an unexpected schema")
+
+        existing_pair = manifest.get("pair") or {}
+        mismatches = []
+        for key in ("name", "left", "right", "rig_id"):
+            if str(existing_pair.get(key, "")) != str(getattr(self.pair, key, "")):
+                mismatches.append(key)
+        if mismatches:
+            raise StereoCaptureError(
+                "Existing stereo session uses a different pair; start a new session before changing "
+                + ", ".join(mismatches)
+            )
+        manifest.setdefault("frames", [])
+        manifest.setdefault("started_wall_ts", self._started_wall_ts)
+        return manifest
+
+    def _resume_frame_state(self) -> None:
+        frames = self._manifest.get("frames") or []
+        self._frame_index = 0
+        self._last_left_seq = None
+        self._last_right_seq = None
+        self._last_pair_key = None
+        for frame in frames:
+            try:
+                self._frame_index = max(self._frame_index, int(frame.get("index", 0)))
+            except Exception:
+                pass
+        if frames:
+            last = frames[-1]
+            left = last.get("left") or {}
+            right = last.get("right") or {}
+            try:
+                self._last_left_seq = int(left.get("seq"))
+                self._last_right_seq = int(right.get("seq"))
+                self._last_pair_key = (self._last_left_seq, self._last_right_seq)
+            except Exception:
+                self._last_left_seq = None
+                self._last_right_seq = None
+                self._last_pair_key = None
 
     def _write_manifest(self) -> None:
         self.session_dir.mkdir(parents=True, exist_ok=True)

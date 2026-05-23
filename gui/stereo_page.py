@@ -124,6 +124,7 @@ class StereoPage(QWidget):
         self._pairs: list[StereoPairConfig] = []
         self._capture_worker: _CaptureWorker | None = None
         self._last_manifest_path: str = ""
+        self._active_session_name: str = ""
 
         self._build_ui()
         self.reload_pairs(emit=False)
@@ -228,8 +229,13 @@ class StereoPage(QWidget):
         self.session_edit = QLineEdit()
         self.session_edit.setPlaceholderText("auto timestamp")
         self.session_edit.setClearButtonEnabled(True)
+        self.new_session_btn = QPushButton("New Session")
+        self.new_session_btn.clicked.connect(self._new_capture_session)
+        session_row = QHBoxLayout()
+        session_row.addWidget(self.session_edit, 1)
+        session_row.addWidget(self.new_session_btn, 0)
         capture_card.body.addWidget(QLabel("Session"))
-        capture_card.body.addWidget(self.session_edit)
+        capture_card.body.addLayout(session_row)
 
         capture_grid = QGridLayout()
         capture_grid.setHorizontalSpacing(8)
@@ -418,8 +424,28 @@ class StereoPage(QWidget):
 
     def _set_capture_enabled(self, enabled: bool) -> None:
         busy = self._capture_worker is not None and self._capture_worker.isRunning()
-        for widget in (self.capture_one_btn, self.capture_burst_btn):
+        for widget in (self.capture_one_btn, self.capture_burst_btn, self.new_session_btn):
             widget.setEnabled(bool(enabled) and not busy)
+
+    def _resolve_session_name(self) -> str:
+        typed = self.session_edit.text().strip()
+        if typed:
+            self._active_session_name = typed
+            return typed
+        if not self._active_session_name:
+            self._active_session_name = time.strftime("%Y%m%d-%H%M%S")
+            self.session_edit.setText(self._active_session_name)
+        return self._active_session_name
+
+    def _new_capture_session(self) -> None:
+        if self._capture_worker is not None and self._capture_worker.isRunning():
+            self.statusMessage.emit("Stereo capture already running", 3000)
+            return
+        self._active_session_name = ""
+        self.session_edit.clear()
+        self.frames_table.setRowCount(0)
+        self.output_lbl.setText("-")
+        self.statusMessage.emit("Ready for a new stereo capture session", 3000)
 
     def _start_capture(self, *, count: int) -> None:
         pair = self.current_pair()
@@ -434,9 +460,7 @@ class StereoPage(QWidget):
         except Exception as exc:
             self.statusMessage.emit(f"Could not prepare stereo output: {exc}", 5000)
             return
-        session_name = self.session_edit.text().strip() or None
-        self.frames_table.setRowCount(0)
-        self.output_lbl.setText("-")
+        session_name = self._resolve_session_name()
         self._capture_worker = _CaptureWorker(
             self.manager,
             pair,

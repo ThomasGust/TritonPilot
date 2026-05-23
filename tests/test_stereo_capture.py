@@ -118,6 +118,58 @@ def test_stereo_capture_session_writes_pair_and_manifest(tmp_path: Path):
     assert set(manager.closed) == {"Left", "Right"}
 
 
+def test_stereo_capture_session_appends_existing_manifest(tmp_path: Path):
+    streams_path = tmp_path / "streams.json"
+    streams_path.write_text(
+        json.dumps(
+            {
+                "streams": [{"name": "Left"}, {"name": "Right"}],
+                "stereo_pairs": [
+                    {
+                        "name": "Forward",
+                        "left": "Left",
+                        "right": "Right",
+                        "rig_id": "rig-a",
+                        "max_pair_delta_ms": 20,
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    pair = load_stereo_pairs(streams_path)[0]
+    manager = _FakeManager()
+
+    first = StereoCaptureSession(
+        manager,  # type: ignore[arg-type]
+        pair,
+        output_root=tmp_path,
+        session_name="pool-session",
+    )
+    first.start()
+    first.capture_once(wait_s=0.1)
+    first.stop()
+
+    manager.cameras["Left"] = _FakeCamera("Left", 3, 11.000)
+    manager.cameras["Right"] = _FakeCamera("Right", 4, 11.010)
+    second = StereoCaptureSession(
+        manager,  # type: ignore[arg-type]
+        pair,
+        output_root=tmp_path,
+        session_name="pool-session",
+    )
+    second.start()
+    record = second.capture_once(wait_s=0.1)
+    second.stop()
+
+    manifest = json.loads(second.manifest_path.read_text(encoding="utf-8"))
+    assert record["index"] == 2
+    assert len(manifest["frames"]) == 2
+    assert manifest["frames"][0]["stem"] == "pair_000001"
+    assert manifest["frames"][1]["stem"] == "pair_000002"
+    assert (second.session_dir / manifest["frames"][1]["left_path"]).exists()
+
+
 def test_stereo_capture_chooses_closest_buffered_frame_pair(tmp_path: Path):
     streams_path = tmp_path / "streams.json"
     streams_path.write_text(

@@ -73,6 +73,11 @@ stereo_sessions/
 timestamps, left/right frame sequence numbers, frame delta in milliseconds, and
 relative image paths. Move the whole session folder to the analysis computer.
 
+The Stereo tab keeps appending to the active session until `New Session` is
+pressed or the session name is changed. That means repeated `Capture Pair`
+clicks build one calibration dataset with many poses instead of one manifest
+per pose.
+
 ## Quality Checklist
 
 - Use the final rigid mount before any final calibration.
