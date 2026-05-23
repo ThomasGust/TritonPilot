@@ -137,6 +137,10 @@ TritonPilot is allowed to display raw data and diagnostics, but it should not
 grow mission-scoring applets. That separation keeps the piloting station
 predictable under competition pressure.
 
+The Stereo tab is a capture and diagnostics surface, not a scoring applet. It
+lets operators view the configured stereo pair, monitor left/right frame timing,
+and save timestamped stereo sessions for TritonAnalysis calibration.
+
 ## Safety Notes
 
 TritonPilot can send arm/disarm edges, hold-mode requests, gain changes, and

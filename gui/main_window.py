@@ -63,6 +63,7 @@ from gui.sensor_panel import SensorPanel
 from gui.instruments import InstrumentPanel, HoldTestPanel
 from gui.raw_sensor_page import RawSensorPage
 from gui.management_page import ManagementPage
+from gui.stereo_page import StereoPage
 
 
 class MainWindow(QMainWindow):
@@ -250,27 +251,52 @@ class MainWindow(QMainWindow):
         except Exception:
             pass
 
+    def _latest_camera_packet(self, stream_name: str):
+        try:
+            cam = getattr(self.cam_mgr, "_opened", {}).get(stream_name)
+            if cam is None:
+                return None
+            latest = getattr(cam, "latest_frame_packet", None)
+            if callable(latest):
+                return latest()
+        except Exception:
+            return None
+        return None
+
     def _on_page_tab_changed(self, index: int) -> None:
         index = int(index)
         if index == 1:
-            self._set_center_page("reverse_drive")
+            self._set_center_page("stereo")
         elif index == 2:
-            self._set_center_page("hold_test")
+            self._set_center_page("reverse_drive")
         elif index == 3:
-            self._set_center_page("raw_sensors")
+            self._set_center_page("hold_test")
         elif index == 4:
+            self._set_center_page("raw_sensors")
+        elif index == 5:
             self._set_center_page("management")
         else:
             self._set_center_page("pilot")
 
     def _set_center_page(self, page_name: str, *, announce: bool = True) -> None:
         page_name = str(page_name)
-        if page_name not in {"pilot", "reverse_drive", "hold_test", "raw_sensors", "management"}:
+        if page_name not in {"pilot", "stereo", "reverse_drive", "hold_test", "raw_sensors", "management"}:
             page_name = "pilot"
         if page_name == getattr(self, "_active_page_name", "pilot"):
             return
 
         previous_page = getattr(self, "_active_page_name", "")
+        if previous_page == "stereo" and page_name != "stereo":
+            if self.video_panel is not None and getattr(self, "_stereo_layout_restore_snapshot", None) is not None:
+                try:
+                    self.video_panel.restore_layout_snapshot(
+                        self._stereo_layout_restore_snapshot,
+                        save=False,
+                        emit=True,
+                    )
+                except Exception:
+                    pass
+                self._stereo_layout_restore_snapshot = None
         if previous_page == "reverse_drive" and page_name != "reverse_drive":
             if self.video_panel is not None:
                 self._pilot_layout_count_restore = int(self.video_panel.layout_count())
@@ -292,6 +318,20 @@ class MainWindow(QMainWindow):
             else:
                 self._reverse_page_owns_mode = False
             self._page_stack.setCurrentWidget(self._reverse_page)
+        elif page_name == "stereo":
+            if self.video_panel is not None:
+                if self._active_page_name == "pilot":
+                    self._pilot_layout_count_restore = int(self.video_panel.layout_count())
+                try:
+                    self._stereo_layout_restore_snapshot = self.video_panel.layout_snapshot()
+                except Exception:
+                    self._stereo_layout_restore_snapshot = None
+                self.video_panel.set_layout_controls_visible(True)
+                self.video_panel.set_layout_controls_enabled(False)
+                self._resume_video_panel()
+                self._attach_shared_video_panel(self._stereo_page.video_host_layout)
+                self._apply_stereo_pair_view()
+            self._page_stack.setCurrentWidget(self._stereo_page)
         elif page_name == "hold_test":
             if self.video_panel is not None:
                 if self._active_page_name == "pilot":
@@ -342,7 +382,14 @@ class MainWindow(QMainWindow):
         prev = False
         try:
             prev = self._page_tabs.blockSignals(True)
-            tab_index = {"pilot": 0, "reverse_drive": 1, "hold_test": 2, "raw_sensors": 3, "management": 4}.get(page_name, 0)
+            tab_index = {
+                "pilot": 0,
+                "stereo": 1,
+                "reverse_drive": 2,
+                "hold_test": 3,
+                "raw_sensors": 4,
+                "management": 5,
+            }.get(page_name, 0)
             self._page_tabs.setCurrentIndex(tab_index)
         finally:
             try:
@@ -354,12 +401,34 @@ class MainWindow(QMainWindow):
         if announce:
             label = {
                 "pilot": "Pilot",
+                "stereo": "Stereo",
                 "reverse_drive": "Reverse Drive",
                 "hold_test": "Hold Test",
                 "raw_sensors": "Raw Sensors",
                 "management": "Vehicle Setup",
             }.get(page_name, "Pilot")
             self.statusBar().showMessage(f"Switched to {label} page", 3000)
+
+    def _on_stereo_pair_changed(self, _pair) -> None:
+        if getattr(self, "_active_page_name", "") == "stereo":
+            self._apply_stereo_pair_view()
+
+    def _apply_stereo_pair_view(self) -> None:
+        if self.video_panel is None or self._stereo_page is None:
+            return
+        pair = self._stereo_page.current_pair()
+        if pair is None:
+            return
+        try:
+            self.video_panel.apply_temporary_layout(
+                2,
+                [pair.left, pair.right],
+                active_name=pair.left,
+                emit=True,
+            )
+            self._resume_video_panel()
+        except Exception:
+            pass
 
     def __init__(self, streams_path: str, parent=None):
         super().__init__(parent)
@@ -551,6 +620,7 @@ class MainWindow(QMainWindow):
         self._pilot_layout_count_restore = 4
         if self.video_panel is not None:
             self._pilot_layout_count_restore = int(self.video_panel.layout_count())
+        self._stereo_layout_restore_snapshot: dict | None = None
         self._reverse_page_owns_mode: bool = False
         self._active_page_name = ""
 
@@ -564,6 +634,7 @@ class MainWindow(QMainWindow):
         self._page_tabs.setDocumentMode(True)
         self._page_tabs.setExpanding(False)
         self._page_tabs.addTab("Pilot")
+        self._page_tabs.addTab("Stereo")
         self._page_tabs.addTab("Reverse Drive")
         self._page_tabs.addTab("Hold Test")
         self._page_tabs.addTab("Raw Sensors")
@@ -623,6 +694,18 @@ class MainWindow(QMainWindow):
             )
         reverse_outer.addWidget(self._reverse_video_host, 1)
         self._page_stack.addWidget(self._reverse_page)
+
+        self._stereo_page = StereoPage(
+            streams_path=streams_path,
+            manager=self.cam_mgr,
+            output_root_provider=lambda: self._recordings_output_dir()[0],
+            packet_provider=self._latest_camera_packet,
+        )
+        self._stereo_page.pairSelectionChanged.connect(self._on_stereo_pair_changed)
+        self._stereo_page.statusMessage.connect(lambda msg, timeout: self.statusBar().showMessage(msg, int(timeout)))
+        if self.video_panel is None:
+            self._stereo_page.attach_video_placeholder("Video unavailable.")
+        self._page_stack.addWidget(self._stereo_page)
 
         self._hold_test_page = QWidget()
         hold_outer = QHBoxLayout(self._hold_test_page)
@@ -1715,6 +1798,10 @@ class MainWindow(QMainWindow):
             pass
         try:
             self._management_page.shutdown()
+        except Exception:
+            pass
+        try:
+            self._stereo_page.shutdown()
         except Exception:
             pass
         try:

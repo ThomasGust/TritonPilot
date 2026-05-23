@@ -39,7 +39,14 @@ configuration does not change the normal pilot video layout.
 
 ## Capture Workflow
 
-Run this on the pilot computer after TritonOS video RPC is reachable:
+In TritonPilot, open the Stereo tab. The tab shows the selected stereo pair,
+left/right stream settings, live frame age, pair delta, rig metadata, and
+capture controls. When the tab is active, the shared video panel is temporarily
+set to the left/right pair and the normal pilot layout is restored when leaving
+the tab.
+
+The command-line capture helper is also available on the pilot computer after
+TritonOS video RPC is reachable:
 
 ```powershell
 python -m tools.stereo_capture --list-pairs

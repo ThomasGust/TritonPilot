@@ -85,7 +85,12 @@ class _FakeRemoteCameraManager:
     ]
 
     def __init__(self, _path):
-        pass
+        self.stream_defs = {
+            "Primary Camera": {"name": "Primary Camera", "width": 1920, "height": 1080, "fps": 30, "video_format": "h264", "port": 5000},
+            "Aux Camera": {"name": "Aux Camera", "width": 1920, "height": 1080, "fps": 30, "video_format": "h264", "port": 5002},
+            "Arm Camera": {"name": "Arm Camera", "width": 1920, "height": 1080, "fps": 30, "video_format": "h264", "port": 5001},
+            "Back Gripper Camera": {"name": "Back Gripper Camera", "width": 1920, "height": 1080, "fps": 30, "video_format": "h264", "port": 5003},
+        }
 
     def list_available(self):
         return list(self.default_pane_order)
@@ -244,6 +249,70 @@ def test_reverse_drive_page_keeps_pilot_video_layout(monkeypatch, tmp_path):
         win._set_center_page("pilot", announce=False)
         app.processEvents()
         assert panel.layout_count() == 2
+    finally:
+        win.close()
+        app.processEvents()
+
+
+def test_stereo_page_applies_configured_pair_layout(monkeypatch, tmp_path):
+    app = _app()
+    streams_path = tmp_path / "streams.json"
+    streams_path.write_text(
+        """
+        {
+          "streams": [
+            {"name": "Primary Camera"},
+            {"name": "Aux Camera"},
+            {"name": "Arm Camera"},
+            {"name": "Back Gripper Camera"}
+          ],
+          "stereo_pairs": [
+            {
+              "name": "Forward Stereo",
+              "left": "Primary Camera",
+              "right": "Aux Camera",
+              "rig_id": "rig-a",
+              "max_pair_delta_ms": 25,
+              "metadata": {"baseline_mm": 120, "sync_notes": "software paired"}
+            }
+          ]
+        }
+        """,
+        encoding="utf-8",
+    )
+
+    monkeypatch.setattr(main_window, "QSettings", lambda *args, **kwargs: _FakeSettings())
+    monkeypatch.setattr(main_window, "PilotPublisherService", _FakePilotService)
+    monkeypatch.setattr(main_window, "SensorSubscriberService", _FakeSensorService)
+    monkeypatch.setattr(main_window, "RemoteCameraManager", _FakeRemoteCameraManager)
+    monkeypatch.setattr(main_window, "VideoTabs", _FakeVideoPanel)
+    monkeypatch.setattr(main_window, "HoldTestPanel", _SimplePage)
+    monkeypatch.setattr(main_window, "ManagementPage", _SimplePage)
+    monkeypatch.setattr(main_window.threading, "Thread", _NoopThread)
+
+    win = main_window.MainWindow(str(streams_path))
+    try:
+        app.processEvents()
+        panel = win.video_panel
+        assert panel is not None
+
+        win._set_center_page("stereo", announce=False)
+        app.processEvents()
+
+        assert win._page_tabs.tabText(win._page_tabs.currentIndex()) == "Stereo"
+        assert panel.apply_temporary_layout_calls[-1][0] == (
+            2,
+            ["Primary Camera", "Aux Camera"],
+        )
+        assert panel.apply_temporary_layout_calls[-1][1]["active_name"] == "Primary Camera"
+        assert panel.controls_enabled is False
+        assert win._stereo_page.rig_lbl.text() == "rig-a"
+        assert win._stereo_page.baseline_lbl.text() == "120 mm"
+
+        win._set_center_page("pilot", announce=False)
+        app.processEvents()
+
+        assert panel.restore_layout_snapshot_calls
     finally:
         win.close()
         app.processEvents()
