@@ -10,6 +10,7 @@ import json
 import logging
 import socket
 import threading
+from dataclasses import dataclass
 
 import numpy as np
 
@@ -20,6 +21,17 @@ from video.frame_rotation import normalize_rotation_deg
 from video.rov_streams import ROVStreams
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass(frozen=True)
+class CameraFramePacket:
+    """Decoded camera frame with receiver-side timing metadata."""
+
+    source_name: str
+    frame_bgr: np.ndarray
+    seq: int
+    monotonic_ts: float
+    wall_ts: float
 
 
 class RemoteCv2Camera:
@@ -156,11 +168,36 @@ class RemoteCv2Camera:
 
     def read(self):
         """Return ``(ok, frame)`` like ``cv2.VideoCapture.read``."""
-        fr = self.rx.read_frame()
-        if fr is None:
+        packet = self.read_frame_packet()
+        if packet is None:
             return False, None
-        img = np.frombuffer(fr, dtype=np.uint8).reshape((self.height, self.width, 3))
-        return True, img
+        return True, packet.frame_bgr
+
+    def _decode_packet(self, packet) -> CameraFramePacket:
+        img = np.frombuffer(packet.data, dtype=np.uint8).reshape((self.height, self.width, 3))
+        return CameraFramePacket(
+            source_name=self.name,
+            frame_bgr=img,
+            seq=int(packet.seq),
+            monotonic_ts=float(packet.monotonic_ts),
+            wall_ts=float(packet.wall_ts),
+        )
+
+    def read_frame_packet(self) -> CameraFramePacket | None:
+        """Return the next unread decoded frame with timing metadata."""
+
+        packet = self.rx.read_frame_packet()
+        if packet is None:
+            return None
+        return self._decode_packet(packet)
+
+    def latest_frame_packet(self) -> CameraFramePacket | None:
+        """Return the latest decoded frame without consuming display delivery state."""
+
+        packet = self.rx.latest_frame_packet()
+        if packet is None:
+            return None
+        return self._decode_packet(packet)
 
     def release(self, rx_grace_s: float = 0.15):
         """Stop the local receiver and ask TritonOS to stop transmitting."""

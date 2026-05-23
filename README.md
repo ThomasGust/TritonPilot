@@ -55,6 +55,7 @@ input/              Controller discovery and PilotFrame publishing
 telemetry/          Sensor subscriber and topside attitude estimator
 video/              GStreamer receive path, camera manager, frame correction
 recording/          Video writer, snapshots, JSONL logs, raw CSV capture
+stereo/             Stereo pair configuration and capture-session writer
 network/            Management RPC, local network selection, ZMQ helpers
 schema/             Shared pilot-control wire schema
 tools/              Controller, telemetry, video, and tether diagnostics

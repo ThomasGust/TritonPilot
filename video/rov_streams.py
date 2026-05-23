@@ -121,6 +121,10 @@ class ROVStreams:
     def list_status(self):
         return self._call("list_streams")
 
+    def list_stream_status(self):
+        """Return ROV-side stream config plus timing diagnostics when supported."""
+        return self._call("list_stream_status")
+
     def net_info(self):
         """Return ROV-side interface/IP info (best-effort)."""
         return self._call("net_info")

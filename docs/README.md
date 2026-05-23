@@ -18,6 +18,8 @@ stays close to the code.
   maintainers should extend the code.
 - [Configuration Guide](CONFIGURATION.md) - Environment variables,
   `data/streams.json`, controller mapping, video correction, and save paths.
+- [Stereo Capture](STEREO_CAPTURE.md) - Stereo pair configuration, calibration
+  capture sessions, manifest format, and quality checklist.
 - [Testing And Troubleshooting](TESTING_AND_TROUBLESHOOTING.md) - Unit tests,
   focused diagnostics, and common failure symptoms.
 

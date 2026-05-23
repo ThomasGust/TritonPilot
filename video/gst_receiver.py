@@ -179,6 +179,16 @@ class RxConfig:
     extra: Dict[str, Any] = field(default_factory=dict)
 
 
+@dataclass(frozen=True)
+class RawFramePacket:
+    """One decoded raw frame with receiver-side timing metadata."""
+
+    data: bytes
+    seq: int
+    monotonic_ts: float
+    wall_ts: float
+
+
 class ReceiverProcess:
     """Own and monitor one ``gst-launch-1.0`` receiver subprocess."""
 
@@ -203,6 +213,7 @@ class ReceiverProcess:
         self._latest_seq: int = 0
         self._last_delivered_seq: int = 0
         self._latest_frame_ts: float = 0.0
+        self._latest_frame_monotonic_ts: float = 0.0
         self._reader_thread: Optional[threading.Thread] = None
         self._stop_reader = threading.Event()
 
@@ -221,6 +232,7 @@ class ReceiverProcess:
                 self._latest_seq = 0
                 self._last_delivered_seq = 0
                 self._latest_frame_ts = 0.0
+                self._latest_frame_monotonic_ts = 0.0
 
             cmd = self._build_cmd(self.cfg)
             _log_receiver_start(self.cfg, cmd)
@@ -331,33 +343,16 @@ class ReceiverProcess:
             if frame is None:
                 break
             # Just store it; no per-byte work here.
+            now_wall = time.time()
+            now_monotonic = time.monotonic()
             with self._raw_buffer_lock:
                 self._latest_frame = frame
                 self._latest_seq += 1
-                self._latest_frame_ts = time.time()
+                self._latest_frame_ts = now_wall
+                self._latest_frame_monotonic_ts = now_monotonic
 
-    def read_frame(self) -> Optional[bytes]:
-        """
-        Return the latest frame, applying channel order if needed.
-        This keeps the inner reader fast but still lets us fix cameras like your GRB one.
-        """
-        if self.cfg.mode != "raw":
-            raise RuntimeError("read_frame() only valid in mode='raw'")
-
-        with self._raw_buffer_lock:
-            frame = self._latest_frame
-            seq = self._latest_seq
-
-        # If we haven't received anything new since the last read, return None.
-        # This allows upstream code to detect stalls and reconnect automatically.
-        if frame is None or seq == self._last_delivered_seq:
-            return None
-
-        # Mark delivered *before* any expensive work.
-        self._last_delivered_seq = seq
-
-        if frame is None:
-            return None
+    def _ordered_frame_bytes(self, frame: bytes) -> bytes:
+        """Return frame bytes after applying configured channel order."""
 
         order = self.cfg.channel_order.upper()
         if order == "BGR":
@@ -389,6 +384,67 @@ class ReceiverProcess:
             return frame
 
         return arr.tobytes()
+
+    def _snapshot_packet(self, *, consume: bool) -> Optional[RawFramePacket]:
+        if self.cfg.mode != "raw":
+            raise RuntimeError("read_frame() only valid in mode='raw'")
+
+        with self._raw_buffer_lock:
+            frame = self._latest_frame
+            seq = self._latest_seq
+            monotonic_ts = self._latest_frame_monotonic_ts
+            wall_ts = self._latest_frame_ts
+
+        # If we haven't received anything new since the last read, return None.
+        # This allows upstream code to detect stalls and reconnect automatically.
+        if frame is None:
+            return None
+
+        if consume:
+            with self._raw_buffer_lock:
+                if seq == self._last_delivered_seq:
+                    return None
+                # Mark delivered *before* any expensive work.
+                self._last_delivered_seq = seq
+
+        data = self._ordered_frame_bytes(frame)
+        return RawFramePacket(
+            data=data,
+            seq=seq,
+            monotonic_ts=monotonic_ts,
+            wall_ts=wall_ts,
+        )
+
+    def read_frame_packet(self) -> Optional[RawFramePacket]:
+        """
+        Return the next unread frame with receiver-side timing metadata.
+
+        This is the timestamped equivalent of ``read_frame()``. It still
+        consumes delivery state, so UI code can use it for stall detection.
+        """
+
+        return self._snapshot_packet(consume=True)
+
+    def latest_frame_packet(self) -> Optional[RawFramePacket]:
+        """
+        Return the most recent frame without consuming delivery state.
+
+        Stereo capture uses this so it can share a live stream with the pilot UI
+        without stealing frames from the display worker.
+        """
+
+        return self._snapshot_packet(consume=False)
+
+    def read_frame(self) -> Optional[bytes]:
+        """
+        Return the latest frame, applying channel order if needed.
+        This keeps the inner reader fast but still lets us fix cameras like your GRB one.
+        """
+
+        packet = self.read_frame_packet()
+        if packet is None:
+            return None
+        return packet.data
 
     # ---------------- logging ---------------- #
     def _log_stdout(self):

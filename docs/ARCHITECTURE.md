@@ -140,6 +140,11 @@ Recording is intentionally local to the pilot computer:
 
 Captured media and data are the handoff point to TritonAnalysis.
 
+Stereo capture follows the same handoff rule. TritonPilot can save timestamped
+left/right image pairs and a `manifest.json` from configured stereo streams,
+but calibration, rectification, disparity, and measurement run in
+TritonAnalysis.
+
 ## Threading Model
 
 Qt runs the main GUI event loop. Controller polling, sensor subscription,
