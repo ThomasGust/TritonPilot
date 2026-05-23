@@ -49,6 +49,7 @@ class StereoCaptureSession:
         self._frame_index = 0
         self._last_left_seq: int | None = None
         self._last_right_seq: int | None = None
+        self._last_pair_key: tuple[int, int] | None = None
         self._started_wall_ts: float | None = None
         self._manifest: dict[str, Any] = {}
 
@@ -91,15 +92,11 @@ class StereoCaptureSession:
         best_delta_s: float | None = None
 
         while time.monotonic() <= deadline:
-            left = self._left_camera.latest_frame_packet()
-            right = self._right_camera.latest_frame_packet()
-            if left is None or right is None:
+            match = self._best_recent_pair(require_fresh=require_fresh)
+            if match is None:
                 time.sleep(0.005)
                 continue
-            if require_fresh and left.seq == self._last_left_seq and right.seq == self._last_right_seq:
-                time.sleep(0.005)
-                continue
-
+            left, right = match
             delta_s = abs(float(left.monotonic_ts) - float(right.monotonic_ts))
             best_delta_s = delta_s if best_delta_s is None else min(best_delta_s, delta_s)
             if delta_s <= self.pair.max_pair_delta_s:
@@ -121,6 +118,35 @@ class StereoCaptureSession:
             if idx < int(count) - 1:
                 time.sleep(max(0.0, float(interval_s)))
         return captures
+
+    def _recent_packets(self, camera) -> list[CameraFramePacket]:
+        recent = getattr(camera, "recent_frame_packets", None)
+        if callable(recent):
+            packets = recent(max_age_s=max(0.25, self.pair.max_pair_delta_s + 0.2))
+            if packets:
+                return list(packets)
+        latest = camera.latest_frame_packet()
+        return [] if latest is None else [latest]
+
+    def _best_recent_pair(self, *, require_fresh: bool) -> tuple[CameraFramePacket, CameraFramePacket] | None:
+        left_frames = self._recent_packets(self._left_camera)
+        right_frames = self._recent_packets(self._right_camera)
+        best: tuple[float, CameraFramePacket, CameraFramePacket] | None = None
+        for left in left_frames:
+            for right in right_frames:
+                pair_key = (int(left.seq), int(right.seq))
+                if require_fresh and pair_key == self._last_pair_key:
+                    continue
+                # Avoid repeatedly pairing either side with the same old frame
+                # when both cameras are live but one side briefly stalls.
+                if require_fresh and (left.seq == self._last_left_seq or right.seq == self._last_right_seq):
+                    continue
+                delta_s = abs(float(left.monotonic_ts) - float(right.monotonic_ts))
+                if best is None or delta_s < best[0]:
+                    best = (delta_s, left, right)
+        if best is None:
+            return None
+        return best[1], best[2]
 
     def _stream_def(self, name: str) -> dict[str, Any]:
         try:
@@ -175,6 +201,7 @@ class StereoCaptureSession:
 
         self._last_left_seq = int(left.seq)
         self._last_right_seq = int(right.seq)
+        self._last_pair_key = (int(left.seq), int(right.seq))
         record = {
             "index": self._frame_index,
             "stem": stem,

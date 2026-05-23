@@ -14,6 +14,7 @@ import subprocess
 import threading
 import time
 import logging
+from collections import deque
 from dataclasses import dataclass, asdict, field
 from typing import Dict, Optional, Any, List
 
@@ -189,6 +190,14 @@ class RawFramePacket:
     wall_ts: float
 
 
+@dataclass(frozen=True)
+class _StoredRawFrame:
+    data: bytes
+    seq: int
+    monotonic_ts: float
+    wall_ts: float
+
+
 class ReceiverProcess:
     """Own and monitor one ``gst-launch-1.0`` receiver subprocess."""
 
@@ -214,6 +223,11 @@ class ReceiverProcess:
         self._last_delivered_seq: int = 0
         self._latest_frame_ts: float = 0.0
         self._latest_frame_monotonic_ts: float = 0.0
+        try:
+            history_size = int(self.cfg.extra.get("frame_history_size", 12))
+        except Exception:
+            history_size = 12
+        self._frame_history: deque[_StoredRawFrame] = deque(maxlen=max(1, history_size))
         self._reader_thread: Optional[threading.Thread] = None
         self._stop_reader = threading.Event()
 
@@ -233,6 +247,7 @@ class ReceiverProcess:
                 self._last_delivered_seq = 0
                 self._latest_frame_ts = 0.0
                 self._latest_frame_monotonic_ts = 0.0
+                self._frame_history.clear()
 
             cmd = self._build_cmd(self.cfg)
             _log_receiver_start(self.cfg, cmd)
@@ -350,6 +365,14 @@ class ReceiverProcess:
                 self._latest_seq += 1
                 self._latest_frame_ts = now_wall
                 self._latest_frame_monotonic_ts = now_monotonic
+                self._frame_history.append(
+                    _StoredRawFrame(
+                        data=frame,
+                        seq=self._latest_seq,
+                        monotonic_ts=now_monotonic,
+                        wall_ts=now_wall,
+                    )
+                )
 
     def _ordered_frame_bytes(self, frame: bytes) -> bytes:
         """Return frame bytes after applying configured channel order."""
@@ -385,21 +408,21 @@ class ReceiverProcess:
 
         return arr.tobytes()
 
+    def _packet_from_stored(self, stored: _StoredRawFrame) -> RawFramePacket:
+        return RawFramePacket(
+            data=self._ordered_frame_bytes(stored.data),
+            seq=stored.seq,
+            monotonic_ts=stored.monotonic_ts,
+            wall_ts=stored.wall_ts,
+        )
+
     def _snapshot_packet(self, *, consume: bool) -> Optional[RawFramePacket]:
         if self.cfg.mode != "raw":
             raise RuntimeError("read_frame() only valid in mode='raw'")
 
         with self._raw_buffer_lock:
-            frame = self._latest_frame
-            seq = self._latest_seq
-            monotonic_ts = self._latest_frame_monotonic_ts
-            wall_ts = self._latest_frame_ts
-
-        # If we haven't received anything new since the last read, return None.
-        # This allows upstream code to detect stalls and reconnect automatically.
-        if frame is None:
-            return None
-
+            stored = self._frame_history[-1] if self._frame_history else None
+            seq = stored.seq if stored is not None else 0
         if consume:
             with self._raw_buffer_lock:
                 if seq == self._last_delivered_seq:
@@ -407,13 +430,24 @@ class ReceiverProcess:
                 # Mark delivered *before* any expensive work.
                 self._last_delivered_seq = seq
 
-        data = self._ordered_frame_bytes(frame)
-        return RawFramePacket(
-            data=data,
-            seq=seq,
-            monotonic_ts=monotonic_ts,
-            wall_ts=wall_ts,
-        )
+        if stored is None:
+            return None
+        return self._packet_from_stored(stored)
+
+    def recent_frame_packets(self, *, max_age_s: float = 0.5) -> list[RawFramePacket]:
+        """Return recent frames without consuming delivery state, oldest first."""
+
+        if self.cfg.mode != "raw":
+            raise RuntimeError("recent_frame_packets() only valid in mode='raw'")
+        now = time.monotonic()
+        max_age_s = max(0.0, float(max_age_s))
+        with self._raw_buffer_lock:
+            frames = [
+                stored
+                for stored in self._frame_history
+                if max_age_s <= 0.0 or (now - float(stored.monotonic_ts)) <= max_age_s
+            ]
+        return [self._packet_from_stored(stored) for stored in frames]
 
     def read_frame_packet(self) -> Optional[RawFramePacket]:
         """

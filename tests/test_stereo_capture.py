@@ -40,16 +40,21 @@ def test_load_stereo_pairs_from_streams_config(tmp_path: Path):
 
 class _FakeCamera:
     def __init__(self, name: str, seq: int, ts: float):
-        self.packet = CameraFramePacket(
-            source_name=name,
-            frame_bgr=np.full((4, 6, 3), seq, dtype=np.uint8),
-            seq=seq,
-            monotonic_ts=ts,
-            wall_ts=1000.0 + ts,
-        )
+        self.packets = [
+            CameraFramePacket(
+                source_name=name,
+                frame_bgr=np.full((4, 6, 3), seq, dtype=np.uint8),
+                seq=seq,
+                monotonic_ts=ts,
+                wall_ts=1000.0 + ts,
+            )
+        ]
 
     def latest_frame_packet(self):
-        return self.packet
+        return self.packets[-1]
+
+    def recent_frame_packets(self, *, max_age_s: float = 0.5):
+        return list(self.packets)
 
 
 class _FakeManager:
@@ -111,3 +116,48 @@ def test_stereo_capture_session_writes_pair_and_manifest(tmp_path: Path):
     assert manifest["pair"]["rig_id"] == "rig-a"
     assert len(manifest["frames"]) == 1
     assert set(manager.closed) == {"Left", "Right"}
+
+
+def test_stereo_capture_chooses_closest_buffered_frame_pair(tmp_path: Path):
+    streams_path = tmp_path / "streams.json"
+    streams_path.write_text(
+        json.dumps(
+            {
+                "streams": [{"name": "Left"}, {"name": "Right"}],
+                "stereo_pairs": [
+                    {
+                        "name": "Forward",
+                        "left": "Left",
+                        "right": "Right",
+                        "rig_id": "rig-a",
+                        "max_pair_delta_ms": 12,
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    pair = load_stereo_pairs(streams_path)[0]
+    manager = _FakeManager()
+    manager.cameras["Left"].packets = [
+        CameraFramePacket("Left", np.zeros((4, 6, 3), dtype=np.uint8), 10, 100.000, 1000.000),
+        CameraFramePacket("Left", np.zeros((4, 6, 3), dtype=np.uint8), 11, 100.033, 1000.033),
+    ]
+    manager.cameras["Right"].packets = [
+        CameraFramePacket("Right", np.zeros((4, 6, 3), dtype=np.uint8), 20, 100.010, 1000.010),
+        CameraFramePacket("Right", np.zeros((4, 6, 3), dtype=np.uint8), 21, 100.060, 1000.060),
+    ]
+    session = StereoCaptureSession(
+        manager,  # type: ignore[arg-type]
+        pair,
+        output_root=tmp_path,
+        session_name="buffered-session",
+    )
+
+    session.start()
+    record = session.capture_once(wait_s=0.1)
+    session.stop()
+
+    assert record["left"]["seq"] == 10
+    assert record["right"]["seq"] == 20
+    assert record["pair_delta_ms"] == pytest.approx(10.0)

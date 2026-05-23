@@ -1,4 +1,4 @@
-from video.gst_receiver import ReceiverProcess, RxConfig
+from video.gst_receiver import ReceiverProcess, RxConfig, _StoredRawFrame
 
 
 def _receiver(monkeypatch, *, channel_order: str = "BGR") -> ReceiverProcess:
@@ -20,6 +20,14 @@ def _seed_frame(receiver: ReceiverProcess, data: bytes = b"\x01\x02\x03\x04\x05\
         receiver._latest_seq = 7
         receiver._latest_frame_ts = 123.5
         receiver._latest_frame_monotonic_ts = 45.25
+        receiver._frame_history.append(
+            _StoredRawFrame(
+                data=data,
+                seq=7,
+                monotonic_ts=45.25,
+                wall_ts=123.5,
+            )
+        )
 
 
 def test_latest_frame_packet_does_not_consume_delivery_state(monkeypatch):

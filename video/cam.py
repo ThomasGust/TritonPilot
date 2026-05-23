@@ -199,6 +199,16 @@ class RemoteCv2Camera:
             return None
         return self._decode_packet(packet)
 
+    def recent_frame_packets(self, *, max_age_s: float = 0.5) -> list[CameraFramePacket]:
+        """Return recent decoded frames without consuming display delivery state."""
+
+        try:
+            packets = self.rx.recent_frame_packets(max_age_s=max_age_s)
+        except AttributeError:
+            latest = self.latest_frame_packet()
+            return [] if latest is None else [latest]
+        return [self._decode_packet(packet) for packet in packets]
+
     def release(self, rx_grace_s: float = 0.15):
         """Stop the local receiver and ask TritonOS to stop transmitting."""
         # Stop local receiver first (tends to unblock quickly even if ROV is slow).
