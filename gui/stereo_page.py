@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import time
 from dataclasses import replace
 from pathlib import Path
@@ -11,6 +12,7 @@ from PyQt6.QtCore import QThread, QTimer, Qt, pyqtSignal
 from PyQt6.QtWidgets import (
     QComboBox,
     QDoubleSpinBox,
+    QFileDialog,
     QFrame,
     QGridLayout,
     QHBoxLayout,
@@ -125,6 +127,7 @@ class StereoPage(QWidget):
         self._capture_worker: _CaptureWorker | None = None
         self._last_manifest_path: str = ""
         self._active_session_name: str = ""
+        self._active_output_root: Path | None = None
 
         self._build_ui()
         self.reload_pairs(emit=False)
@@ -231,8 +234,11 @@ class StereoPage(QWidget):
         self.session_edit.setClearButtonEnabled(True)
         self.new_session_btn = QPushButton("New Session")
         self.new_session_btn.clicked.connect(self._new_capture_session)
+        self.resume_session_btn = QPushButton("Resume Session")
+        self.resume_session_btn.clicked.connect(self._choose_resume_session)
         session_row = QHBoxLayout()
         session_row.addWidget(self.session_edit, 1)
+        session_row.addWidget(self.resume_session_btn, 0)
         session_row.addWidget(self.new_session_btn, 0)
         capture_card.body.addWidget(QLabel("Session"))
         capture_card.body.addLayout(session_row)
@@ -424,12 +430,17 @@ class StereoPage(QWidget):
 
     def _set_capture_enabled(self, enabled: bool) -> None:
         busy = self._capture_worker is not None and self._capture_worker.isRunning()
-        for widget in (self.capture_one_btn, self.capture_burst_btn, self.new_session_btn):
+        for widget in (self.capture_one_btn, self.capture_burst_btn):
             widget.setEnabled(bool(enabled) and not busy)
+        session_enabled = self.current_pair() is not None and not busy
+        for widget in (self.resume_session_btn, self.new_session_btn):
+            widget.setEnabled(session_enabled)
 
     def _resolve_session_name(self) -> str:
         typed = self.session_edit.text().strip()
         if typed:
+            if self._active_session_name and typed != self._active_session_name:
+                self._active_output_root = None
             self._active_session_name = typed
             return typed
         if not self._active_session_name:
@@ -442,10 +453,77 @@ class StereoPage(QWidget):
             self.statusMessage.emit("Stereo capture already running", 3000)
             return
         self._active_session_name = ""
+        self._active_output_root = None
         self.session_edit.clear()
         self.frames_table.setRowCount(0)
         self.output_lbl.setText("-")
         self.statusMessage.emit("Ready for a new stereo capture session", 3000)
+
+    def _choose_resume_session(self) -> None:
+        try:
+            output_root = Path(self.output_root_provider())
+        except Exception:
+            output_root = Path(DEFAULT_RECORDINGS_DIR)
+        start_dir = output_root / "stereo_sessions"
+        path, _filter = QFileDialog.getOpenFileName(
+            self,
+            "Resume stereo capture session",
+            str(start_dir if start_dir.exists() else output_root),
+            "Stereo manifest (manifest.json);;JSON files (*.json);;All files (*)",
+        )
+        if path:
+            self._load_session_manifest(Path(path))
+
+    def _load_session_manifest(self, manifest_path: Path) -> bool:
+        path = Path(manifest_path)
+        if path.is_dir():
+            path = path / "manifest.json"
+        if not path.exists():
+            self.statusMessage.emit(f"Stereo manifest not found: {path}", 5000)
+            return False
+        try:
+            manifest = json.loads(path.read_text(encoding="utf-8"))
+        except Exception as exc:
+            self.statusMessage.emit(f"Could not read stereo manifest: {exc}", 7000)
+            return False
+
+        pair = self.current_pair()
+        if pair is not None:
+            manifest_pair = manifest.get("pair") or {}
+            mismatches = [
+                key
+                for key, expected in (
+                    ("name", pair.name),
+                    ("left", pair.left),
+                    ("right", pair.right),
+                    ("rig_id", pair.rig_id),
+                )
+                if str(manifest_pair.get(key, "")) != str(expected)
+            ]
+            if mismatches:
+                self.statusMessage.emit(
+                    "Manifest belongs to a different stereo pair; select the matching pair or start a new session.",
+                    7000,
+                )
+                return False
+
+        session_dir = path.parent
+        if session_dir.parent.name != "stereo_sessions":
+            self.statusMessage.emit("Stereo manifest must be inside a stereo_sessions/<session> folder.", 7000)
+            return False
+
+        self._active_session_name = session_dir.name
+        self._active_output_root = session_dir.parent.parent
+        self.session_edit.setText(self._active_session_name)
+        self.output_lbl.setText(str(path))
+        self.frames_table.setRowCount(0)
+        for frame in manifest.get("frames") or []:
+            self._on_capture_progress(frame)
+        self.statusMessage.emit(
+            f"Resumed stereo session '{self._active_session_name}' with {self.frames_table.rowCount()} pair(s)",
+            5000,
+        )
+        return True
 
     def _start_capture(self, *, count: int) -> None:
         pair = self.current_pair()
@@ -455,12 +533,15 @@ class StereoPage(QWidget):
         if self._capture_worker is not None and self._capture_worker.isRunning():
             self.statusMessage.emit("Stereo capture already running", 3000)
             return
-        try:
-            output_root = Path(self.output_root_provider())
-        except Exception as exc:
-            self.statusMessage.emit(f"Could not prepare stereo output: {exc}", 5000)
-            return
         session_name = self._resolve_session_name()
+        if self._active_output_root is not None:
+            output_root = self._active_output_root
+        else:
+            try:
+                output_root = Path(self.output_root_provider())
+            except Exception as exc:
+                self.statusMessage.emit(f"Could not prepare stereo output: {exc}", 5000)
+                return
         self._capture_worker = _CaptureWorker(
             self.manager,
             pair,

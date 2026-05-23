@@ -1,4 +1,5 @@
 import os
+import json
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
@@ -315,6 +316,78 @@ def test_stereo_page_applies_configured_pair_layout(monkeypatch, tmp_path):
         assert panel.restore_layout_snapshot_calls
     finally:
         win.close()
+        app.processEvents()
+
+
+def test_stereo_page_resumes_existing_capture_session(tmp_path):
+    app = _app()
+    from gui.stereo_page import StereoPage
+
+    streams_path = tmp_path / "streams.json"
+    streams_path.write_text(
+        json.dumps(
+            {
+                "streams": [{"name": "Primary Camera"}, {"name": "Aux Camera"}],
+                "stereo_pairs": [
+                    {
+                        "name": "Forward Stereo",
+                        "left": "Primary Camera",
+                        "right": "Aux Camera",
+                        "rig_id": "rig-a",
+                        "max_pair_delta_ms": 25,
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    output_root = tmp_path / "recordings"
+    session_dir = output_root / "stereo_sessions" / "pool-session"
+    session_dir.mkdir(parents=True)
+    manifest_path = session_dir / "manifest.json"
+    manifest_path.write_text(
+        json.dumps(
+            {
+                "schema": "tritonpilot.stereo_capture_manifest",
+                "session_name": "pool-session",
+                "pair": {
+                    "name": "Forward Stereo",
+                    "left": "Primary Camera",
+                    "right": "Aux Camera",
+                    "rig_id": "rig-a",
+                },
+                "frames": [
+                    {
+                        "index": 1,
+                        "stem": "pair_000001",
+                        "pair_delta_ms": 12.5,
+                        "left": {"seq": 10},
+                        "right": {"seq": 11},
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    page = StereoPage(
+        streams_path=str(streams_path),
+        manager=_FakeRemoteCameraManager(str(streams_path)),
+        output_root_provider=lambda: output_root,
+    )
+    try:
+        app.processEvents()
+
+        assert page._load_session_manifest(manifest_path) is True
+
+        assert page.session_edit.text() == "pool-session"
+        assert page.output_lbl.text() == str(manifest_path)
+        assert page.frames_table.rowCount() == 1
+        assert page.frames_table.item(0, 0).text() == "1"
+        assert page.frames_table.item(0, 1).text() == "12.5 ms"
+        assert page._active_output_root == output_root
+    finally:
+        page.close()
         app.processEvents()
 
 

@@ -78,6 +78,11 @@ pressed or the session name is changed. That means repeated `Capture Pair`
 clicks build one calibration dataset with many poses instead of one manifest
 per pose.
 
+After closing TritonPilot, use `Resume Session` in the Stereo tab and choose
+that session's `manifest.json` to continue the same dataset. Only resume a
+session when the stereo mount, camera ordering, stream resolution, lens
+settings, and board-facing orientation have not changed.
+
 ## Quality Checklist
 
 - Use the final rigid mount before any final calibration.
