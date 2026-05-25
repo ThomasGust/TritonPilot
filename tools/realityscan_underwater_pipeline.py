@@ -19,6 +19,8 @@ import shutil
 import subprocess
 import sys
 import time
+import uuid
+import xml.etree.ElementTree as ET
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -38,6 +40,40 @@ DEFAULT_REALITYSCAN_GLOBS = (
     r"C:\Program Files\Capturing Reality\RealityScan*\RealityScan.exe",
     r"C:\Program Files\Capturing Reality\RealityCapture*\RealityCapture.exe",
 )
+MISSING_REALITYSCAN_OUTPUT_EXIT_CODE = 4
+RECONSTRUCTION_PRESETS: dict[str, dict[str, object]] = {
+    "balanced": {},
+    "high-detail": {
+        "target_fps": 10.0,
+        "max_frames": 720,
+        "min_frames": 180,
+        "quality_quantile": 0.02,
+        "model_quality": "high",
+        "normal_downscale": 1,
+        "simplify_triangles": 4_000_000,
+        "max_features_per_mpx": 40_000,
+        "max_features_per_image": 160_000,
+        "preselector_features": 40_000,
+        "texture_count": 6,
+        "texture_resolution": 8192,
+        "timeout_hours": 12.0,
+    },
+    "max-detail": {
+        "target_fps": 12.0,
+        "max_frames": 1000,
+        "min_frames": 240,
+        "quality_quantile": 0.0,
+        "model_quality": "high",
+        "normal_downscale": 1,
+        "simplify_triangles": 0,
+        "max_features_per_mpx": 60_000,
+        "max_features_per_image": 240_000,
+        "preselector_features": 60_000,
+        "texture_count": 8,
+        "texture_resolution": 8192,
+        "timeout_hours": 16.0,
+    },
+}
 
 
 @dataclass(frozen=True)
@@ -65,6 +101,8 @@ class FrameMetric:
     quality: float = 0.0
     motion_delta: float = 0.0
     fingerprint: np.ndarray | None = None
+    source_stem: str = ""
+    pair_delta_ms: float = 0.0
 
 
 @dataclass(frozen=True)
@@ -129,6 +167,87 @@ class OutputPaths:
     metrics_csv: Path
     manifest_json: Path
     contact_sheet: Path
+
+
+@dataclass(frozen=True)
+class StereoImagePair:
+    """One synchronized left/right still pair from a TritonPilot stereo session."""
+
+    index: int
+    stem: str
+    left_path: Path
+    right_path: Path
+    timestamp_s: float
+    pair_delta_ms: float
+
+
+@dataclass(frozen=True)
+class StereoSessionData:
+    """Decoded stereo-session manifest with paths resolved to local files."""
+
+    session_dir: Path
+    manifest_path: Path
+    manifest: dict
+    pairs: list[StereoImagePair]
+    info: VideoInfo
+
+
+@dataclass(frozen=True)
+class StereoCalibration:
+    """Stereo calibration values used to write RealityScan XMP priors."""
+
+    path: Path
+    image_size: tuple[int, int]
+    rig_id: str
+    baseline_mm: float
+    left_camera_matrix: np.ndarray
+    right_camera_matrix: np.ndarray
+    left_dist_coeffs: np.ndarray
+    right_dist_coeffs: np.ndarray
+    rotation: np.ndarray
+    translation_mm: np.ndarray
+
+
+@dataclass(frozen=True)
+class FrameWriteResult:
+    """Images written for RealityScan plus a representative set for diagnostics."""
+
+    image_paths: list[Path]
+    contact_paths: list[Path]
+
+
+@dataclass(frozen=True)
+class MetricScaleResult:
+    """Summary of scaling a RealityScan model into metric stereo units."""
+
+    raw_model: Path
+    metric_model: Path
+    report: Path
+    source_xmp_dir: Path
+    real_baseline_m: float
+    reconstructed_baseline_units: float
+    reconstructed_baseline_mean_units: float
+    reconstructed_baseline_mad_units: float
+    scale_factor: float
+    pair_count: int
+    rejected_pair_count: int
+    vertex_count: int
+
+
+@dataclass(frozen=True)
+class MeshLargeFaceFilterResult:
+    """Summary of OBJ face filtering used to remove broad infill triangles."""
+
+    source_model: Path
+    output_model: Path
+    report: Path
+    face_count: int
+    measured_face_count: int
+    removed_face_count: int
+    median_face_area: float
+    area_threshold: float
+    max_removed_face_area: float
+    area_ratio: float
 
 
 def _positive_float(value: str) -> float:
@@ -296,6 +415,205 @@ def read_candidate_metrics(video_path: Path, candidate_fps: float) -> tuple[Vide
     return info, metrics
 
 
+def _load_json(path: Path) -> dict:
+    """Read a UTF-8 JSON object from disk."""
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except OSError as exc:
+        raise RuntimeError(f"Could not read JSON file: {path}") from exc
+    except json.JSONDecodeError as exc:
+        raise RuntimeError(f"Could not parse JSON file: {path}") from exc
+    if not isinstance(data, dict):
+        raise RuntimeError(f"Expected a JSON object in {path}")
+    return data
+
+
+def stereo_manifest_path(input_path: Path) -> Path | None:
+    """Return the stereo manifest path when the input looks like a stereo session."""
+    if input_path.is_dir():
+        candidate = input_path / "manifest.json"
+        return candidate if candidate.exists() else None
+    if input_path.name.lower() == "manifest.json" and input_path.exists():
+        return input_path
+    return None
+
+
+def _record_timestamp(record: dict, fallback: float) -> float:
+    """Extract the best available timestamp from one stereo manifest frame record."""
+    left = record.get("left") if isinstance(record.get("left"), dict) else {}
+    right = record.get("right") if isinstance(record.get("right"), dict) else {}
+    for key in ("wall_ts", "monotonic_ts"):
+        values = [
+            float(side[key])
+            for side in (left, right)
+            if side.get(key) is not None
+        ]
+        if values:
+            return sum(values) / len(values)
+    return fallback
+
+
+def _resolve_session_image(session_dir: Path, relative_path: object) -> Path:
+    """Resolve manifest image paths that may contain Windows separators."""
+    normalized = str(relative_path).replace("\\", "/")
+    return session_dir / Path(normalized)
+
+
+def _manifest_image_size(record: dict, session_dir: Path) -> tuple[int, int]:
+    """Return image width/height from manifest metadata or by reading the left image."""
+    left = record.get("left") if isinstance(record.get("left"), dict) else {}
+    shape = left.get("shape")
+    if isinstance(shape, list) and len(shape) >= 2:
+        return int(shape[1]), int(shape[0])
+    image = cv2.imread(str(_resolve_session_image(session_dir, record["left_path"])), cv2.IMREAD_COLOR)
+    if image is None:
+        raise RuntimeError(f"Could not read stereo image: {_resolve_session_image(session_dir, record['left_path'])}")
+    return int(image.shape[1]), int(image.shape[0])
+
+
+def load_stereo_session(input_path: Path) -> StereoSessionData:
+    """Load a TritonPilot stereo session manifest and resolve all pair paths."""
+    manifest_path = stereo_manifest_path(input_path)
+    if manifest_path is None:
+        raise RuntimeError(f"Not a stereo session directory or manifest: {input_path}")
+    session_dir = manifest_path.parent.resolve()
+    manifest = _load_json(manifest_path)
+    raw_frames = manifest.get("frames")
+    if not isinstance(raw_frames, list) or not raw_frames:
+        raise RuntimeError(f"Stereo manifest has no frames: {manifest_path}")
+
+    sorted_records = sorted(raw_frames, key=lambda item: int(item.get("index", 0)))
+    timestamps = [_record_timestamp(record, float(i)) for i, record in enumerate(sorted_records)]
+    first_ts = timestamps[0]
+    pairs: list[StereoImagePair] = []
+    for record, timestamp in zip(sorted_records, timestamps):
+        left_rel = record.get("left_path")
+        right_rel = record.get("right_path")
+        if not left_rel or not right_rel:
+            raise RuntimeError(f"Stereo manifest frame is missing image paths: {record!r}")
+        left_path = _resolve_session_image(session_dir, left_rel)
+        right_path = _resolve_session_image(session_dir, right_rel)
+        if not left_path.exists():
+            raise RuntimeError(f"Missing stereo left image: {left_path}")
+        if not right_path.exists():
+            raise RuntimeError(f"Missing stereo right image: {right_path}")
+        index = int(record.get("index", len(pairs) + 1))
+        pairs.append(
+            StereoImagePair(
+                index=index,
+                stem=str(record.get("stem") or f"pair_{index:06d}"),
+                left_path=left_path,
+                right_path=right_path,
+                timestamp_s=max(0.0, float(timestamp - first_ts)),
+                pair_delta_ms=float(record.get("pair_delta_ms") or 0.0),
+            )
+        )
+
+    width, height = _manifest_image_size(sorted_records[0], session_dir)
+    duration = max((pairs[-1].timestamp_s - pairs[0].timestamp_s) if len(pairs) > 1 else 0.0, 0.0)
+    if duration > 0 and len(pairs) > 1:
+        fps = (len(pairs) - 1) / duration
+    else:
+        fps = 1.0
+    return StereoSessionData(
+        session_dir=session_dir,
+        manifest_path=manifest_path.resolve(),
+        manifest=manifest,
+        pairs=pairs,
+        info=VideoInfo(
+            fps=fps,
+            frame_count=len(pairs),
+            width=width,
+            height=height,
+            duration_s=duration,
+        ),
+    )
+
+
+def _matrix_from_json(value: object, *, shape: tuple[int, int], label: str) -> np.ndarray:
+    """Convert a JSON matrix field to a float numpy array with a known shape."""
+    arr = np.asarray(value, dtype=np.float64)
+    if arr.shape != shape:
+        raise RuntimeError(f"Calibration field {label} has shape {arr.shape}, expected {shape}")
+    return arr
+
+
+def _dist_coeffs_from_json(value: object, *, label: str) -> np.ndarray:
+    """Convert OpenCV distortion coefficients from JSON to a flat vector."""
+    arr = np.asarray(value, dtype=np.float64).reshape(-1)
+    if arr.size < 5:
+        raise RuntimeError(f"Calibration field {label} has {arr.size} coefficients, expected at least 5")
+    return arr
+
+
+def load_stereo_calibration(path: Path) -> StereoCalibration:
+    """Load a TritonAnalysis stereo calibration JSON file."""
+    data = _load_json(path)
+    width, height = [int(v) for v in data.get("image_size", (0, 0))]
+    stereo = data.get("stereo") if isinstance(data.get("stereo"), dict) else {}
+    left = data.get("left") if isinstance(data.get("left"), dict) else {}
+    right = data.get("right") if isinstance(data.get("right"), dict) else {}
+    return StereoCalibration(
+        path=path.resolve(),
+        image_size=(width, height),
+        rig_id=str(data.get("rig_id") or "stereo_rig"),
+        baseline_mm=float(stereo.get("baseline") or np.linalg.norm(stereo.get("translation", [0, 0, 0]))),
+        left_camera_matrix=_matrix_from_json(left.get("camera_matrix"), shape=(3, 3), label="left.camera_matrix"),
+        right_camera_matrix=_matrix_from_json(right.get("camera_matrix"), shape=(3, 3), label="right.camera_matrix"),
+        left_dist_coeffs=_dist_coeffs_from_json(left.get("dist_coeffs"), label="left.dist_coeffs"),
+        right_dist_coeffs=_dist_coeffs_from_json(right.get("dist_coeffs"), label="right.dist_coeffs"),
+        rotation=_matrix_from_json(stereo.get("rotation"), shape=(3, 3), label="stereo.rotation"),
+        translation_mm=np.asarray(stereo.get("translation"), dtype=np.float64).reshape(3),
+    )
+
+
+def score_stereo_pair(pair: StereoImagePair) -> FrameMetric:
+    """Compute one conservative quality metric for a left/right stereo pair."""
+    left = cv2.imread(str(pair.left_path), cv2.IMREAD_COLOR)
+    right = cv2.imread(str(pair.right_path), cv2.IMREAD_COLOR)
+    if left is None:
+        raise RuntimeError(f"Could not read stereo left image: {pair.left_path}")
+    if right is None:
+        raise RuntimeError(f"Could not read stereo right image: {pair.right_path}")
+
+    left_metric = score_frame(left, pair.index, 1.0)
+    right_metric = score_frame(right, pair.index, 1.0)
+    if left_metric.fingerprint is not None and right_metric.fingerprint is not None:
+        fingerprint = np.hstack([left_metric.fingerprint, right_metric.fingerprint])
+    else:
+        fingerprint = left_metric.fingerprint
+    sync_score = math.exp(-((pair.pair_delta_ms / 45.0) ** 2))
+    return FrameMetric(
+        frame_index=pair.index,
+        timestamp_s=pair.timestamp_s,
+        sharpness=min(left_metric.sharpness, right_metric.sharpness),
+        contrast=(left_metric.contrast + right_metric.contrast) * 0.5,
+        brightness=(left_metric.brightness + right_metric.brightness) * 0.5,
+        feature_count=min(left_metric.feature_count, right_metric.feature_count),
+        exposure_score=min(left_metric.exposure_score, right_metric.exposure_score) * sync_score,
+        fingerprint=fingerprint,
+        source_stem=pair.stem,
+        pair_delta_ms=pair.pair_delta_ms,
+    )
+
+
+def read_stereo_session_metrics(
+    session: StereoSessionData,
+    *,
+    max_pair_delta_ms: float,
+) -> tuple[VideoInfo, list[FrameMetric]]:
+    """Score every usable pair in a stereo still-image session."""
+    metrics = [
+        score_stereo_pair(pair)
+        for pair in session.pairs
+        if max_pair_delta_ms <= 0 or pair.pair_delta_ms <= max_pair_delta_ms
+    ]
+    if not metrics:
+        raise RuntimeError("No stereo pairs passed the pair-delta filter.")
+    assign_quality(metrics)
+    return session.info, metrics
+
+
 def _mean_abs_delta(a: np.ndarray | None, b: np.ndarray | None) -> float:
     """Return a small grayscale fingerprint distance between two frames."""
     if a is None or b is None:
@@ -303,28 +621,9 @@ def _mean_abs_delta(a: np.ndarray | None, b: np.ndarray | None) -> float:
     return float(np.mean(cv2.absdiff(a, b)))
 
 
-def estimate_dark_border_crop(video_path: Path, max_crop: float, sample_count: int = 18) -> float:
-    """Estimate how much fixed dark lens/housing border to crop away."""
-    if max_crop <= 0:
-        return 0.0
-    cap, info = open_video(video_path)
-    samples: list[np.ndarray] = []
-    try:
-        if info.frame_count > 0:
-            frame_indices = [int(round(i)) for i in np.linspace(0, info.frame_count - 1, sample_count)]
-        else:
-            frame_indices = []
-        for frame_index in frame_indices:
-            cap.set(cv2.CAP_PROP_POS_FRAMES, frame_index)
-            ok, frame = cap.read()
-            if not ok:
-                continue
-            gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-            samples.append(cv2.resize(gray, (320, 180), interpolation=cv2.INTER_AREA))
-    finally:
-        cap.release()
-
-    if len(samples) < 3:
+def estimate_dark_border_crop_from_samples(samples: list[np.ndarray], max_crop: float) -> float:
+    """Estimate a crop fraction from grayscale image samples."""
+    if len(samples) < 3 or max_crop <= 0:
         return 0.0
     median = np.median(np.stack(samples, axis=0), axis=0).astype(np.uint8)
     h, w = median.shape[:2]
@@ -359,6 +658,53 @@ def estimate_dark_border_crop(video_path: Path, max_crop: float, sample_count: i
     if crop < 0.015:
         return 0.0
     return min(float(crop), max_crop)
+
+
+def estimate_dark_border_crop(video_path: Path, max_crop: float, sample_count: int = 18) -> float:
+    """Estimate how much fixed dark lens/housing border to crop away."""
+    if max_crop <= 0:
+        return 0.0
+    cap, info = open_video(video_path)
+    samples: list[np.ndarray] = []
+    try:
+        if info.frame_count > 0:
+            frame_indices = [int(round(i)) for i in np.linspace(0, info.frame_count - 1, sample_count)]
+        else:
+            frame_indices = []
+        for frame_index in frame_indices:
+            cap.set(cv2.CAP_PROP_POS_FRAMES, frame_index)
+            ok, frame = cap.read()
+            if not ok:
+                continue
+            gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+            samples.append(cv2.resize(gray, (320, 180), interpolation=cv2.INTER_AREA))
+    finally:
+        cap.release()
+
+    return estimate_dark_border_crop_from_samples(samples, max_crop)
+
+
+def estimate_stereo_dark_border_crop(
+    session: StereoSessionData,
+    max_crop: float,
+    sample_count: int = 18,
+) -> float:
+    """Estimate crop needed for the pair of stereo cameras."""
+    if max_crop <= 0:
+        return 0.0
+    if len(session.pairs) <= sample_count:
+        indices = list(range(len(session.pairs)))
+    else:
+        indices = sorted({int(round(i)) for i in np.linspace(0, len(session.pairs) - 1, sample_count)})
+    samples: list[np.ndarray] = []
+    for idx in indices:
+        pair = session.pairs[idx]
+        for path in (pair.left_path, pair.right_path):
+            image = cv2.imread(str(path), cv2.IMREAD_GRAYSCALE)
+            if image is None:
+                continue
+            samples.append(cv2.resize(image, (320, 180), interpolation=cv2.INTER_AREA))
+    return estimate_dark_border_crop_from_samples(samples, max_crop)
 
 
 def select_frames(
@@ -500,6 +846,8 @@ def make_geometry_frame(
     sharpen: float,
 ) -> np.ndarray:
     """Create the frame image used for geometry under the selected mode."""
+    if geometry_mode == "raw":
+        return frame.copy()
     if geometry_mode == "enhanced":
         return enhance_underwater(frame, wb_gain=wb_gain, clahe_clip=clahe_clip, sharpen=sharpen)
     if geometry_mode == "luma":
@@ -686,7 +1034,6 @@ def write_variant_frames(
 
             frame = crop_frame(frame, crop_fraction)
             frame = maybe_rectify(frame, spec.rectify_water, corrector)
-            texture = enhance_underwater(frame, wb_gain=wb_gain, clahe_clip=clahe_clip, sharpen=sharpen)
             geometry = make_geometry_frame(
                 frame,
                 spec.geometry_mode,
@@ -694,17 +1041,22 @@ def write_variant_frames(
                 clahe_clip=clahe_clip,
                 sharpen=sharpen,
             )
+            texture = None
+            if texture_layers or spec.cv_mask:
+                texture = enhance_underwater(frame, wb_gain=wb_gain, clahe_clip=clahe_clip, sharpen=sharpen)
             name = f"frame_{len(written):04d}_src_{frame_index:06d}_t_{metric.timestamp_s:08.3f}.jpg"
             out_path = frames_dir / name
             ok = cv2.imwrite(str(out_path), geometry, [int(cv2.IMWRITE_JPEG_QUALITY), int(jpeg_quality)])
             if not ok:
                 raise RuntimeError(f"Could not write frame: {out_path}")
             if texture_layers:
+                assert texture is not None
                 texture_path = out_path.with_name(f"{out_path.name}.texture.jpg")
                 ok = cv2.imwrite(str(texture_path), texture, [int(cv2.IMWRITE_JPEG_QUALITY), int(jpeg_quality)])
                 if not ok:
                     raise RuntimeError(f"Could not write texture layer: {texture_path}")
             if spec.cv_mask:
+                assert texture is not None
                 mask = make_cv_foreground_mask(texture, geometry)
                 mask_path = out_path.with_name(f"{out_path.name}.mask.png")
                 ok = cv2.imwrite(str(mask_path), mask)
@@ -718,6 +1070,693 @@ def write_variant_frames(
     if len(written) != len(selected):
         raise RuntimeError(f"Expected to write {len(selected)} frames, wrote {len(written)}.")
     return written
+
+
+def _format_float(value: float) -> str:
+    """Format a float compactly for RealityScan command/XMP files."""
+    return f"{float(value):.15g}"
+
+
+def _format_vector(values: Iterable[float]) -> str:
+    """Format a vector using RealityScan's space-separated XMP style."""
+    return " ".join(_format_float(float(value)) for value in values)
+
+
+def _xmp_guid(seed: str) -> str:
+    """Return a deterministic uppercase XMP GUID in braces."""
+    return "{" + str(uuid.uuid5(uuid.NAMESPACE_URL, seed)).upper() + "}"
+
+
+def _xmp_distortion_model(model: str) -> str:
+    """Map RealityScan CLI distortion model names to XMP distortion names."""
+    normalized = model.replace("_", "").replace("-", "").lower()
+    if normalized in {"division", "div"}:
+        return "division"
+    if "brown3" in normalized and "tangential" in normalized:
+        return "brown3t2"
+    if "brown4" in normalized and "tangential" in normalized:
+        return "brown4t2"
+    if "brown3" in normalized:
+        return "brown3"
+    if "brown4" in normalized:
+        return "brown4"
+    return "brown4t2"
+
+
+def _scaled_camera_matrix(
+    camera_matrix: np.ndarray,
+    calibration_size: tuple[int, int],
+    source_size: tuple[int, int],
+) -> np.ndarray:
+    """Scale a calibration matrix if the source image differs from calibration size."""
+    matrix = camera_matrix.astype(np.float64).copy()
+    calib_w, calib_h = calibration_size
+    src_w, src_h = source_size
+    if calib_w > 0 and calib_h > 0 and (src_w, src_h) != (calib_w, calib_h):
+        sx = src_w / calib_w
+        sy = src_h / calib_h
+        matrix[0, 0] *= sx
+        matrix[0, 1] *= sx
+        matrix[0, 2] *= sx
+        matrix[1, 1] *= sy
+        matrix[1, 2] *= sy
+    return matrix
+
+
+def _camera_matrix_after_center_crop(
+    camera_matrix: np.ndarray,
+    *,
+    calibration_size: tuple[int, int],
+    source_size: tuple[int, int],
+    written_size: tuple[int, int],
+) -> np.ndarray:
+    """Adjust intrinsics after the pipeline's centered edge crop."""
+    matrix = _scaled_camera_matrix(camera_matrix, calibration_size, source_size)
+    src_w, src_h = source_size
+    out_w, out_h = written_size
+    matrix[0, 2] -= (src_w - out_w) * 0.5
+    matrix[1, 2] -= (src_h - out_h) * 0.5
+    return matrix
+
+
+def _xmp_camera_parameters(
+    camera_matrix: np.ndarray,
+    dist_coeffs: np.ndarray,
+    image_size: tuple[int, int],
+    *,
+    distortion_model: str,
+) -> dict[str, str]:
+    """Convert OpenCV camera intrinsics into RealityScan XMP camera fields."""
+    width, height = image_size
+    scale = float(max(width, height))
+    fx = float(camera_matrix[0, 0])
+    fy = float(camera_matrix[1, 1])
+    cx = float(camera_matrix[0, 2])
+    cy = float(camera_matrix[1, 2])
+    k1 = float(dist_coeffs[0])
+    k2 = float(dist_coeffs[1])
+    t1 = float(dist_coeffs[2])
+    t2 = float(dist_coeffs[3])
+    k3 = float(dist_coeffs[4])
+    return {
+        "distortion_model": _xmp_distortion_model(distortion_model),
+        "distortion_coefficients": _format_vector([k1, k2, k3, 0.0, t1, t2]),
+        "focal_length_35mm": _format_float((fx / scale) * 36.0),
+        "skew": _format_float(float(camera_matrix[0, 1]) / scale),
+        "aspect_ratio": _format_float(fy / fx if fx else 1.0),
+        "principal_point_u": _format_float((cx - (width * 0.5)) / scale),
+        "principal_point_v": _format_float((cy - (height * 0.5)) / scale),
+    }
+
+
+def _stereo_xmp_pose(
+    calibration: StereoCalibration,
+    side: str,
+    *,
+    translation_scale: float,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Return a world-to-camera rotation and camera position for one stereo side."""
+    if side == "left":
+        return np.eye(3, dtype=np.float64), np.zeros(3, dtype=np.float64)
+    rotation = calibration.rotation.astype(np.float64)
+    translation = calibration.translation_mm.astype(np.float64) * translation_scale
+    position = -rotation.T @ translation
+    return rotation, position
+
+
+def write_realityscan_xmp(
+    image_path: Path,
+    *,
+    camera_matrix: np.ndarray,
+    dist_coeffs: np.ndarray,
+    image_size: tuple[int, int],
+    calibration: StereoCalibration,
+    side: str,
+    pair: StereoImagePair,
+    distortion_model: str,
+    pose_prior: str,
+    calibration_prior: str,
+    translation_scale: float,
+    include_rig: bool,
+) -> Path:
+    """Write a RealityScan XMP sidecar for one exported stereo image."""
+    side_index = 0 if side == "left" else 1
+    group = 1 if side == "left" else 2
+    params = _xmp_camera_parameters(
+        camera_matrix,
+        dist_coeffs,
+        image_size,
+        distortion_model=distortion_model,
+    )
+    attrs = {
+        "xcr:Version": "3",
+        "xcr:DistortionModel": params["distortion_model"],
+        "xcr:DistortionCoeficients": params["distortion_coefficients"],
+        "xcr:FocalLength35mm": params["focal_length_35mm"],
+        "xcr:Skew": params["skew"],
+        "xcr:AspectRatio": params["aspect_ratio"],
+        "xcr:PrincipalPointU": params["principal_point_u"],
+        "xcr:PrincipalPointV": params["principal_point_v"],
+        "xcr:CalibrationPrior": calibration_prior,
+        "xcr:CalibrationGroup": str(group),
+        "xcr:DistortionGroup": str(group),
+        "xcr:InTexturing": "1",
+        "xcr:InMeshing": "1",
+        "xmlns:xcr": "http://www.capturingreality.com/ns/xcr/1.1#",
+    }
+    position_xml = ""
+    if include_rig:
+        rig_guid = _xmp_guid(f"tritonpilot:{calibration.rig_id}:{calibration.path}")
+        rig_instance = _xmp_guid(f"tritonpilot:{calibration.rig_id}:{pair.stem}:{pair.index}")
+        rotation, position = _stereo_xmp_pose(calibration, side, translation_scale=translation_scale)
+        attrs.update(
+            {
+                "xcr:PosePrior": pose_prior,
+                "xcr:Rotation": _format_vector(rotation.reshape(-1)),
+                "xcr:Coordinates": "absolute",
+                "xcr:Rig": rig_guid,
+                "xcr:RigInstance": rig_instance,
+                "xcr:RigPoseIndex": str(side_index),
+            }
+        )
+        position_xml = f"            <xcr:Position>{html.escape(_format_vector(position), quote=False)}</xcr:Position>\n"
+    attr_text = "\n            ".join(
+        f'{key}="{html.escape(value, quote=True)}"' for key, value in attrs.items()
+    )
+    xmp = (
+        '<x:xmpmeta xmlns:x="adobe:ns:meta/">\n'
+        '    <rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#">\n'
+        f"        <rdf:Description {attr_text}>\n"
+        f"{position_xml}"
+        "        </rdf:Description>\n"
+        "    </rdf:RDF>\n"
+        "</x:xmpmeta>\n"
+    )
+    xmp_path = image_path.with_suffix(".xmp")
+    xmp_path.write_text(xmp, encoding="utf-8")
+    return xmp_path
+
+
+def write_stereo_variant_frames(
+    session: StereoSessionData,
+    selected: list[FrameMetric],
+    frames_dir: Path,
+    spec: VariantSpec,
+    *,
+    crop_fraction: float,
+    wb_gain: float,
+    clahe_clip: float,
+    sharpen: float,
+    jpeg_quality: int,
+    texture_layers: bool,
+    calibration: StereoCalibration | None,
+    distortion_model: str,
+    xmp_pose_prior: str,
+    xmp_calibration_prior: str,
+    translation_scale: float,
+    include_rig_priors: bool,
+) -> FrameWriteResult:
+    """Write left/right selected stereo frames and optional calibrated XMP sidecars."""
+    pair_by_index = {pair.index: pair for pair in session.pairs}
+    corrector = make_water_corrector(spec.rectify_water)
+    written: list[Path] = []
+    contact_paths: list[Path] = []
+    for metric in selected:
+        pair = pair_by_index.get(metric.frame_index)
+        if pair is None:
+            raise RuntimeError(f"Selected stereo pair is missing from manifest: {metric.frame_index}")
+        for side, src_path in (("left", pair.left_path), ("right", pair.right_path)):
+            frame = cv2.imread(str(src_path), cv2.IMREAD_COLOR)
+            if frame is None:
+                raise RuntimeError(f"Could not read stereo image: {src_path}")
+            source_size = (int(frame.shape[1]), int(frame.shape[0]))
+            frame = crop_frame(frame, crop_fraction)
+            frame = maybe_rectify(frame, spec.rectify_water, corrector)
+            written_size = (int(frame.shape[1]), int(frame.shape[0]))
+            geometry = make_geometry_frame(
+                frame,
+                spec.geometry_mode,
+                wb_gain=wb_gain,
+                clahe_clip=clahe_clip,
+                sharpen=sharpen,
+            )
+            texture = None
+            if texture_layers or spec.cv_mask:
+                texture = enhance_underwater(frame, wb_gain=wb_gain, clahe_clip=clahe_clip, sharpen=sharpen)
+            name = f"{pair.stem}_{side}_t_{metric.timestamp_s:08.3f}.jpg"
+            out_path = frames_dir / name
+            ok = cv2.imwrite(str(out_path), geometry, [int(cv2.IMWRITE_JPEG_QUALITY), int(jpeg_quality)])
+            if not ok:
+                raise RuntimeError(f"Could not write frame: {out_path}")
+            if texture_layers:
+                assert texture is not None
+                texture_path = out_path.with_name(f"{out_path.name}.texture.jpg")
+                ok = cv2.imwrite(str(texture_path), texture, [int(cv2.IMWRITE_JPEG_QUALITY), int(jpeg_quality)])
+                if not ok:
+                    raise RuntimeError(f"Could not write texture layer: {texture_path}")
+            if spec.cv_mask:
+                assert texture is not None
+                mask = make_cv_foreground_mask(texture, geometry)
+                mask_path = out_path.with_name(f"{out_path.name}.mask.png")
+                ok = cv2.imwrite(str(mask_path), mask)
+                if not ok:
+                    raise RuntimeError(f"Could not write mask layer: {mask_path}")
+            if calibration is not None:
+                base_matrix = calibration.left_camera_matrix if side == "left" else calibration.right_camera_matrix
+                dist_coeffs = calibration.left_dist_coeffs if side == "left" else calibration.right_dist_coeffs
+                camera_matrix = _camera_matrix_after_center_crop(
+                    base_matrix,
+                    calibration_size=calibration.image_size,
+                    source_size=source_size,
+                    written_size=written_size,
+                )
+                write_realityscan_xmp(
+                    out_path,
+                    camera_matrix=camera_matrix,
+                    dist_coeffs=dist_coeffs,
+                    image_size=written_size,
+                    calibration=calibration,
+                    side=side,
+                    pair=pair,
+                    distortion_model=distortion_model,
+                    pose_prior=xmp_pose_prior,
+                    calibration_prior=xmp_calibration_prior,
+                    translation_scale=translation_scale,
+                    include_rig=include_rig_priors,
+                )
+            written.append(out_path)
+            if side == "left":
+                contact_paths.append(out_path)
+
+    expected = len(selected) * 2
+    if len(written) != expected:
+        raise RuntimeError(f"Expected to write {expected} stereo frames, wrote {len(written)}.")
+    return FrameWriteResult(image_paths=written, contact_paths=contact_paths)
+
+
+_STEREO_XMP_STEM_RE = re.compile(r"^(?P<pair>.+)_(?P<side>left|right)_t_[0-9.]+$", re.IGNORECASE)
+
+
+def _xml_local_name(name: str) -> str:
+    """Return the local part of a namespaced XML tag or attribute name."""
+    if "}" in name:
+        return name.rsplit("}", 1)[-1]
+    if ":" in name:
+        return name.rsplit(":", 1)[-1]
+    return name
+
+
+def _parse_float_vector(value: str, *, min_count: int = 3) -> np.ndarray:
+    """Parse a whitespace/comma separated vector from XMP text."""
+    parts = [part for part in re.split(r"[\s,]+", value.strip()) if part]
+    if len(parts) < min_count:
+        raise ValueError(f"expected at least {min_count} values, got {len(parts)}")
+    return np.asarray([float(part) for part in parts[:min_count]], dtype=np.float64)
+
+
+def read_xmp_position(xmp_path: Path) -> np.ndarray | None:
+    """Read a RealityScan camera position vector from one XMP sidecar."""
+    text = xmp_path.read_text(encoding="utf-8", errors="replace")
+    try:
+        root = ET.fromstring(text)
+    except ET.ParseError:
+        root = None
+
+    if root is not None:
+        for elem in root.iter():
+            for key, value in elem.attrib.items():
+                if _xml_local_name(key) == "Position":
+                    return _parse_float_vector(value)
+            if _xml_local_name(elem.tag) == "Position" and elem.text:
+                return _parse_float_vector(elem.text)
+
+    patterns = (
+        r"<(?:\w+:)?Position[^>]*>([^<]+)</(?:\w+:)?Position>",
+        r'(?:\w+:)?Position="([^"]+)"',
+    )
+    for pattern in patterns:
+        match = re.search(pattern, text, flags=re.IGNORECASE)
+        if match:
+            return _parse_float_vector(html.unescape(match.group(1)))
+    return None
+
+
+def stereo_xmp_baseline_distances(frames_dir: Path) -> list[tuple[str, float]]:
+    """Return solved left/right camera distances from RealityScan-exported XMPs."""
+    grouped: dict[str, dict[str, np.ndarray]] = {}
+    for xmp_path in sorted(frames_dir.glob("*.xmp")):
+        match = _STEREO_XMP_STEM_RE.match(xmp_path.stem)
+        if not match:
+            continue
+        position = read_xmp_position(xmp_path)
+        if position is None:
+            continue
+        pair_key = match.group("pair")
+        side = match.group("side").lower()
+        grouped.setdefault(pair_key, {})[side] = position
+
+    distances: list[tuple[str, float]] = []
+    for pair_key, sides in sorted(grouped.items()):
+        if "left" not in sides or "right" not in sides:
+            continue
+        distance = float(np.linalg.norm(sides["right"] - sides["left"]))
+        if math.isfinite(distance) and distance > 0:
+            distances.append((pair_key, distance))
+    return distances
+
+
+def _robust_metric_distances(distances: list[tuple[str, float]]) -> list[tuple[str, float]]:
+    """Drop clear stereo-baseline outliers while keeping small datasets intact."""
+    if len(distances) < 5:
+        return distances
+    values = np.asarray([distance for _, distance in distances], dtype=np.float64)
+    median = float(np.median(values))
+    deviations = np.abs(values - median)
+    mad = float(np.median(deviations))
+    if mad <= 0:
+        threshold = max(abs(median) * 0.05, 1e-9)
+    else:
+        threshold = max(3.5 * 1.4826 * mad, abs(median) * 0.05)
+    kept = [
+        item
+        for item, deviation in zip(distances, deviations)
+        if float(deviation) <= threshold
+    ]
+    min_keep = max(3, int(math.ceil(len(distances) * 0.5)))
+    return kept if len(kept) >= min_keep else distances
+
+
+def _metric_baseline_m(calibration: StereoCalibration, translation_scale: float) -> float:
+    """Return the real stereo baseline in meters from calibration values."""
+    baseline_mm = float(calibration.baseline_mm)
+    if not math.isfinite(baseline_mm) or baseline_mm <= 0:
+        baseline_mm = float(np.linalg.norm(calibration.translation_mm))
+    baseline_m = baseline_mm * float(translation_scale)
+    if not math.isfinite(baseline_m) or baseline_m <= 0:
+        raise RuntimeError("Stereo calibration baseline is not positive.")
+    return baseline_m
+
+
+def metric_model_path(model_path: Path) -> Path:
+    """Return the sidecar OBJ path used for metric-scaled output."""
+    return model_path.with_name(f"{model_path.stem}_metric{model_path.suffix}")
+
+
+def write_scaled_obj_model(source_model: Path, output_model: Path, scale_factor: float) -> int:
+    """Write an OBJ copy with vertex coordinates uniformly scaled."""
+    if source_model.suffix.lower() != ".obj":
+        raise RuntimeError(f"Metric scaling currently supports OBJ models, got: {source_model}")
+    if not source_model.exists():
+        raise RuntimeError(f"Cannot scale missing model: {source_model}")
+    output_model.parent.mkdir(parents=True, exist_ok=True)
+    vertex_count = 0
+    with source_model.open("r", encoding="utf-8", errors="replace") as src, output_model.open("w", encoding="utf-8") as dst:
+        for line in src:
+            stripped = line.rstrip("\r\n")
+            newline = "\n" if line.endswith(("\n", "\r")) else ""
+            if stripped.startswith("v "):
+                parts = stripped.split()
+                if len(parts) >= 4:
+                    try:
+                        x, y, z = (float(parts[1]), float(parts[2]), float(parts[3]))
+                    except ValueError:
+                        dst.write(line)
+                        continue
+                    parts[1] = _format_float(x * scale_factor)
+                    parts[2] = _format_float(y * scale_factor)
+                    parts[3] = _format_float(z * scale_factor)
+                    dst.write(" ".join(parts) + newline)
+                    vertex_count += 1
+                    continue
+            dst.write(line)
+    if vertex_count <= 0:
+        raise RuntimeError(f"No OBJ vertices were found in: {source_model}")
+    return vertex_count
+
+
+def _obj_face_vertex_index(token: str, vertex_count: int) -> int | None:
+    """Return a zero-based OBJ vertex index from one face token."""
+    raw_index = token.split("/", 1)[0]
+    if not raw_index:
+        return None
+    try:
+        index = int(raw_index)
+    except ValueError:
+        return None
+    if index > 0:
+        resolved = index - 1
+    elif index < 0:
+        resolved = vertex_count + index
+    else:
+        return None
+    if resolved < 0 or resolved >= vertex_count:
+        return None
+    return resolved
+
+
+def _obj_face_area(face_tokens: list[str], vertices: list[tuple[float, float, float]]) -> float | None:
+    """Measure one OBJ polygon face by triangulating it as a fan."""
+    clean_tokens: list[str] = []
+    for token in face_tokens:
+        if token.startswith("#"):
+            break
+        clean_tokens.append(token)
+    indices = [_obj_face_vertex_index(token, len(vertices)) for token in clean_tokens]
+    if len(indices) < 3 or any(index is None for index in indices):
+        return None
+    resolved_indices = [int(index) for index in indices]
+
+    ax, ay, az = vertices[resolved_indices[0]]
+    area = 0.0
+    for i in range(1, len(resolved_indices) - 1):
+        bx, by, bz = vertices[resolved_indices[i]]
+        cx, cy, cz = vertices[resolved_indices[i + 1]]
+        ux, uy, uz = bx - ax, by - ay, bz - az
+        vx, vy, vz = cx - ax, cy - ay, cz - az
+        cross_x = uy * vz - uz * vy
+        cross_y = uz * vx - ux * vz
+        cross_z = ux * vy - uy * vx
+        area += 0.5 * math.sqrt(cross_x * cross_x + cross_y * cross_y + cross_z * cross_z)
+    return area
+
+
+def _mesh_large_face_filter_payload(result: MeshLargeFaceFilterResult) -> dict:
+    """Serialize large-face filtering output for reports and manifests."""
+    return {
+        "schema": "tritonpilot.mesh_large_face_filter",
+        "schema_version": 1,
+        "method": "obj_face_area_outlier",
+        "source_model": str(result.source_model),
+        "output_model": str(result.output_model),
+        "report": str(result.report),
+        "face_count": result.face_count,
+        "measured_face_count": result.measured_face_count,
+        "removed_face_count": result.removed_face_count,
+        "kept_face_count": result.face_count - result.removed_face_count,
+        "median_face_area": result.median_face_area,
+        "area_threshold": result.area_threshold,
+        "max_removed_face_area": result.max_removed_face_area,
+        "area_ratio": result.area_ratio,
+    }
+
+
+def filter_obj_large_faces(
+    source_model: Path,
+    *,
+    area_ratio: float,
+    min_faces: int,
+    output_model: Path | None = None,
+    report_path: Path | None = None,
+) -> MeshLargeFaceFilterResult:
+    """Remove OBJ faces whose area is a large outlier compared with local mesh detail."""
+    if source_model.suffix.lower() != ".obj":
+        raise RuntimeError(f"Large-face filtering currently supports OBJ models, got: {source_model}")
+    if not source_model.exists():
+        raise RuntimeError(f"Cannot filter missing model: {source_model}")
+    if area_ratio <= 0:
+        raise RuntimeError("Large-face filter area ratio must be positive.")
+
+    output = output_model or source_model
+    report = report_path or source_model.with_name("mesh_large_face_filter.json")
+    vertices: list[tuple[float, float, float]] = []
+    face_areas: list[float | None] = []
+    with source_model.open("r", encoding="utf-8", errors="replace") as src:
+        for line in src:
+            stripped = line.strip()
+            if stripped.startswith("v "):
+                parts = stripped.split()
+                if len(parts) >= 4:
+                    try:
+                        vertices.append((float(parts[1]), float(parts[2]), float(parts[3])))
+                    except ValueError:
+                        continue
+            elif stripped.startswith("f "):
+                face_areas.append(_obj_face_area(stripped.split()[1:], vertices))
+
+    measured = [area for area in face_areas if area is not None and math.isfinite(area) and area > 0]
+    face_count = len(face_areas)
+    median_area = float(np.median(np.asarray(measured, dtype=np.float64))) if measured else 0.0
+    threshold = median_area * float(area_ratio) if len(measured) >= max(1, int(min_faces)) else math.inf
+
+    output.parent.mkdir(parents=True, exist_ok=True)
+    report.parent.mkdir(parents=True, exist_ok=True)
+    removed = 0
+    max_removed = 0.0
+    will_remove = any(area is not None and area > threshold for area in face_areas)
+    should_write = output.resolve() != source_model.resolve() or will_remove
+    if should_write:
+        temp_output = output.with_name(f"{output.name}.tmp")
+        with source_model.open("r", encoding="utf-8", errors="replace") as src, temp_output.open("w", encoding="utf-8") as dst:
+            face_index = 0
+            for line in src:
+                stripped = line.strip()
+                if stripped.startswith("f "):
+                    area = face_areas[face_index] if face_index < len(face_areas) else None
+                    face_index += 1
+                    if area is not None and area > threshold:
+                        removed += 1
+                        max_removed = max(max_removed, float(area))
+                        continue
+                dst.write(line)
+        temp_output.replace(output)
+
+    result = MeshLargeFaceFilterResult(
+        source_model=source_model.resolve(),
+        output_model=output.resolve(),
+        report=report.resolve(),
+        face_count=face_count,
+        measured_face_count=len(measured),
+        removed_face_count=removed,
+        median_face_area=median_area,
+        area_threshold=threshold,
+        max_removed_face_area=max_removed,
+        area_ratio=float(area_ratio),
+    )
+    report.write_text(json.dumps(_mesh_large_face_filter_payload(result), indent=2), encoding="utf-8")
+    return result
+
+
+def _metric_scale_payload(result: MetricScaleResult) -> dict:
+    """Serialize metric scaling output for reports and manifests."""
+    return {
+        "schema": "tritonpilot.metric_scale",
+        "schema_version": 1,
+        "method": "stereo_solved_xmp_baseline",
+        "raw_model": str(result.raw_model),
+        "metric_model": str(result.metric_model),
+        "report": str(result.report),
+        "source_xmp_dir": str(result.source_xmp_dir),
+        "real_baseline_m": result.real_baseline_m,
+        "reconstructed_baseline_units": result.reconstructed_baseline_units,
+        "reconstructed_baseline_mean_units": result.reconstructed_baseline_mean_units,
+        "reconstructed_baseline_mad_units": result.reconstructed_baseline_mad_units,
+        "scale_factor": result.scale_factor,
+        "pair_count": result.pair_count,
+        "rejected_pair_count": result.rejected_pair_count,
+        "vertex_count": result.vertex_count,
+        "metric_units": "meters",
+    }
+
+
+def scale_model_from_stereo_baseline(
+    source_model: Path,
+    frames_dir: Path,
+    calibration: StereoCalibration,
+    *,
+    translation_scale: float,
+    min_pairs: int,
+    output_model: Path | None = None,
+    report_path: Path | None = None,
+) -> MetricScaleResult:
+    """Scale an exported OBJ so MeshLab measurements are in meters."""
+    all_distances = stereo_xmp_baseline_distances(frames_dir)
+    if len(all_distances) < max(1, int(min_pairs)):
+        raise RuntimeError(
+            f"Need at least {int(min_pairs)} solved stereo XMP baselines in {frames_dir}; "
+            f"found {len(all_distances)}."
+        )
+    distances = _robust_metric_distances(all_distances)
+    if len(distances) < max(1, int(min_pairs)):
+        raise RuntimeError(
+            f"Need at least {int(min_pairs)} non-outlier stereo XMP baselines in {frames_dir}; "
+            f"kept {len(distances)} of {len(all_distances)}."
+        )
+
+    values = np.asarray([distance for _, distance in distances], dtype=np.float64)
+    reconstructed = float(np.median(values))
+    if not math.isfinite(reconstructed) or reconstructed <= 0:
+        raise RuntimeError("Solved stereo baseline is not positive.")
+    real_baseline_m = _metric_baseline_m(calibration, translation_scale)
+    scale_factor = real_baseline_m / reconstructed
+    if not math.isfinite(scale_factor) or scale_factor <= 0:
+        raise RuntimeError("Computed metric scale factor is not positive.")
+
+    metric_model = output_model or metric_model_path(source_model)
+    report = report_path or source_model.with_name("metric_scale.json")
+    vertex_count = write_scaled_obj_model(source_model, metric_model, scale_factor)
+    result = MetricScaleResult(
+        raw_model=source_model.resolve(),
+        metric_model=metric_model.resolve(),
+        report=report.resolve(),
+        source_xmp_dir=frames_dir.resolve(),
+        real_baseline_m=real_baseline_m,
+        reconstructed_baseline_units=reconstructed,
+        reconstructed_baseline_mean_units=float(np.mean(values)),
+        reconstructed_baseline_mad_units=float(np.median(np.abs(values - reconstructed))),
+        scale_factor=scale_factor,
+        pair_count=len(distances),
+        rejected_pair_count=len(all_distances) - len(distances),
+        vertex_count=vertex_count,
+    )
+    report.parent.mkdir(parents=True, exist_ok=True)
+    report.write_text(json.dumps(_metric_scale_payload(result), indent=2), encoding="utf-8")
+    return result
+
+
+def update_manifest_metric_scale(
+    paths: OutputPaths,
+    *,
+    result: MetricScaleResult | None = None,
+    warning: str | None = None,
+) -> None:
+    """Record metric scaling success or failure in the pipeline manifest."""
+    try:
+        manifest = json.loads(paths.manifest_json.read_text(encoding="utf-8"))
+    except Exception:
+        manifest = {}
+    if result is not None:
+        manifest["metric_scale"] = _metric_scale_payload(result)
+    else:
+        manifest["metric_scale"] = {
+            "schema": "tritonpilot.metric_scale",
+            "schema_version": 1,
+            "active": False,
+            "warning": warning or "metric scaling did not run",
+        }
+    paths.manifest_json.write_text(json.dumps(manifest, indent=2), encoding="utf-8")
+
+
+def update_manifest_mesh_large_face_filter(
+    paths: OutputPaths,
+    *,
+    result: MeshLargeFaceFilterResult | None = None,
+    warning: str | None = None,
+) -> None:
+    """Record large-face filtering success or failure in the pipeline manifest."""
+    try:
+        manifest = json.loads(paths.manifest_json.read_text(encoding="utf-8"))
+    except Exception:
+        manifest = {}
+    if result is not None:
+        manifest["mesh_large_face_filter"] = _mesh_large_face_filter_payload(result)
+    else:
+        manifest["mesh_large_face_filter"] = {
+            "schema": "tritonpilot.mesh_large_face_filter",
+            "schema_version": 1,
+            "active": False,
+            "warning": warning or "large-face filtering did not run",
+        }
+    paths.manifest_json.write_text(json.dumps(manifest, indent=2), encoding="utf-8")
 
 
 def write_selected_frames(
@@ -763,6 +1802,7 @@ def write_metrics_csv(metrics: list[FrameMetric], selected: Iterable[FrameMetric
             [
                 "selected",
                 "frame_index",
+                "source_stem",
                 "timestamp_s",
                 "quality",
                 "sharpness",
@@ -770,6 +1810,7 @@ def write_metrics_csv(metrics: list[FrameMetric], selected: Iterable[FrameMetric
                 "brightness",
                 "feature_count",
                 "motion_delta",
+                "pair_delta_ms",
             ]
         )
         for metric in metrics:
@@ -777,6 +1818,7 @@ def write_metrics_csv(metrics: list[FrameMetric], selected: Iterable[FrameMetric
                 [
                     1 if metric.frame_index in selected_ids else 0,
                     metric.frame_index,
+                    metric.source_stem,
                     f"{metric.timestamp_s:.6f}",
                     f"{metric.quality:.6f}",
                     f"{metric.sharpness:.6f}",
@@ -784,6 +1826,7 @@ def write_metrics_csv(metrics: list[FrameMetric], selected: Iterable[FrameMetric
                     f"{metric.brightness:.6f}",
                     metric.feature_count,
                     f"{metric.motion_delta:.6f}",
+                    f"{metric.pair_delta_ms:.6f}",
                 ]
             )
 
@@ -891,9 +1934,12 @@ def write_connectivity_csv(frame_paths: list[Path], selected: list[FrameMetric],
 
 def build_variant_specs(args: argparse.Namespace) -> list[VariantSpec]:
     """Build the preprocessing/alignment variants requested by CLI options."""
+    tournament_overlap = args.images_overlap
+    base_geometry_mode = args.base_geometry_mode
+    base_name = "enhanced_brown4" if base_geometry_mode == "enhanced" else f"{base_geometry_mode}_brown4"
     base = VariantSpec(
-        name="enhanced_brown4",
-        geometry_mode="enhanced",
+        name=base_name,
+        geometry_mode=base_geometry_mode,
         rectify_water=args.rectify_water,
         cv_mask=False,
         ai_mask=False,
@@ -912,7 +1958,7 @@ def build_variant_specs(args: argparse.Namespace) -> list[VariantSpec]:
             rectify_water=args.rectify_water,
             distortion_model=kplus,
             detector_sensitivity="Ultra",
-            images_overlap="Low",
+            images_overlap=tournament_overlap,
         ),
         VariantSpec(
             name="flat_luma_mask_kplus",
@@ -921,7 +1967,7 @@ def build_variant_specs(args: argparse.Namespace) -> list[VariantSpec]:
             cv_mask=args.cv_masks,
             distortion_model=kplus,
             detector_sensitivity="Ultra",
-            images_overlap="Low",
+            images_overlap=tournament_overlap,
         ),
         base,
     ]
@@ -942,7 +1988,7 @@ def build_variant_specs(args: argparse.Namespace) -> list[VariantSpec]:
                     rectify_water=args.rectify_water,
                     distortion_model="Division",
                     detector_sensitivity="Ultra",
-                    images_overlap="Low",
+                    images_overlap=tournament_overlap,
                 ),
             ]
         )
@@ -955,7 +2001,7 @@ def build_variant_specs(args: argparse.Namespace) -> list[VariantSpec]:
                     ai_mask=True,
                     distortion_model=kplus,
                     detector_sensitivity="Ultra",
-                    images_overlap="Low",
+                    images_overlap=tournament_overlap,
                 )
             )
         if args.rectify_tournament and not args.rectify_water:
@@ -966,7 +2012,7 @@ def build_variant_specs(args: argparse.Namespace) -> list[VariantSpec]:
                     rectify_water=True,
                     distortion_model=kplus,
                     detector_sensitivity="Ultra",
-                    images_overlap="Low",
+                    images_overlap=tournament_overlap,
                 )
             )
     return variants
@@ -989,7 +2035,7 @@ def alignment_setting_commands(args: argparse.Namespace, spec: VariantSpec | Non
     distortion_model = spec.distortion_model if spec and spec.distortion_model else args.distortion_model
     detector_sensitivity = spec.detector_sensitivity if spec and spec.detector_sensitivity else args.detector_sensitivity
     images_overlap = spec.images_overlap if spec and spec.images_overlap else args.images_overlap
-    return [
+    commands = [
         '-set "appIncSubdirs=false"',
         '-set "appQuitOnError=true"',
         '-set "suppressErrors=true"',
@@ -1004,6 +2050,24 @@ def alignment_setting_commands(args: argparse.Namespace, spec: VariantSpec | Non
         '-set "sfmForceComponentRematch=true"',
         f'-set "sfmDistortionModel={distortion_model}"',
     ]
+    if getattr(args, "using_stereo_xmp_priors", False):
+        commands.append('-set "sfmEnableCameraPrior=true"')
+    return commands
+
+
+def selected_image_prior_commands(args: argparse.Namespace) -> list[str]:
+    """Return selected-image prior commands without clobbering stereo XMP groups."""
+    commands = ["-setFeatureSource 2"]
+    if getattr(args, "using_stereo_xmp_priors", False):
+        return commands
+    commands.extend(
+        [
+            "-setConstantCalibrationGroups",
+            "-setPriorCalibrationGroup 1",
+            "-setPriorLensGroup 1",
+        ]
+    )
+    return commands
 
 
 def write_alignment_command_file(
@@ -1023,15 +2087,7 @@ def write_alignment_command_file(
     ]
     if spec.ai_mask:
         commands.append("-generateAIMasks")
-    commands.extend(
-        [
-            "-setFeatureSource 2",
-            "-setConstantCalibrationGroups",
-            "-setPriorCalibrationGroup 1",
-            "-setPriorLensGroup 1",
-            "-align",
-        ]
-    )
+    commands.extend([*selected_image_prior_commands(args), "-align"])
     if args.try_merge_components:
         commands.append("-mergeComponents")
     commands.append("-selectMaximalComponent")
@@ -1193,6 +2249,19 @@ def model_command(quality: str) -> str:
     }[quality]
 
 
+def apply_reconstruction_preset(args: argparse.Namespace, parser: argparse.ArgumentParser) -> dict[str, object]:
+    """Apply a reconstruction preset while preserving explicitly changed CLI options."""
+    preset_name = getattr(args, "reconstruction_preset", "balanced")
+    preset = RECONSTRUCTION_PRESETS[preset_name]
+    applied: dict[str, object] = {}
+    for key, value in preset.items():
+        if getattr(args, key) == parser.get_default(key):
+            setattr(args, key, value)
+            applied[key] = value
+    args.reconstruction_preset_applied = applied
+    return applied
+
+
 def write_realityscan_command_file(
     paths: OutputPaths,
     args: argparse.Namespace,
@@ -1205,7 +2274,9 @@ def write_realityscan_command_file(
     frames_dir = frames_dir or paths.frames
     base_model_name = "Model 1"
     simplified_model_name = "Model 2" if args.simplify_triangles > 0 else base_model_name
-    export_model_name = "Model 3" if args.simplify_triangles > 0 else "Model 2"
+    clean_model = bool(getattr(args, "clean_model", False))
+    cleaned_model_name = "Model 3" if args.simplify_triangles > 0 else "Model 2"
+    export_model_name = cleaned_model_name if clean_model else simplified_model_name
     commands = [
         "# Generated by tools/realityscan_underwater_pipeline.py",
         "-newScene",
@@ -1226,20 +2297,13 @@ def write_realityscan_command_file(
     ]
     if spec and spec.ai_mask:
         commands.append("-generateAIMasks")
-    commands.extend(
-        [
-            "-setFeatureSource 2",
-            "-setConstantCalibrationGroups",
-            "-setPriorCalibrationGroup 1",
-            "-setPriorLensGroup 1",
-            "-align",
-        ]
-    )
+    commands.extend([*selected_image_prior_commands(args), "-align"])
     if args.try_merge_components:
         commands.append("-mergeComponents")
     commands.append("-selectMaximalComponent")
     if overview_template is not None:
         commands.append(f"-exportReport {_path_for_cli(paths.reports / 'final_overview.html')} {_path_for_cli(overview_template)} true")
+    metric_xmp_commands = ["-exportXMPForSelectedComponent"] if getattr(args, "metric_scale_active", False) else []
     commands.extend(
         [
             "-setReconstructionRegionByDensity",
@@ -1255,14 +2319,20 @@ def write_realityscan_command_file(
                 f'-selectModel "{simplified_model_name}"',
             ]
         )
+    if clean_model:
+        commands.extend(
+            [
+                "-cleanModel",
+                f'-selectModel "{export_model_name}"',
+            ]
+        )
     commands.extend(
         [
-            "-cleanModel",
-            f'-selectModel "{export_model_name}"',
             "-unwrap",
             "-correctColors",
             "-calculateTexture",
             f'-exportModel "{export_model_name}" {_path_for_cli(paths.model)}',
+            *metric_xmp_commands,
             f"-save {_path_for_cli(paths.project)}",
             "-quit",
         ]
@@ -1270,9 +2340,22 @@ def write_realityscan_command_file(
     paths.rscmd.write_text("\n".join(commands) + "\n", encoding="utf-8")
 
 
+def _jsonable_value(value: object) -> object:
+    """Convert common CLI/runtime values to JSON-safe values."""
+    if isinstance(value, Path):
+        return str(value)
+    if isinstance(value, np.generic):
+        return value.item()
+    if isinstance(value, (list, tuple)):
+        return [_jsonable_value(item) for item in value]
+    if isinstance(value, dict):
+        return {str(key): _jsonable_value(item) for key, item in value.items()}
+    return value
+
+
 def write_manifest(
     paths: OutputPaths,
-    video_path: Path,
+    input_path: Path,
     info: VideoInfo,
     selected: list[FrameMetric],
     frame_paths: list[Path],
@@ -1284,10 +2367,17 @@ def write_manifest(
     variant_frame_paths: dict[str, list[Path]] | None = None,
     alignment_results: list[AlignmentResult] | None = None,
     best_alignment: AlignmentResult | None = None,
+    source_type: str = "video",
+    stereo_session: StereoSessionData | None = None,
+    stereo_calibration: StereoCalibration | None = None,
 ) -> None:
     """Write a machine-readable manifest for the generated workspace."""
     manifest = {
-        "video": str(video_path.resolve()),
+        "source": {
+            "type": source_type,
+            "path": str(input_path.resolve()),
+        },
+        "video": str(input_path.resolve()),
         "video_info": {
             "fps": info.fps,
             "frame_count": info.frame_count,
@@ -1296,6 +2386,7 @@ def write_manifest(
             "duration_s": info.duration_s,
         },
         "selected_frame_count": len(selected),
+        "selected_image_count": len(frame_paths),
         "frames_dir": str(frame_paths[0].parent if frame_paths else paths.frames),
         "frame_files": [str(path) for path in frame_paths],
         "variants": [
@@ -1345,11 +2436,38 @@ def write_manifest(
         "project": str(paths.project),
         "model": str(paths.model),
         "settings": {
-            key: value
+            key: _jsonable_value(value)
             for key, value in vars(args).items()
             if key not in {"video", "output", "realityscan_exe"}
         },
     }
+    if stereo_session is not None:
+        manifest["stereo"] = {
+            "session_dir": str(stereo_session.session_dir),
+            "manifest": str(stereo_session.manifest_path),
+            "pair_count": len(stereo_session.pairs),
+            "selected_pair_count": len(selected),
+            "xmp_priors": bool(stereo_calibration is not None and getattr(args, "using_stereo_xmp_priors", False)),
+            "xmp_rig_priors": bool(getattr(args, "stereo_xmp_rig_priors", False)),
+            "calibration": None
+            if stereo_calibration is None
+            else {
+                "path": str(stereo_calibration.path),
+                "rig_id": stereo_calibration.rig_id,
+                "baseline_mm": stereo_calibration.baseline_mm,
+                "translation_scale": getattr(args, "stereo_translation_scale", None),
+            },
+            "selected_pairs": [
+                {
+                    "index": metric.frame_index,
+                    "stem": metric.source_stem,
+                    "timestamp_s": metric.timestamp_s,
+                    "pair_delta_ms": metric.pair_delta_ms,
+                    "quality": metric.quality,
+                }
+                for metric in selected
+            ],
+        }
     paths.manifest_json.write_text(json.dumps(manifest, indent=2), encoding="utf-8")
 
 
@@ -1474,6 +2592,15 @@ def run_realityscan(paths: OutputPaths, realityscan_exe: Path, timeout_hours: fl
     )
 
 
+def final_reconstruction_exit_code(realityscan_code: int, model_path: Path) -> int:
+    """Return the CLI exit code for a final reconstruction attempt."""
+    if realityscan_code != 0:
+        return realityscan_code
+    if not model_path.exists():
+        return MISSING_REALITYSCAN_OUTPUT_EXIT_CODE
+    return 0
+
+
 def run_alignment_tournament(
     paths: OutputPaths,
     variant_specs: list[VariantSpec],
@@ -1524,7 +2651,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
         description="Autonomous underwater video to RealityScan textured model pipeline.",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
-    parser.add_argument("video", type=Path, help="Input video file.")
+    parser.add_argument("video", type=Path, help="Input video file, stereo session directory, or stereo manifest.json.")
     parser.add_argument("--output", type=Path, default=None, help="Output workspace. Defaults under results/realityscan/.")
     parser.add_argument("--overwrite", action="store_true", help="Replace the output workspace if it already exists.")
     parser.add_argument("--prepare-only", action="store_true", help="Prepare frames and the .rscmd file without launching RealityScan.")
@@ -1546,12 +2673,23 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--wb-gain", type=_positive_float, default=2.4, help="Maximum channel gain for gray-world underwater white balance.")
     parser.add_argument("--clahe-clip", type=_positive_float, default=2.0, help="CLAHE clip limit for contrast enhancement.")
     parser.add_argument("--sharpen", type=_nonnegative_float, default=0.22, help="Unsharp-mask amount applied after contrast enhancement.")
+    parser.add_argument("--base-geometry-mode", choices=("raw", "enhanced", "luma", "flat_luma"), default="enhanced", help="Frame preprocessing mode for the base reconstruction variant.")
     parser.add_argument("--jpeg-quality", type=int, default=96, help="JPEG quality for selected frames.")
     parser.add_argument("--texture-layers", action=argparse.BooleanOptionalAction, default=False, help="Write RealityScan texture layers so geometry can use luma/dehazed images while texture uses color-enhanced frames.")
     parser.add_argument("--cv-masks", action=argparse.BooleanOptionalAction, default=True, help="Allow CV-generated mask-layer variants in the alignment tournament.")
     parser.add_argument("--include-ai-masks", action="store_true", help="In thorough tournament mode, try RealityScan AI masks as one variant.")
     parser.add_argument("--connectivity-report", action=argparse.BooleanOptionalAction, default=False, help="Write an adjacent-frame feature connectivity report for diagnosing temporal gaps.")
+    parser.add_argument(
+        "--reconstruction-preset",
+        choices=tuple(RECONSTRUCTION_PRESETS),
+        default="balanced",
+        help="Apply grouped alignment/reconstruction budgets unless an individual option is explicitly set.",
+    )
     parser.add_argument("--model-quality", choices=("preview", "normal", "high"), default="normal", help="RealityScan reconstruction quality.")
+    parser.add_argument("--clean-model", action=argparse.BooleanOptionalAction, default=False, help="Run RealityScan cleanModel before export. Off by default to avoid broad infill sheets across sparse holes.")
+    parser.add_argument("--mesh-large-face-filter", action=argparse.BooleanOptionalAction, default=True, help="After OBJ export, remove face-area outliers that look like broad infill triangles.")
+    parser.add_argument("--mesh-max-face-area-ratio", type=_positive_float, default=45.0, help="Remove exported OBJ faces larger than this multiple of the median measured face area.")
+    parser.add_argument("--mesh-large-face-min-faces", type=int, default=500, help="Minimum measured face count before large-face filtering is allowed.")
     parser.add_argument("--simplify-triangles", type=int, default=1_500_000, help="Simplify before texturing/export. Use 0 to keep the computed mesh selected.")
     parser.add_argument("--texture-count", type=int, default=4, help="Maximum texture atlas count.")
     parser.add_argument("--texture-resolution", type=int, default=4096, help="Maximum texture atlas side in pixels.")
@@ -1559,6 +2697,16 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--detector-sensitivity", choices=("Low", "Medium", "High", "Ultra"), default="Ultra", help="RealityScan feature detector sensitivity.")
     parser.add_argument("--images-overlap", choices=("Low", "Medium", "High"), default="Low", help="RealityScan alignment overlap assumption.")
     parser.add_argument("--distortion-model", default="Brown4WithTangential2", help="RealityScan lens distortion model.")
+    parser.add_argument("--stereo-calibration", type=Path, default=None, help="Stereo calibration JSON used when the input is a stereo session.")
+    parser.add_argument("--stereo-xmp-priors", action=argparse.BooleanOptionalAction, default=True, help="Write RealityScan XMP sidecars from the stereo calibration.")
+    parser.add_argument("--stereo-xmp-pose-prior", choices=("initial", "exact", "locked"), default="exact", help="Pose prior written to stereo XMP sidecars.")
+    parser.add_argument("--stereo-xmp-calibration-prior", choices=("initial", "exact", "locked"), default="exact", help="Calibration prior written to stereo XMP sidecars.")
+    parser.add_argument("--stereo-xmp-rig-priors", action=argparse.BooleanOptionalAction, default=False, help="Experimental: write XMP stereo rig/pose fields. Off by default because RealityScan expects a matching .rcrx rig file.")
+    parser.add_argument("--stereo-translation-scale", type=_positive_float, default=0.001, help="Scale calibration translation values before XMP export; 0.001 converts mm to meters.")
+    parser.add_argument("--stereo-max-pair-delta-ms", type=_nonnegative_float, default=75.0, help="Discard stereo pairs above this timestamp delta. Use 0 to keep all pairs.")
+    parser.add_argument("--metric-scale-from-stereo", action=argparse.BooleanOptionalAction, default=True, help="After reconstruction, write a meter-scaled OBJ from solved stereo camera baselines.")
+    parser.add_argument("--metric-scale-min-pairs", type=int, default=3, help="Minimum solved left/right camera pairs required for metric model scaling.")
+    parser.add_argument("--metric-scale-required", action="store_true", help="Return an error if metric stereo scaling cannot be completed.")
     parser.add_argument("--try-merge-components", action="store_true", help="Ask RealityScan to merge components after alignment. Off by default because it can duplicate fragments in this data.")
     parser.add_argument("--min-good-component-ratio", type=_positive_float, default=0.45, help="Warn when the best alignment's largest component is below this fraction of selected frames.")
     parser.add_argument("--stop-on-alignment-error", action="store_true", help="Stop the tournament immediately if a RealityScan alignment variant exits with an error.")
@@ -1577,27 +2725,74 @@ def main(argv: list[str] | None = None) -> int:
     total_start = time.perf_counter()
     parser = build_arg_parser()
     args = parser.parse_args(argv)
-    video_path = args.video.expanduser().resolve()
-    if not video_path.exists():
-        parser.error(f"video does not exist: {video_path}")
+    applied_preset = apply_reconstruction_preset(args, parser)
+    input_path = args.video.expanduser().resolve()
+    if not input_path.exists():
+        parser.error(f"input does not exist: {input_path}")
+    is_stereo_session = stereo_manifest_path(input_path) is not None
     if args.min_frames > args.max_frames:
         parser.error("--min-frames cannot be greater than --max-frames")
     if not 0 <= args.quality_quantile <= 0.9:
         parser.error("--quality-quantile must be between 0 and 0.9")
     if args.min_good_component_ratio > 1.0:
         parser.error("--min-good-component-ratio must be no greater than 1.0")
+    if args.metric_scale_min_pairs < 1:
+        parser.error("--metric-scale-min-pairs must be at least 1")
+    if args.mesh_large_face_min_faces < 1:
+        parser.error("--mesh-large-face-min-faces must be at least 1")
     if args.alignment_only and args.alignment_tournament == "off":
         parser.error("--alignment-only requires --alignment-tournament standard or thorough")
 
-    paths = prepare_output_paths(video_path, args.output, args.overwrite)
+    source_type = "video"
+    stereo_session: StereoSessionData | None = None
+    stereo_calibration: StereoCalibration | None = None
+    if is_stereo_session:
+        source_type = "stereo_session"
+        stereo_session = load_stereo_session(input_path)
+        calibration_path = args.stereo_calibration
+        if calibration_path is None:
+            candidate = stereo_session.session_dir / "stereo_calibration.json"
+            calibration_path = candidate if candidate.exists() else None
+        if calibration_path is not None:
+            stereo_calibration = load_stereo_calibration(calibration_path.expanduser().resolve())
+        if args.stereo_xmp_priors and stereo_calibration is None:
+            print("Stereo XMP priors requested, but no calibration was found; exporting images without XMP priors.")
+        args.using_stereo_xmp_priors = bool(args.stereo_xmp_priors and stereo_calibration is not None)
+    else:
+        args.using_stereo_xmp_priors = False
+    args.metric_scale_active = bool(
+        args.metric_scale_from_stereo
+        and stereo_session is not None
+        and stereo_calibration is not None
+    )
+    if args.metric_scale_from_stereo and stereo_session is not None and stereo_calibration is None:
+        message = "Metric stereo scaling requested, but no stereo calibration was found."
+        if args.metric_scale_required:
+            parser.error(message)
+        print(message + " Metric model export will be skipped.")
+
+    paths = prepare_output_paths(input_path, args.output, args.overwrite)
     realityscan_exe = args.realityscan_exe or discover_realityscan()
     if realityscan_exe is not None:
         realityscan_exe = realityscan_exe.resolve()
     overview_template = overview_template_path(realityscan_exe)
 
     print(f"Output workspace: {paths.root}")
-    print("Scoring candidate frames...")
-    info, metrics = read_candidate_metrics(video_path, args.candidate_fps)
+    if args.reconstruction_preset != "balanced":
+        if applied_preset:
+            applied = ", ".join(f"{key}={_jsonable_value(value)}" for key, value in applied_preset.items())
+            print(f"Applied reconstruction preset {args.reconstruction_preset}: {applied}")
+        else:
+            print(f"Reconstruction preset {args.reconstruction_preset} requested; explicit CLI options already covered it.")
+    if stereo_session is not None:
+        print(f"Scoring stereo pairs from: {stereo_session.session_dir}")
+        info, metrics = read_stereo_session_metrics(
+            stereo_session,
+            max_pair_delta_ms=args.stereo_max_pair_delta_ms,
+        )
+    else:
+        print("Scoring candidate frames...")
+        info, metrics = read_candidate_metrics(input_path, args.candidate_fps)
     selected = select_frames(
         metrics,
         target_fps=args.target_fps,
@@ -1607,10 +2802,28 @@ def main(argv: list[str] | None = None) -> int:
         min_motion=args.min_motion,
         max_still_gap_s=args.max_still_gap_s,
     )
-    print(f"Video: {info.width}x{info.height}, {info.frame_count} frames, {info.duration_s:.2f}s at {info.fps:.2f} fps")
-    print(f"Selected {len(selected)} of {len(metrics)} scored candidates")
+    if stereo_session is not None:
+        print(
+            f"Stereo session: {info.width}x{info.height}, {info.frame_count} pairs, "
+            f"{info.duration_s:.2f}s span, median-ish rate {info.fps:.3f} pair/s"
+        )
+        print(f"Selected {len(selected)} of {len(metrics)} scored stereo pairs")
+        if stereo_calibration is not None:
+            print(
+                f"Stereo calibration: {stereo_calibration.path} "
+                f"(baseline {stereo_calibration.baseline_mm:.1f} mm, XMP={args.using_stereo_xmp_priors}, "
+                f"rig_priors={args.stereo_xmp_rig_priors})"
+            )
+    else:
+        print(f"Video: {info.width}x{info.height}, {info.frame_count} frames, {info.duration_s:.2f}s at {info.fps:.2f} fps")
+        print(f"Selected {len(selected)} of {len(metrics)} scored candidates")
 
-    auto_crop = estimate_dark_border_crop(video_path, args.max_auto_crop) if args.auto_crop_border else 0.0
+    if args.auto_crop_border and stereo_session is not None:
+        auto_crop = estimate_stereo_dark_border_crop(stereo_session, args.max_auto_crop)
+    elif args.auto_crop_border:
+        auto_crop = estimate_dark_border_crop(input_path, args.max_auto_crop)
+    else:
+        auto_crop = 0.0
     effective_crop = max(args.crop_fraction, auto_crop)
     args.effective_crop_fraction = effective_crop
     if effective_crop > 0:
@@ -1619,6 +2832,7 @@ def main(argv: list[str] | None = None) -> int:
     variant_specs = build_variant_specs(args)
     variant_paths = {spec.name: make_variant_paths(paths, spec) for spec in variant_specs}
     variant_frame_paths: dict[str, list[Path]] = {}
+    variant_contact_paths: dict[str, list[Path]] = {}
     if len(variant_specs) == 1:
         print("Writing enhanced selected frames...")
     else:
@@ -1630,27 +2844,51 @@ def main(argv: list[str] | None = None) -> int:
                 f"  {spec.name}: geometry={spec.geometry_mode}, cv_mask={spec.cv_mask}, "
                 f"ai_mask={spec.ai_mask}, distortion={spec.distortion_model or args.distortion_model}"
             )
-        variant_frame_paths[spec.name] = write_variant_frames(
-            video_path,
-            selected,
-            vp.frames,
-            spec,
-            crop_fraction=effective_crop,
-            wb_gain=args.wb_gain,
-            clahe_clip=args.clahe_clip,
-            sharpen=args.sharpen,
-            jpeg_quality=args.jpeg_quality,
-            texture_layers=args.texture_layers,
-        )
+        if stereo_session is not None:
+            result = write_stereo_variant_frames(
+                stereo_session,
+                selected,
+                vp.frames,
+                spec,
+                crop_fraction=effective_crop,
+                wb_gain=args.wb_gain,
+                clahe_clip=args.clahe_clip,
+                sharpen=args.sharpen,
+                jpeg_quality=args.jpeg_quality,
+                texture_layers=args.texture_layers,
+                calibration=stereo_calibration if args.using_stereo_xmp_priors else None,
+                distortion_model=spec.distortion_model or args.distortion_model,
+                xmp_pose_prior=args.stereo_xmp_pose_prior,
+                xmp_calibration_prior=args.stereo_xmp_calibration_prior,
+                translation_scale=args.stereo_translation_scale,
+                include_rig_priors=args.stereo_xmp_rig_priors,
+            )
+            variant_frame_paths[spec.name] = result.image_paths
+            variant_contact_paths[spec.name] = result.contact_paths
+        else:
+            frame_paths = write_variant_frames(
+                input_path,
+                selected,
+                vp.frames,
+                spec,
+                crop_fraction=effective_crop,
+                wb_gain=args.wb_gain,
+                clahe_clip=args.clahe_clip,
+                sharpen=args.sharpen,
+                jpeg_quality=args.jpeg_quality,
+                texture_layers=args.texture_layers,
+            )
+            variant_frame_paths[spec.name] = frame_paths
+            variant_contact_paths[spec.name] = frame_paths
 
     write_metrics_csv(metrics, selected, paths)
     contact_name = "enhanced_brown4" if "enhanced_brown4" in variant_frame_paths else variant_specs[0].name
-    make_contact_sheet(variant_frame_paths[contact_name], selected, paths.contact_sheet)
+    make_contact_sheet(variant_contact_paths[contact_name], selected, paths.contact_sheet)
     if args.connectivity_report:
         diagnostic_name = variant_specs[0].name
         connectivity_path = paths.reports / f"connectivity_{diagnostic_name}.csv"
         print(f"Writing connectivity diagnostics: {connectivity_path}")
-        write_connectivity_csv(variant_frame_paths[diagnostic_name], selected, connectivity_path)
+        write_connectivity_csv(variant_contact_paths[diagnostic_name], selected, connectivity_path)
 
     for spec in variant_specs:
         if args.alignment_tournament != "off":
@@ -1666,7 +2904,7 @@ def main(argv: list[str] | None = None) -> int:
     )
     write_manifest(
         paths,
-        video_path,
+        input_path,
         info,
         selected,
         variant_frame_paths[provisional_spec.name],
@@ -1675,6 +2913,9 @@ def main(argv: list[str] | None = None) -> int:
         variant_specs=variant_specs,
         variant_paths=variant_paths,
         variant_frame_paths=variant_frame_paths,
+        source_type=source_type,
+        stereo_session=stereo_session,
+        stereo_calibration=stereo_calibration,
     )
 
     print(f"Frames: {variant_paths[provisional_spec.name].frames}")
@@ -1701,11 +2942,12 @@ def main(argv: list[str] | None = None) -> int:
     if args.alignment_tournament != "off":
         if overview_template is None:
             raise RuntimeError("RealityScan Overview.html report template was not found; cannot score alignment tournament.")
+        selected_image_count = len(variant_frame_paths[provisional_spec.name])
         alignment_results = run_alignment_tournament(
             paths,
             variant_specs,
             variant_paths,
-            len(selected),
+            selected_image_count,
             realityscan_exe,
             args,
         )
@@ -1727,7 +2969,7 @@ def main(argv: list[str] | None = None) -> int:
             if args.fail_on_poor_alignment:
                 write_manifest(
                     paths,
-                    video_path,
+                    input_path,
                     info,
                     selected,
                     variant_frame_paths[best_spec.name],
@@ -1738,9 +2980,12 @@ def main(argv: list[str] | None = None) -> int:
                     variant_frame_paths=variant_frame_paths,
                     alignment_results=alignment_results,
                     best_alignment=best_alignment,
+                    source_type=source_type,
+                    stereo_session=stereo_session,
+                    stereo_calibration=stereo_calibration,
                 )
                 return 3
-        make_contact_sheet(variant_frame_paths[best_spec.name], selected, paths.contact_sheet)
+        make_contact_sheet(variant_contact_paths[best_spec.name], selected, paths.contact_sheet)
         write_realityscan_command_file(
             paths,
             args,
@@ -1750,7 +2995,7 @@ def main(argv: list[str] | None = None) -> int:
         )
         write_manifest(
             paths,
-            video_path,
+            input_path,
             info,
             selected,
             variant_frame_paths[best_spec.name],
@@ -1761,6 +3006,9 @@ def main(argv: list[str] | None = None) -> int:
             variant_frame_paths=variant_frame_paths,
             alignment_results=alignment_results,
             best_alignment=best_alignment,
+            source_type=source_type,
+            stereo_session=stereo_session,
+            stereo_calibration=stereo_calibration,
         )
         if args.alignment_only:
             print(f"Alignment-only run complete. Reports: {paths.reports}")
@@ -1769,10 +3017,59 @@ def main(argv: list[str] | None = None) -> int:
 
     code = run_realityscan(paths, realityscan_exe, args.timeout_hours)
     print(f"RealityScan exit code: {code}")
-    if code != 0:
-        return code
+    exit_code = final_reconstruction_exit_code(code, paths.model)
+    if exit_code != 0:
+        if code == 0:
+            print(
+                "RealityScan exited successfully, but the expected OBJ was not created; "
+                f"returning {MISSING_REALITYSCAN_OUTPUT_EXIT_CODE}."
+            )
+        return exit_code
     if paths.model.exists():
         print(f"Model exported: {paths.model}")
+        if args.mesh_large_face_filter:
+            try:
+                mesh_filter = filter_obj_large_faces(
+                    paths.model,
+                    area_ratio=args.mesh_max_face_area_ratio,
+                    min_faces=args.mesh_large_face_min_faces,
+                    report_path=paths.reports / "mesh_large_face_filter.json",
+                )
+                update_manifest_mesh_large_face_filter(paths, result=mesh_filter)
+                if mesh_filter.removed_face_count > 0:
+                    print(
+                        f"Removed {mesh_filter.removed_face_count} broad infill face(s) "
+                        f"above {mesh_filter.area_threshold:.6g} area units "
+                        f"(median {mesh_filter.median_face_area:.6g})."
+                    )
+                else:
+                    print("Large-face filter did not find broad infill triangles to remove.")
+            except Exception as exc:
+                message = f"Large-face filtering failed: {exc}"
+                update_manifest_mesh_large_face_filter(paths, warning=message)
+                print(message)
+        if args.metric_scale_active and stereo_calibration is not None:
+            try:
+                metric_result = scale_model_from_stereo_baseline(
+                    paths.model,
+                    variant_paths[best_spec.name].frames,
+                    stereo_calibration,
+                    translation_scale=args.stereo_translation_scale,
+                    min_pairs=args.metric_scale_min_pairs,
+                    report_path=paths.reports / "metric_scale.json",
+                )
+                update_manifest_metric_scale(paths, result=metric_result)
+                print(
+                    f"Metric model exported: {metric_result.metric_model} "
+                    f"(scale {metric_result.scale_factor:.6g}, "
+                    f"{metric_result.pair_count} stereo baselines -> meters)"
+                )
+            except Exception as exc:
+                message = f"Metric stereo scaling failed: {exc}"
+                update_manifest_metric_scale(paths, warning=message)
+                print(message)
+                if args.metric_scale_required:
+                    raise
     else:
         print(f"RealityScan completed but the expected model is not present yet: {paths.model}")
     print(f"Elapsed: {(time.perf_counter() - total_start) / 60.0:.1f} minutes")

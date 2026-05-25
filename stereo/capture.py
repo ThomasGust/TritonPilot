@@ -6,7 +6,7 @@ import json
 import time
 from dataclasses import asdict
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 import numpy as np
 
@@ -20,6 +20,10 @@ from video.frame_rotation import rotate_frame
 
 class StereoCaptureError(RuntimeError):
     """Raised when a stereo capture cannot be completed."""
+
+
+class StereoCaptureInterrupted(StereoCaptureError):
+    """Raised when an in-progress stereo capture is stopped by the caller."""
 
 
 class StereoCaptureSession:
@@ -83,7 +87,13 @@ class StereoCaptureSession:
                 except Exception:
                     pass
 
-    def capture_once(self, *, wait_s: float = 2.0, require_fresh: bool = True) -> dict[str, Any]:
+    def capture_once(
+        self,
+        *,
+        wait_s: float = 2.0,
+        require_fresh: bool = True,
+        stop_requested: Callable[[], bool] | None = None,
+    ) -> dict[str, Any]:
         """Capture one stereo pair whose receiver timestamps are close enough."""
 
         if self._left_camera is None or self._right_camera is None:
@@ -93,6 +103,8 @@ class StereoCaptureSession:
         best_delta_s: float | None = None
 
         while time.monotonic() <= deadline:
+            if stop_requested is not None and stop_requested():
+                raise StereoCaptureInterrupted("Stereo capture stopped")
             match = self._best_recent_pair(require_fresh=require_fresh)
             if match is None:
                 time.sleep(0.005)

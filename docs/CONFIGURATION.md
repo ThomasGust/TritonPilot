@@ -113,7 +113,7 @@ Roll/pitch leveling and yaw hold requests:
 ```powershell
 $env:TRITON_RP_LEVEL_TOGGLE=""
 $env:TRITON_RP_LEVEL_DEFAULT="0"
-$env:TRITON_YAW_HOLD_TOGGLE=""
+$env:TRITON_YAW_HOLD_TOGGLE="lstick"
 $env:TRITON_YAW_HOLD_DEFAULT="0"
 ```
 
@@ -121,7 +121,7 @@ Lights and arm/disarm backup controls:
 
 ```powershell
 $env:TRITON_LIGHTS_TOGGLE_SHORTCUT="L"
-$env:TRITON_LIGHTS_TOGGLE_BUTTON="lstick"
+$env:TRITON_LIGHTS_TOGGLE_BUTTON=""
 $env:TRITON_LIGHTS_TOGGLE_EDGE="lights"
 $env:TRITON_ARM_DISARM_SHORTCUT="O"
 $env:TRITON_ARM_DISARM_EDGE="menu"
@@ -172,6 +172,21 @@ $env:TRITON_DEPTH_HOLD_SENSOR_STALE_S="2.0"
 ```
 
 Change onboard depth-hold behavior in TritonOS, not in TritonPilot.
+
+Yaw-hold target latching:
+
+```powershell
+$env:TRITON_YAW_HOLD_MANUAL_AXIS="rx"
+$env:TRITON_YAW_HOLD_MANUAL_DEADBAND="0.12"
+$env:TRITON_YAW_HOLD_ATTITUDE_STALE_S="1.0"
+$env:TRITON_YAW_HOLD_RELEASE_SETTLE_S="0.20"
+$env:TRITON_YAW_HOLD_TRACK_INTERVAL_S="0.10"
+```
+
+TritonPilot uses fresh attitude telemetry to send an explicit yaw target when
+yaw hold engages, while the pilot is manually yawing, and when the pilot
+releases manual yaw input. TritonOS still owns the closed-loop controller,
+output limits, and mixing.
 
 ## Attitude Display Convention
 

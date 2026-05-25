@@ -73,6 +73,7 @@ class _PilotTargetStub:
         self.calls.append(("depth_enabled", bool(enabled)))
         self._modes["depth_hold"] = bool(enabled)
         self._modes["autopilot"]["depth"] = bool(enabled)
+        self._modes["autopilot"]["targets"].pop("depth_m", None)
         return True
 
     def set_autopilot_axis_target(self, axis, target_deg, mode="hold"):
@@ -86,6 +87,8 @@ class _PilotTargetStub:
     def set_autopilot_axis_mode(self, axis, mode):
         self.calls.append(("axis_mode", axis, mode))
         self._modes["autopilot"][axis] = str(mode)
+        if str(mode) != "hold":
+            self._modes["autopilot"]["targets"].pop(f"{axis}_deg", None)
         return True
 
 
@@ -231,6 +234,51 @@ def test_hold_test_panel_can_set_manual_targets(monkeypatch):
         assert ("axis_target", "yaw", -90.0, "hold") in pilot.calls
         assert ("axis_mode", "roll", "level") in pilot.calls
         assert ("depth_enabled", False) in pilot.calls
+    finally:
+        panel.shutdown()
+        panel.close()
+        panel.deleteLater()
+        app.processEvents()
+
+
+def test_hold_test_panel_uses_runtime_targets_when_command_has_none(monkeypatch):
+    app = _app()
+    monkeypatch.setattr("gui.instruments.ManagementRpcService", _RpcStub)
+    pilot = _PilotTargetStub()
+    pilot._modes["yaw_hold"] = True
+    pilot._modes["autopilot"]["yaw"] = "hold"
+
+    panel = HoldTestPanel(pilot_svc=pilot, endpoint="tcp://127.0.0.1:5556")
+    try:
+        app.processEvents()
+        panel._apply_runtime_state(
+            {
+                "control_loop_available": True,
+                "armed": True,
+                "autopilot": {
+                    "available": True,
+                    "sensor_available": True,
+                    "status": {
+                        "attitude": {
+                            "enabled_cmd": True,
+                            "active": True,
+                            "axes": {
+                                "yaw": {
+                                    "mode": "hold",
+                                    "enabled_cmd": True,
+                                    "active": True,
+                                    "target_deg": 127.5,
+                                    "angle_deg": 120.0,
+                                }
+                            },
+                        }
+                    },
+                },
+            }
+        )
+
+        assert panel._axis_target_spins["yaw"].value() == pytest.approx(127.5)
+        assert "runtime 127.5 deg" in panel._runtime_labels["pilot_yaw_hold"].text()
     finally:
         panel.shutdown()
         panel.close()

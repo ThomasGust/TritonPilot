@@ -470,7 +470,7 @@ class GamepadSource:
         # IMPORTANT: We must avoid overlapping indices between menu/win and the
         # stick-click buttons (L3/R3). Earlier defaults accidentally included
         # L3/R3 indices inside win/menu for some SDL mappings, which caused
-        # lights toggles (L3) to also arm/disarm/kill.
+        # stick-click toggles (L3/R3) to also arm/disarm/kill.
         #
         # Button indices vary by controller model and OS/driver, so we keep
         # conservative defaults and allow overrides via config/env.

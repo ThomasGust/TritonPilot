@@ -355,17 +355,24 @@ class PilotPublisherService:
         if axis_key not in {"roll", "pitch", "yaw"}:
             return False
         mode_value = str(mode or "off").strip().lower() or "off"
+        if mode_value not in {"hold", "level", "damp", "off"}:
+            mode_value = "off"
         with self._mode_lock:
             ap = self._autopilot_modes_locked()
+            targets = dict(ap.get("targets") or {})
+            had_target = f"{axis_key}_deg" in targets
             prev = str(ap.get(axis_key, "off"))
             ap[axis_key] = mode_value
+            if mode_value != "hold":
+                targets.pop(f"{axis_key}_deg", None)
+                ap["targets"] = targets
             if axis_key in {"roll", "pitch"}:
                 ap["roll_pitch_level"] = ap.get("roll") == "level" and ap.get("pitch") == "level"
                 self._modes["roll_pitch_level"] = bool(ap["roll_pitch_level"])
             elif axis_key == "yaw":
                 self._modes["yaw_hold"] = mode_value == "hold"
             self._modes["autopilot"] = ap
-        changed = prev != mode_value
+        changed = prev != mode_value or (mode_value != "hold" and had_target)
         if changed:
             self._emit_status(self._status_payload())
         return changed
@@ -429,13 +436,18 @@ class PilotPublisherService:
         enabled = bool(enabled)
         with self._mode_lock:
             ap = self._autopilot_modes_locked()
+            targets = dict(ap.get("targets") or {})
+            had_targets = "roll_deg" in targets or "pitch_deg" in targets
+            targets.pop("roll_deg", None)
+            targets.pop("pitch_deg", None)
+            ap["targets"] = targets
             prev = bool(self._modes.get("roll_pitch_level", False))
             ap["roll"] = "level" if enabled else "off"
             ap["pitch"] = "level" if enabled else "off"
             ap["roll_pitch_level"] = enabled
             self._modes["roll_pitch_level"] = enabled
             self._modes["autopilot"] = ap
-        changed = prev != enabled
+        changed = prev != enabled or had_targets
         if changed:
             self._emit_status(self._status_payload(controller="connected"))
         return changed
@@ -452,11 +464,15 @@ class PilotPublisherService:
         enabled = bool(enabled)
         with self._mode_lock:
             ap = self._autopilot_modes_locked()
+            targets = dict(ap.get("targets") or {})
+            had_target = "yaw_deg" in targets
+            targets.pop("yaw_deg", None)
+            ap["targets"] = targets
             prev = bool(self._modes.get("yaw_hold", False))
             ap["yaw"] = "hold" if enabled else "off"
             self._modes["yaw_hold"] = enabled
             self._modes["autopilot"] = ap
-        changed = prev != enabled
+        changed = prev != enabled or had_target
         if changed:
             self._emit_status(self._status_payload(controller="connected"))
         return changed
@@ -473,10 +489,21 @@ class PilotPublisherService:
         if self._roll_pitch_level_toggle_button and edges.get(self._roll_pitch_level_toggle_button) == "down":
             self.toggle_roll_pitch_level()
 
+        yaw_toggled = False
         if self._yaw_hold_toggle_button and edges.get(self._yaw_hold_toggle_button) == "down":
             self.toggle_yaw_hold()
+            yaw_toggled = True
 
-        if self._lights_toggle_button and edges.get(self._lights_toggle_button) == "down":
+        lights_button_conflicts_with_yaw = (
+            yaw_toggled
+            and self._lights_toggle_button
+            and self._lights_toggle_button == self._yaw_hold_toggle_button
+        )
+        if (
+            self._lights_toggle_button
+            and not lights_button_conflicts_with_yaw
+            and edges.get(self._lights_toggle_button) == "down"
+        ):
             edges[self._lights_toggle_edge] = "down"
 
         if self._reverse_toggle_button and edges.get(self._reverse_toggle_button) == "down":
@@ -495,9 +522,13 @@ class PilotPublisherService:
             prev = bool(self._modes.get("depth_hold", False))
             self._modes["depth_hold"] = enabled
             ap = self._autopilot_modes_locked()
+            targets = dict(ap.get("targets") or {})
+            had_target = "depth_m" in targets
+            targets.pop("depth_m", None)
+            ap["targets"] = targets
             ap["depth"] = enabled
             self._modes["autopilot"] = ap
-        changed = prev != enabled
+        changed = prev != enabled or had_target
         if changed:
             self._emit_status(self._status_payload(controller="connected"))
         return changed

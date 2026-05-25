@@ -19,8 +19,8 @@ That means software can pair frames closely, but it cannot make the two sensors
 expose at exactly the same instant. For accurate calibration and measurement,
 keep the calibration board and ROV steady when capturing pairs.
 
-Triton's shipped calibration board is ChArUco with 17 rows by 24 columns, 30 mm
-square width, 22 mm marker width, and the calib.io default `DICT_5X5_1000`
+Triton's pool calibration board is ChArUco with 9 rows by 12 columns, 60 mm
+square width, 45 mm marker width, and the calib.io default `DICT_5X5_1000`
 dictionary. TritonAnalysis uses those values as its default stereo calibration
 settings.
 

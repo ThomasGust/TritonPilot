@@ -32,6 +32,7 @@ class _FakePilotService:
     def __init__(self, *args, **kwargs):
         self._reverse = False
         self.queued_edges = []
+        self.axis_target_calls = []
 
     def start(self):
         return None
@@ -55,6 +56,10 @@ class _FakePilotService:
         state = _args[1] if len(_args) > 1 else _kwargs.get("state", "down")
         self.queued_edges.append((name, state))
         return None
+
+    def set_autopilot_axis_target(self, axis, target_deg, *, mode="hold"):
+        self.axis_target_calls.append((axis, float(target_deg), mode))
+        return True
 
     def t200_wrist_gain_step(self):
         return 0.05
@@ -421,6 +426,101 @@ def test_arm_disarm_backup_controls_queue_menu_edge(monkeypatch, tmp_path):
         assert win._arm_disarm_btn.text() == "Arm (O)"
         win._handle_sensor_msg_on_ui({"type": "heartbeat", "sensor": "heartbeat", "armed": True})
         assert win._arm_disarm_btn.text() == "Disarm (O)"
+    finally:
+        win.close()
+        app.processEvents()
+
+
+def test_yaw_hold_latches_current_attitude_target(monkeypatch, tmp_path):
+    app = _app()
+    streams_path = tmp_path / "streams.json"
+    streams_path.write_text("{}", encoding="utf-8")
+
+    monkeypatch.setattr(main_window, "QSettings", lambda *args, **kwargs: _FakeSettings())
+    monkeypatch.setattr(main_window, "PilotPublisherService", _FakePilotService)
+    monkeypatch.setattr(main_window, "SensorSubscriberService", _FakeSensorService)
+    monkeypatch.setattr(main_window, "RemoteCameraManager", _FakeRemoteCameraManager)
+    monkeypatch.setattr(main_window, "VideoTabs", _FakeVideoPanel)
+    monkeypatch.setattr(main_window, "HoldTestPanel", _SimplePage)
+    monkeypatch.setattr(main_window, "ManagementPage", _SimplePage)
+    monkeypatch.setattr(main_window.threading, "Thread", _NoopThread)
+
+    win = main_window.MainWindow(str(streams_path))
+    try:
+        app.processEvents()
+        win._handle_sensor_msg_on_ui(
+            {
+                "type": "attitude",
+                "sensor": "roll_pitch_estimator",
+                "roll_deg": 0.0,
+                "pitch_deg": 0.0,
+                "yaw_deg": 37.5,
+            }
+        )
+        win._handle_pilot_msg_on_ui(
+            {
+                "ts": 1.0,
+                "axes": {"rx": 0.0, "ry": 0.0},
+                "modes": {"yaw_hold": True, "autopilot": {"yaw": "hold", "targets": {}}},
+            }
+        )
+
+        assert win.pilot_svc.axis_target_calls[-1] == ("yaw", 37.5, "hold")
+        assert "37.5deg" in win._yaw_hold_status_text
+    finally:
+        win.close()
+        app.processEvents()
+
+
+def test_yaw_hold_latches_target_after_manual_yaw_release(monkeypatch, tmp_path):
+    app = _app()
+    streams_path = tmp_path / "streams.json"
+    streams_path.write_text("{}", encoding="utf-8")
+
+    monkeypatch.setattr(main_window, "QSettings", lambda *args, **kwargs: _FakeSettings())
+    monkeypatch.setattr(main_window, "PilotPublisherService", _FakePilotService)
+    monkeypatch.setattr(main_window, "SensorSubscriberService", _FakeSensorService)
+    monkeypatch.setattr(main_window, "RemoteCameraManager", _FakeRemoteCameraManager)
+    monkeypatch.setattr(main_window, "VideoTabs", _FakeVideoPanel)
+    monkeypatch.setattr(main_window, "HoldTestPanel", _SimplePage)
+    monkeypatch.setattr(main_window, "ManagementPage", _SimplePage)
+    monkeypatch.setattr(main_window.threading, "Thread", _NoopThread)
+    monkeypatch.setattr(main_window, "YAW_HOLD_RELEASE_SETTLE_S", 0.0)
+
+    win = main_window.MainWindow(str(streams_path))
+    try:
+        app.processEvents()
+        win._handle_sensor_msg_on_ui({"type": "attitude", "sensor": "roll_pitch_estimator", "yaw_deg": 10.0})
+        win._handle_pilot_msg_on_ui(
+            {
+                "ts": 1.0,
+                "axes": {"rx": 0.5, "ry": 0.0},
+                "modes": {"yaw_hold": True, "autopilot": {"yaw": "hold", "targets": {}}},
+            }
+        )
+        assert win.pilot_svc.axis_target_calls[-1] == ("yaw", 10.0, "hold")
+
+        win._handle_sensor_msg_on_ui({"type": "attitude", "sensor": "roll_pitch_estimator", "yaw_deg": 22.0})
+        win._handle_pilot_msg_on_ui(
+            {
+                "ts": 1.1,
+                "axes": {"rx": 0.0, "ry": 0.0},
+                "modes": {"yaw_hold": True, "autopilot": {"yaw": "hold", "targets": {}}},
+            }
+        )
+        assert win.pilot_svc.axis_target_calls[-1] == ("yaw", 10.0, "hold")
+        assert win._yh_release_ts is not None
+
+        win._handle_sensor_msg_on_ui({"type": "attitude", "sensor": "roll_pitch_estimator", "yaw_deg": 23.0})
+        win._handle_pilot_msg_on_ui(
+            {
+                "ts": 1.2,
+                "axes": {"rx": 0.0, "ry": 0.0},
+                "modes": {"yaw_hold": True, "autopilot": {"yaw": "hold", "targets": {}}},
+            }
+        )
+
+        assert win.pilot_svc.axis_target_calls[-1] == ("yaw", 23.0, "hold")
     finally:
         win.close()
         app.processEvents()

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import math
+import time
 from typing import Optional
 
 from PyQt6.QtCore import Qt, QRectF, QTimer, pyqtSignal
@@ -242,6 +243,9 @@ class HoldTestPanel(QWidget):
         self._lights_shortcut_text = str(LIGHTS_TOGGLE_SHORTCUT or "L").strip() or "L"
         self._runtime_labels: dict[str, QLabel] = {}
         self._axis_target_spins: dict[str, QDoubleSpinBox] = {}
+        self._runtime_targets: dict[str, float] = {}
+        self._target_spin_edit_until: dict[int, float] = {}
+        self._syncing_target_spins = False
         self._runtime_request_pending = False
         self._svc = ManagementRpcService(endpoint=self._endpoint, on_result=self._on_rpc_result_from_thread)
         self._svc.start()
@@ -281,6 +285,7 @@ class HoldTestPanel(QWidget):
         target_grid.setVerticalSpacing(6)
 
         self.depth_target_spin = self._make_target_spin(-2.0, 100.0, 0.05, " m", 2)
+        self._watch_target_spin(self.depth_target_spin)
         self.depth_target_btn = QPushButton("Hold Target")
         self.depth_target_btn.clicked.connect(self._hold_depth_target)
         self.depth_off_btn = QPushButton("Off")
@@ -291,7 +296,11 @@ class HoldTestPanel(QWidget):
         target_grid.addWidget(self.depth_off_btn, 0, 3)
 
         for row, axis in enumerate(("roll", "pitch", "yaw"), start=1):
-            spin = self._make_target_spin(-180.0, 180.0, 1.0, " deg", 1)
+            if axis == "yaw":
+                spin = self._make_target_spin(-360.0, 360.0, 5.0, " deg", 1)
+            else:
+                spin = self._make_target_spin(-90.0, 90.0, 1.0, " deg", 1)
+            self._watch_target_spin(spin)
             self._axis_target_spins[axis] = spin
             hold_btn = QPushButton("Hold Target")
             hold_btn.clicked.connect(lambda _checked=False, axis=axis: self._hold_axis_target(axis))
@@ -329,7 +338,7 @@ class HoldTestPanel(QWidget):
             self._runtime_labels[key] = value
         self.control_card.body.addLayout(control_grid)
 
-        shortcut_hint = QLabel(f"R3 toggles depth hold; L3 and {self._lights_shortcut_text.upper()} toggle lights.")
+        shortcut_hint = QLabel(f"R3 toggles depth hold; L3 toggles yaw hold; {self._lights_shortcut_text.upper()} toggles lights.")
         shortcut_hint.setWordWrap(True)
         shortcut_hint.setStyleSheet("color: #8f96aa;")
         self.control_card.body.addWidget(shortcut_hint)
@@ -416,7 +425,19 @@ class HoldTestPanel(QWidget):
         spin.setSuffix(str(suffix or ""))
         spin.setKeyboardTracking(False)
         spin.setMinimumWidth(100)
+        spin.setAccelerated(True)
         return spin
+
+    def _watch_target_spin(self, spin: QDoubleSpinBox) -> None:
+        spin.valueChanged.connect(lambda _value, spin=spin: self._mark_target_spin_edited(spin))
+        editor = spin.lineEdit()
+        if editor is not None:
+            editor.textEdited.connect(lambda _text, spin=spin: self._mark_target_spin_edited(spin))
+
+    def _mark_target_spin_edited(self, spin: QDoubleSpinBox) -> None:
+        if self._syncing_target_spins:
+            return
+        self._target_spin_edit_until[id(spin)] = time.monotonic() + 2.0
 
     def shutdown(self) -> None:
         self._runtime_timer.stop()
@@ -474,33 +495,50 @@ class HoldTestPanel(QWidget):
                 level_btn.setEnabled(bool(has_axis_mode))
 
     def _sync_target_spins(self, targets: dict) -> None:
-        self._maybe_set_spin(self.depth_target_spin, targets.get("depth_m"))
+        self._maybe_set_spin(self.depth_target_spin, self._target_from_command_or_runtime(targets, "depth_m"))
         for axis, spin in self._axis_target_spins.items():
-            self._maybe_set_spin(spin, targets.get(f"{axis}_deg"))
+            self._maybe_set_spin(spin, self._target_from_command_or_runtime(targets, f"{axis}_deg"))
 
-    @staticmethod
-    def _spin_is_being_edited(spin: QDoubleSpinBox) -> bool:
+    def _target_from_command_or_runtime(self, targets: dict, key: str):
+        if isinstance(targets, dict) and key in targets:
+            return targets.get(key)
+        return self._runtime_targets.get(key)
+
+    def _spin_is_being_edited(self, spin: QDoubleSpinBox) -> bool:
         if spin.hasFocus():
             return True
         editor = spin.lineEdit()
-        return bool(editor is not None and editor.hasFocus())
+        if editor is not None and editor.hasFocus():
+            return True
+        return time.monotonic() < float(self._target_spin_edit_until.get(id(spin), 0.0))
 
-    @staticmethod
-    def _maybe_set_spin(spin: QDoubleSpinBox, value) -> None:
-        if HoldTestPanel._spin_is_being_edited(spin):
+    def _maybe_set_spin(self, spin: QDoubleSpinBox, value) -> None:
+        if self._spin_is_being_edited(spin):
             return
         try:
             v = float(value)
         except Exception:
             return
         if math.isfinite(v) and abs(float(spin.value()) - v) > 1e-9:
-            spin.setValue(v)
+            self._syncing_target_spins = True
+            try:
+                previous = spin.blockSignals(True)
+                try:
+                    spin.setValue(v)
+                finally:
+                    spin.blockSignals(previous)
+            finally:
+                self._syncing_target_spins = False
 
     def _format_pilot_depth_mode(self, modes: dict, targets: dict) -> str:
         text = "ON" if modes.get("depth_hold") else "OFF"
-        target = self._fmt_num(targets.get("depth_m"), "m", decimals=2)
-        if target != "-":
-            text += f" target {target}"
+        if modes.get("depth_hold"):
+            cmd_target = self._fmt_num(targets.get("depth_m"), "m", decimals=2)
+            runtime_target = self._fmt_num(self._runtime_targets.get("depth_m"), "m", decimals=2)
+            if cmd_target != "-":
+                text += f" cmd {cmd_target}"
+            if runtime_target != "-" and runtime_target != cmd_target:
+                text += f" runtime {runtime_target}"
         return text
 
     def _format_pilot_axis_mode(self, modes: dict, ap: dict, targets: dict, axis: str) -> str:
@@ -508,9 +546,14 @@ class HoldTestPanel(QWidget):
             return "ON"
         mode = str(ap.get(axis) or ("hold" if modes.get(f"{axis}_hold") else "off")).strip().lower()
         text = mode.upper() if mode and mode != "off" else "OFF"
-        target = self._fmt_num(targets.get(f"{axis}_deg"), "deg", decimals=1)
-        if target != "-":
-            text += f" target {target}"
+        if mode and mode != "off":
+            key = f"{axis}_deg"
+            cmd_target = self._fmt_num(targets.get(key), "deg", decimals=1)
+            runtime_target = self._fmt_num(self._runtime_targets.get(key), "deg", decimals=1)
+            if cmd_target != "-":
+                text += f" cmd {cmd_target}"
+            if runtime_target != "-" and runtime_target != cmd_target:
+                text += f" runtime {runtime_target}"
         return text
 
     def _format_pilot_rp_modes(self, modes: dict, ap: dict, targets: dict) -> str:
@@ -624,6 +667,7 @@ class HoldTestPanel(QWidget):
         depth_hold = dict(runtime.get("depth_hold") or {})
         depth_status = dict(depth_hold.get("status") or {})
         depth_sensor = dict(depth_hold.get("sensor") or {})
+        self._update_runtime_target_cache(depth_hold, depth_status, attitude_runtime)
 
         self._runtime_labels["runtime_loop"].setText("available" if runtime.get("control_loop_available") else "unavailable")
         self._runtime_labels["runtime_armed"].setText("yes" if runtime.get("armed") else "no")
@@ -647,6 +691,31 @@ class HoldTestPanel(QWidget):
         self._runtime_labels["runtime_attitude_debug"].setText(self._format_attitude_debug(attitude_runtime))
         self._runtime_labels["runtime_depth_sensor"].setText(self._format_depth_sensor(depth_sensor))
         self._runtime_labels["runtime_depth_debug"].setText(self._format_depth_debug(depth_status))
+        self._sync_local_hold_controls()
+
+    def _update_runtime_target_cache(self, depth_hold: dict, depth_status: dict, attitude_runtime: dict) -> None:
+        targets: dict[str, float] = {}
+        if depth_status.get("enabled_cmd") or depth_status.get("active"):
+            depth_target = depth_status.get("target_m", depth_hold.get("target_m"))
+            try:
+                depth_value = float(depth_target)
+            except Exception:
+                depth_value = math.nan
+            if math.isfinite(depth_value):
+                targets["depth_m"] = depth_value
+
+        axes = attitude_runtime.get("axes") if isinstance(attitude_runtime.get("axes"), dict) else {}
+        for axis in ("roll", "pitch", "yaw"):
+            st = axes.get(axis) if isinstance(axes.get(axis), dict) else {}
+            if not (st.get("enabled_cmd") or st.get("active")):
+                continue
+            try:
+                value = float(st.get("target_deg"))
+            except Exception:
+                value = math.nan
+            if math.isfinite(value):
+                targets[f"{axis}_deg"] = value
+        self._runtime_targets = targets
 
     @staticmethod
     def _fmt_bool(value) -> str:

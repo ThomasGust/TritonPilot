@@ -9,6 +9,7 @@ thread.
 from __future__ import annotations
 
 import os
+import math
 import socket
 import threading
 import time
@@ -44,6 +45,11 @@ from config import (
     DEPTH_HOLD_WALK_DEADBAND,
     DEPTH_HOLD_WALK_RATE_MPS,
     DEPTH_HOLD_SENSOR_STALE_S,
+    YAW_HOLD_ATTITUDE_STALE_S,
+    YAW_HOLD_MANUAL_AXIS,
+    YAW_HOLD_MANUAL_DEADBAND,
+    YAW_HOLD_RELEASE_SETTLE_S,
+    YAW_HOLD_TRACK_INTERVAL_S,
     REVERSE_CAMERA_KEYWORDS,
     REVERSE_CAMERA_NAMES,
     LIGHTS_TOGGLE_EDGE,
@@ -479,6 +485,16 @@ class MainWindow(QMainWindow):
         self._dh_target_m: float | None = None
         self._dh_prev_pilot_ts: float | None = None
 
+        # Yaw-hold target latching. This keeps the yaw target explicit on the
+        # wire when the pilot engages hold or releases manual yaw input.
+        self._last_attitude_ts = 0.0
+        self._last_attitude: dict = {}
+        self._yh_enabled: bool = False
+        self._yh_target_deg: float | None = None
+        self._yh_manual_active: bool = False
+        self._yh_release_ts: float | None = None
+        self._yh_last_track_ts: float = 0.0
+
         # network status (tether vs wifi, local route to ROV, remote link state)
         self._net_lbl = QLabel("Net: -")
         self._last_net_ts = 0.0
@@ -902,6 +918,123 @@ class MainWindow(QMainWindow):
             pass
         return super().eventFilter(obj, event)
 
+    @staticmethod
+    def _finite_float(value) -> float | None:
+        try:
+            numeric = float(value)
+        except Exception:
+            return None
+        if not math.isfinite(numeric):
+            return None
+        return numeric
+
+    @staticmethod
+    def _wrap_degrees(deg: float) -> float:
+        return ((float(deg) + 180.0) % 360.0) - 180.0
+
+    @staticmethod
+    def _pilot_axis_value(msg: dict, axis_name: str) -> float:
+        axes = (msg or {}).get("axes", {}) or {}
+        axis_key = str(axis_name or "").strip().lower()
+        try:
+            return float(axes.get(axis_key, 0.0) or 0.0)
+        except Exception:
+            return 0.0
+
+    def _latest_attitude_yaw_deg(self) -> tuple[float | None, bool]:
+        stale = (time.time() - float(self._last_attitude_ts)) > float(YAW_HOLD_ATTITUDE_STALE_S)
+        if stale:
+            return None, True
+        yaw = self._finite_float((self._last_attitude or {}).get("yaw_deg"))
+        if yaw is None:
+            return None, True
+        return self._wrap_degrees(yaw), False
+
+    def _set_yaw_hold_target_to_current_attitude(self, *, reason: str, min_attitude_ts: float | None = None) -> bool:
+        if min_attitude_ts is not None and float(self._last_attitude_ts) < float(min_attitude_ts):
+            return False
+        yaw_deg, stale = self._latest_attitude_yaw_deg()
+        if stale or yaw_deg is None:
+            return False
+        target = self._wrap_degrees(yaw_deg)
+        if self._yh_target_deg is not None and abs(self._wrap_degrees(target - self._yh_target_deg)) < 0.5:
+            return False
+        try:
+            setter = getattr(self.pilot_svc, "set_autopilot_axis_target", None)
+            if not callable(setter):
+                return False
+            setter("yaw", target, mode="hold")
+        except Exception:
+            return False
+        self._yh_target_deg = target
+        if reason != "track":
+            label = "engaged" if reason == "engage" else "released"
+            self.statusBar().showMessage(f"Yaw hold target {label}: {target:.1f} deg", 2500)
+        return True
+
+    def _sync_yaw_hold_target_from_pilot(self, yaw_hold: bool, manual_yaw: float) -> bool:
+        now = time.time()
+        manual_active = abs(float(manual_yaw)) > float(YAW_HOLD_MANUAL_DEADBAND)
+        was_enabled = bool(self._yh_enabled)
+        was_manual_active = bool(self._yh_manual_active)
+        synced = False
+
+        if not yaw_hold:
+            self._yh_enabled = False
+            self._yh_target_deg = None
+            self._yh_manual_active = False
+            self._yh_release_ts = None
+            self._yh_last_track_ts = 0.0
+            return False
+
+        if not was_enabled:
+            self._yh_release_ts = None
+            if not manual_active:
+                synced = self._set_yaw_hold_target_to_current_attitude(reason="engage")
+
+        if manual_active:
+            self._yh_release_ts = None
+            if (now - float(self._yh_last_track_ts)) >= float(YAW_HOLD_TRACK_INTERVAL_S):
+                synced = self._set_yaw_hold_target_to_current_attitude(reason="track") or synced
+                self._yh_last_track_ts = now
+        elif was_manual_active or self._yh_release_ts is not None:
+            if self._yh_release_ts is None:
+                self._yh_release_ts = now
+            if (now - float(self._yh_release_ts)) >= float(YAW_HOLD_RELEASE_SETTLE_S):
+                synced = (
+                    self._set_yaw_hold_target_to_current_attitude(
+                        reason="release",
+                        min_attitude_ts=float(self._yh_release_ts),
+                    )
+                    or synced
+                )
+                if synced:
+                    self._yh_release_ts = None
+
+        self._yh_enabled = True
+        self._yh_manual_active = manual_active
+        return synced
+
+    def _format_yaw_hold_status(self, msg: dict, yaw_hold: bool, manual_yaw: float) -> str:
+        if not yaw_hold:
+            return "Yaw Hold: OFF"
+        yaw_deg, stale = self._latest_attitude_yaw_deg()
+        modes = (msg or {}).get("modes", {}) or {}
+        ap = modes.get("autopilot") if isinstance(modes.get("autopilot"), dict) else {}
+        targets = ap.get("targets") if isinstance(ap.get("targets"), dict) else {}
+        target = self._finite_float(targets.get("yaw_deg"))
+        if target is None:
+            target = self._yh_target_deg
+
+        yaw_txt = "-" if yaw_deg is None else f"{float(yaw_deg):.1f}deg"
+        target_txt = "-" if target is None else f"{float(self._wrap_degrees(target)):.1f}deg"
+        text = f"Yaw Hold: y {yaw_txt} -> set {target_txt}"
+        if abs(float(manual_yaw)) > float(YAW_HOLD_MANUAL_DEADBAND):
+            text += " [manual]"
+        if stale:
+            text += " [ATT STALE]"
+        return text
+
     # Background thread to UI thread.
     def _on_sensor_msg_from_thread(self, msg: dict):
         # called in sensor thread
@@ -1002,6 +1135,9 @@ class MainWindow(QMainWindow):
                     # heave > 0 means "UP" => setpoint depth decreases
                     self._dh_target_m += (-heave) * float(DEPTH_HOLD_WALK_RATE_MPS) * float(dt)
 
+            manual_yaw = self._pilot_axis_value(msg or {}, YAW_HOLD_MANUAL_AXIS)
+            self._sync_yaw_hold_target_from_pilot(yaw_hold, manual_yaw)
+
             # Compose status text.
             if dh:
                 # Depth freshness (UI only)
@@ -1033,7 +1169,7 @@ class MainWindow(QMainWindow):
                 self._depth_hold_status_text = "Depth Hold: OFF"
 
             self._attitude_hold_status_text = "RP Level: ON" if rp_level else "RP Level: OFF"
-            self._yaw_hold_status_text = "Yaw Hold: ON" if yaw_hold else "Yaw Hold: OFF"
+            self._yaw_hold_status_text = self._format_yaw_hold_status(msg or {}, yaw_hold, manual_yaw)
 
         except Exception:
             self._depth_hold_status_text = "Depth Hold: -"
@@ -1115,6 +1251,12 @@ class MainWindow(QMainWindow):
                             self._set_status(self._depth_lbl, s)
                     except Exception:
                         self._set_status(self._depth_lbl, f"Depth: {sensor} -")
+
+            if typ == "attitude":
+                yaw = self._finite_float((msg or {}).get("yaw_deg"))
+                if yaw is not None:
+                    self._last_attitude_ts = time.time()
+                    self._last_attitude = dict(msg or {})
 
             # Update a compact power readout in the status bar.
             if typ == "power":

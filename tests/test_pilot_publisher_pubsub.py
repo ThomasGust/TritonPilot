@@ -119,16 +119,33 @@ def test_left_bumper_is_default_reverse_toggle(monkeypatch):
     assert svc.current_modes()["reverse"] is False
 
 
-def test_left_stick_defaults_to_lights(monkeypatch):
+def test_left_stick_defaults_to_yaw_hold(monkeypatch):
     monkeypatch.setattr("input.pilot_service.time.sleep", lambda *_args, **_kwargs: None)
 
-    svc = PilotPublisherService(endpoint="inproc://lstick_lights_test", rate_hz=30.0, deadzone=0.0, debug=False)
+    svc = PilotPublisherService(endpoint="inproc://lstick_yaw_hold_test", rate_hz=30.0, deadzone=0.0, debug=False)
 
     edges = {"lstick": "down"}
     svc._handle_mode_edges(edges)
 
-    assert svc._lights_toggle_button == "lstick"
-    assert edges["lights"] == "down"
+    assert svc._yaw_hold_toggle_button == "lstick"
+    assert svc.current_modes()["yaw_hold"] is True
+    assert svc.current_modes()["autopilot"]["yaw"] == "hold"
+    assert svc._lights_toggle_button == ""
+    assert "lights" not in edges
+
+
+def test_yaw_hold_button_takes_precedence_over_same_lights_button(monkeypatch):
+    monkeypatch.setattr("input.pilot_service.time.sleep", lambda *_args, **_kwargs: None)
+
+    svc = PilotPublisherService(endpoint="inproc://lstick_yaw_lights_conflict_test", rate_hz=30.0, deadzone=0.0, debug=False)
+    svc._yaw_hold_toggle_button = "lstick"
+    svc._lights_toggle_button = "lstick"
+
+    edges = {"lstick": "down"}
+    svc._handle_mode_edges(edges)
+
+    assert svc.current_modes()["yaw_hold"] is True
+    assert "lights" not in edges
 
 
 def test_aux_axes_are_embedded_in_frame(monkeypatch):
@@ -232,3 +249,18 @@ def test_manual_hold_targets_are_exposed_in_autopilot_modes(monkeypatch):
 
     modes["autopilot"]["targets"]["roll_deg"] = 99.0
     assert svc.current_modes()["autopilot"]["targets"]["roll_deg"] == 8.5
+
+    assert svc.set_autopilot_axis_mode("roll", "level") is True
+    modes = svc.current_modes()
+    assert modes["autopilot"]["roll"] == "level"
+    assert "roll_deg" not in modes["autopilot"]["targets"]
+
+    assert svc.set_yaw_hold_enabled(False) is True
+    modes = svc.current_modes()
+    assert modes["autopilot"]["yaw"] == "off"
+    assert "yaw_deg" not in modes["autopilot"]["targets"]
+
+    assert svc.set_depth_hold_enabled(False) is True
+    modes = svc.current_modes()
+    assert modes["depth_hold"] is False
+    assert "depth_m" not in modes["autopilot"]["targets"]

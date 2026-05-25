@@ -4,7 +4,7 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-from stereo.capture import StereoCaptureSession
+from stereo.capture import StereoCaptureInterrupted, StereoCaptureSession
 from stereo.pairs import load_stereo_pairs
 from video.cam import CameraFramePacket
 
@@ -213,3 +213,39 @@ def test_stereo_capture_chooses_closest_buffered_frame_pair(tmp_path: Path):
     assert record["left"]["seq"] == 10
     assert record["right"]["seq"] == 20
     assert record["pair_delta_ms"] == pytest.approx(10.0)
+
+
+def test_stereo_capture_once_honors_stop_request(tmp_path: Path):
+    streams_path = tmp_path / "streams.json"
+    streams_path.write_text(
+        json.dumps(
+            {
+                "streams": [{"name": "Left"}, {"name": "Right"}],
+                "stereo_pairs": [
+                    {
+                        "name": "Forward",
+                        "left": "Left",
+                        "right": "Right",
+                        "rig_id": "rig-a",
+                        "max_pair_delta_ms": 20,
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    pair = load_stereo_pairs(streams_path)[0]
+    manager = _FakeManager()
+    session = StereoCaptureSession(
+        manager,  # type: ignore[arg-type]
+        pair,
+        output_root=tmp_path,
+        session_name="interrupt-session",
+    )
+
+    session.start()
+    try:
+        with pytest.raises(StereoCaptureInterrupted):
+            session.capture_once(wait_s=5.0, stop_requested=lambda: True)
+    finally:
+        session.stop()

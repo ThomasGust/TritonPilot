@@ -44,6 +44,7 @@ Before arming:
 Default controls include:
 
 - Right stick press toggles depth hold.
+- Left stick press toggles yaw hold.
 - Left bumper toggles reverse drive.
 - Keyboard `R` toggles reverse drive.
 - Keyboard `L` sends the lights edge.
