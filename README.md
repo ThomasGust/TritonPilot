@@ -139,7 +139,8 @@ predictable under competition pressure.
 
 The Stereo tab is a capture and diagnostics surface, not a scoring applet. It
 lets operators view the configured stereo pair, monitor left/right frame timing,
-and save timestamped stereo sessions for TritonAnalysis calibration.
+save timestamped stereo sessions for TritonAnalysis calibration, and optionally
+render a throttled live disparity preview from an exported stereo calibration.
 
 ## Safety Notes
 

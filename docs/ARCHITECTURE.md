@@ -142,8 +142,9 @@ Captured media and data are the handoff point to TritonAnalysis.
 
 Stereo capture follows the same handoff rule. TritonPilot can save timestamped
 left/right image pairs and a `manifest.json` from configured stereo streams,
-but calibration, rectification, disparity, and measurement run in
-TritonAnalysis.
+while TritonAnalysis remains the owner for calibration and measurement. The
+pilot GUI can optionally use an exported stereo calibration to render a
+throttled live disparity preview for operator awareness.
 
 ## Threading Model
 

@@ -145,6 +145,16 @@ def apply_modern_style(app: QApplication) -> None:
     QLabel#stereoMetaValue {
         color: #d7dbe8;
     }
+    QFrame#stereoDisparityFrame {
+        background: #08090d;
+        border: 1px solid #2a2a32;
+        border-radius: 6px;
+    }
+    QLabel#stereoDisparityPreview {
+        color: #97a0b8;
+        background: #08090d;
+        padding: 8px;
+    }
     QLabel#stereoPill {
         border-radius: 10px;
         padding: 4px 10px;

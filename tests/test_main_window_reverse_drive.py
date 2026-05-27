@@ -396,6 +396,47 @@ def test_stereo_page_resumes_existing_capture_session(tmp_path):
         app.processEvents()
 
 
+def test_stereo_page_resolves_disparity_calibration_from_metadata(tmp_path):
+    app = _app()
+    from gui.stereo_page import StereoPage
+
+    data_dir = tmp_path / "data"
+    calibration_path = data_dir / "calibrations" / "rig-a.json"
+    calibration_path.parent.mkdir(parents=True)
+    calibration_path.write_text("{}", encoding="utf-8")
+    streams_path = data_dir / "streams.json"
+    streams_path.write_text(
+        json.dumps(
+            {
+                "streams": [{"name": "Primary Camera"}, {"name": "Aux Camera"}],
+                "stereo_pairs": [
+                    {
+                        "name": "Forward Stereo",
+                        "left": "Primary Camera",
+                        "right": "Aux Camera",
+                        "rig_id": "rig-a",
+                        "metadata": {"calibration_path": "calibrations/rig-a.json"},
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    page = StereoPage(
+        streams_path=str(streams_path),
+        manager=_FakeRemoteCameraManager(str(streams_path)),
+        packet_provider=lambda _name: None,
+    )
+    try:
+        app.processEvents()
+        assert page._resolve_disparity_calibration_path() == calibration_path.resolve()
+        assert page.disparity_calibration_lbl.text() == str(calibration_path.resolve())
+    finally:
+        page.close()
+        app.processEvents()
+
+
 def test_arm_disarm_backup_controls_queue_menu_edge(monkeypatch, tmp_path):
     app = _app()
     streams_path = tmp_path / "streams.json"
