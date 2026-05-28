@@ -1,4 +1,5 @@
 import json
+import time
 import urllib.error
 import urllib.request
 from pathlib import Path
@@ -31,9 +32,17 @@ def test_analysis_transfer_server_indexes_and_serves_files(tmp_path: Path):
 
         data = urllib.request.urlopen(file_url(base_url, "run_01/frame one.txt"), timeout=5).read()
         assert data == b"hello analysis\n"
-        snapshot = server.request_snapshot()
+        for _attempt in range(50):
+            snapshot = server.request_snapshot()
+            if snapshot["active_file_transfers"] == 0:
+                break
+            time.sleep(0.01)
         assert snapshot["request_count"] >= 2
         assert snapshot["last_request_path"] == "/files/run_01/frame%20one.txt"
+        assert snapshot["active_file_transfers"] == 0
+        assert snapshot["last_file_path"] == "run_01/frame one.txt"
+        assert snapshot["last_file_bytes_sent"] == len(b"hello analysis\n")
+        assert snapshot["last_file_completed_ts"] > 0.0
     finally:
         server.shutdown()
         server.server_close()

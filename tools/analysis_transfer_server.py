@@ -126,6 +126,11 @@ class AnalysisTransferServer(ThreadingHTTPServer):
         self.request_count = 0
         self.last_request_ts = 0.0
         self.last_request_path = ""
+        self.active_file_transfers = 0
+        self.active_file_paths: list[str] = []
+        self.last_file_path = ""
+        self.last_file_bytes_sent = 0
+        self.last_file_completed_ts = 0.0
         self._request_lock = threading.Lock()
 
     def note_request(self, path: str) -> None:
@@ -135,6 +140,29 @@ class AnalysisTransferServer(ThreadingHTTPServer):
             self.last_request_ts = time.time()
             self.last_request_path = str(path or "")
 
+    def begin_file_transfer(self, path: str, size: int) -> None:
+        """Record that a file body is actively being sent to TritonAnalysis."""
+        with self._request_lock:
+            rel_path = str(path or "")
+            self.active_file_transfers += 1
+            self.active_file_paths.append(rel_path)
+            self.last_file_path = rel_path
+            self.last_file_bytes_sent = 0
+            self.last_request_ts = time.time()
+
+    def finish_file_transfer(self, path: str, bytes_sent: int) -> None:
+        """Record the completion of a file body transfer."""
+        with self._request_lock:
+            rel_path = str(path or "")
+            self.active_file_transfers = max(0, self.active_file_transfers - 1)
+            try:
+                self.active_file_paths.remove(rel_path)
+            except ValueError:
+                pass
+            self.last_file_path = rel_path
+            self.last_file_bytes_sent = int(bytes_sent)
+            self.last_file_completed_ts = time.time()
+
     def request_snapshot(self) -> dict:
         """Return request stats without exposing the lock to callers."""
         with self._request_lock:
@@ -142,6 +170,11 @@ class AnalysisTransferServer(ThreadingHTTPServer):
                 "request_count": int(self.request_count),
                 "last_request_ts": float(self.last_request_ts),
                 "last_request_path": str(self.last_request_path),
+                "active_file_transfers": int(self.active_file_transfers),
+                "active_file_paths": list(self.active_file_paths),
+                "last_file_path": str(self.last_file_path),
+                "last_file_bytes_sent": int(self.last_file_bytes_sent),
+                "last_file_completed_ts": float(self.last_file_completed_ts),
             }
 
 
@@ -214,12 +247,19 @@ class AnalysisTransferRequestHandler(BaseHTTPRequestHandler):
         self.send_header("Last-Modified", self.date_time_string(stat.st_mtime))
         self.send_header("Cache-Control", "no-store")
         self.end_headers()
-        with path.open("rb") as handle:
-            while True:
-                chunk = handle.read(1024 * 1024)
-                if not chunk:
-                    break
-                self.wfile.write(chunk)
+        rel_text = rel.as_posix()
+        bytes_sent = 0
+        self.transfer_server.begin_file_transfer(rel_text, int(stat.st_size))
+        try:
+            with path.open("rb") as handle:
+                while True:
+                    chunk = handle.read(1024 * 1024)
+                    if not chunk:
+                        break
+                    self.wfile.write(chunk)
+                    bytes_sent += len(chunk)
+        finally:
+            self.transfer_server.finish_file_transfer(rel_text, bytes_sent)
 
 
 def file_url(base_url: str, rel_path: str) -> str:

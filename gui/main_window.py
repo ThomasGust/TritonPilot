@@ -1801,6 +1801,13 @@ class MainWindow(QMainWindow):
             host = self._analysis_transfer_host
         return f"http://{host}:{int(port)}"
 
+    @staticmethod
+    def _short_analysis_transfer_path(path: object, *, max_chars: int = 34) -> str:
+        text = str(path or "")
+        if len(text) <= max_chars:
+            return text
+        return "..." + text[-max(0, max_chars - 3) :]
+
     def _set_analysis_transfer_label(self, text: str, tone: str | None = None) -> None:
         self._set_status(self._analysis_transfer_lbl, text)
         self._set_status_tone(self._analysis_transfer_lbl, tone)
@@ -1908,7 +1915,32 @@ class MainWindow(QMainWindow):
         except Exception:
             snapshot = {}
         last_request_ts = float(snapshot.get("last_request_ts") or 0.0)
-        if last_request_ts > 0:
+        active_file_transfers = int(snapshot.get("active_file_transfers") or 0)
+        active_file_paths = list(snapshot.get("active_file_paths") or [])
+        last_file_path = str(snapshot.get("last_file_path") or "")
+        last_file_completed_ts = float(snapshot.get("last_file_completed_ts") or 0.0)
+        if active_file_transfers > 0:
+            active_path = active_file_paths[-1] if active_file_paths else last_file_path
+            short_path = self._short_analysis_transfer_path(active_path)
+            pull_text = f"sending {active_file_transfers} file(s)"
+            if short_path:
+                pull_text = f"{pull_text}: {short_path}"
+            tone = "ok"
+        elif last_file_completed_ts > 0 and time.time() - last_file_completed_ts < 30.0:
+            age = max(0.0, time.time() - last_file_completed_ts)
+            short_path = self._short_analysis_transfer_path(last_file_path)
+            sent_bytes = int(snapshot.get("last_file_bytes_sent") or 0)
+            if sent_bytes >= 1024 * 1024:
+                size_text = f"{sent_bytes / (1024 * 1024):.1f} MB"
+            elif sent_bytes >= 1024:
+                size_text = f"{sent_bytes / 1024:.1f} KB"
+            else:
+                size_text = f"{sent_bytes} B"
+            pull_text = f"sent {size_text} {age:.0f}s ago"
+            if short_path:
+                pull_text = f"{pull_text}: {short_path}"
+            tone = "ok"
+        elif last_request_ts > 0:
             age = max(0.0, time.time() - last_request_ts)
             pull_text = f"last pull {age:.0f}s" if age < 60.0 else f"last pull {age / 60.0:.0f}m"
             tone = "ok" if age < 20.0 else "warn"

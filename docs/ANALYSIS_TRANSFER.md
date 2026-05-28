@@ -70,6 +70,10 @@ shows:
 Analysis Share: ON http://10.77.0.1:8765 | recordings | 12 files/840.0 MB | last pull 3s
 ```
 
+While TritonAnalysis is downloading a file, the final field changes to a
+`sending ...` message. After a file finishes, it briefly shows the last sent
+filename and byte count before returning to the normal last-pull age.
+
 Use the `Transfer` menu to start, stop, restart, or copy the URL. If the label
 says `waiting for Analysis`, the pilot computer is serving files but the
 analysis computer has not pulled the index yet.
@@ -109,8 +113,8 @@ python -m tools.analysis_transfer_server --root recordings --host 127.0.0.1 --po
 ## Pull From TritonAnalysis
 
 The unified TritonAnalysis app pulls automatically and shows its destination in
-the status bar. From the TritonAnalysis repository root on the analysis
-computer, this CLI command is still available as a backup:
+the top `Pilot Sync` panel. From the TritonAnalysis repository root on the
+analysis computer, this CLI command is still available as a backup:
 
 ```powershell
 python -m tools.pilot_transfer_sync http://10.77.0.1:8765 --output C:\TritonCompetitionMedia\incoming
