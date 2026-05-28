@@ -1,5 +1,6 @@
 import os
 import json
+from pathlib import Path
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
@@ -206,6 +207,11 @@ def _app():
     return app
 
 
+@pytest.fixture(autouse=True)
+def _disable_transfer_autostart(monkeypatch):
+    monkeypatch.setenv("TRITON_PILOT_TRANSFER_AUTOSTART", "0")
+
+
 def test_reverse_drive_page_keeps_pilot_video_layout(monkeypatch, tmp_path):
     app = _app()
     streams_path = tmp_path / "streams.json"
@@ -258,6 +264,70 @@ def test_reverse_drive_page_keeps_pilot_video_layout(monkeypatch, tmp_path):
     finally:
         win.close()
         app.processEvents()
+
+
+def test_analysis_transfer_status_bar_shows_served_root(monkeypatch, tmp_path):
+    app = _app()
+    streams_path = tmp_path / "streams.json"
+    streams_path.write_text("{}", encoding="utf-8")
+    save_root = tmp_path / "recordings"
+
+    class _FakeTransferServer:
+        server_address = ("127.0.0.1", 49123)
+
+        def __init__(self, root):
+            self.root = Path(root)
+            self.shutdown_called = False
+
+        def request_snapshot(self):
+            return {"request_count": 1, "last_request_ts": main_window.time.time(), "last_request_path": "/index.json"}
+
+        def shutdown(self):
+            self.shutdown_called = True
+
+        def server_close(self):
+            return None
+
+    class _JoinableThread:
+        def join(self, timeout=None):
+            return None
+
+    servers = []
+
+    def _create_server(**kwargs):
+        server = _FakeTransferServer(kwargs["root"])
+        servers.append((server, kwargs))
+        return server
+
+    monkeypatch.setenv("TRITON_PILOT_TRANSFER_AUTOSTART", "1")
+    monkeypatch.setenv("TRITON_PILOT_TRANSFER_HOST", "127.0.0.1")
+    monkeypatch.setenv("TRITON_PILOT_TRANSFER_PORT", "49123")
+    monkeypatch.setattr(main_window, "QSettings", lambda *args, **kwargs: _FakeSettings())
+    monkeypatch.setattr(main_window, "PilotPublisherService", _FakePilotService)
+    monkeypatch.setattr(main_window, "SensorSubscriberService", _FakeSensorService)
+    monkeypatch.setattr(main_window, "RemoteCameraManager", _FakeRemoteCameraManager)
+    monkeypatch.setattr(main_window, "VideoTabs", _FakeVideoPanel)
+    monkeypatch.setattr(main_window, "HoldTestPanel", _SimplePage)
+    monkeypatch.setattr(main_window, "ManagementPage", _SimplePage)
+    monkeypatch.setattr(main_window.threading, "Thread", _NoopThread)
+    monkeypatch.setattr(main_window, "create_server", _create_server)
+    monkeypatch.setattr(main_window, "start_server_in_thread", lambda _server: _JoinableThread())
+    monkeypatch.setattr(main_window, "build_index", lambda *_args, **_kwargs: {"file_count": 3, "total_bytes": 5_242_880})
+    monkeypatch.setattr(main_window, "resolve_recordings_dir", lambda _preferred: main_window.SaveLocation(save_root))
+
+    win = main_window.MainWindow(str(streams_path))
+    try:
+        app.processEvents()
+        assert servers
+        assert servers[0][1]["root"] == save_root.resolve()
+        text = win._analysis_transfer_lbl.text()
+        assert "Analysis Share: ON http://127.0.0.1:49123" in text
+        assert "recordings" in text
+        assert "3 files/5.0 MB" in text
+    finally:
+        win.close()
+        app.processEvents()
+        assert servers[0][0].shutdown_called is True
 
 
 def test_stereo_page_applies_configured_pair_layout(monkeypatch, tmp_path):

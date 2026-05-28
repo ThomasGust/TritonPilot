@@ -70,6 +70,7 @@ from gui.instruments import InstrumentPanel, HoldTestPanel
 from gui.raw_sensor_page import RawSensorPage
 from gui.management_page import ManagementPage
 from gui.stereo_page import StereoPage
+from tools.analysis_transfer_server import build_index, create_server, start_server_in_thread
 
 
 class MainWindow(QMainWindow):
@@ -439,6 +440,32 @@ class MainWindow(QMainWindow):
     def __init__(self, streams_path: str, parent=None):
         super().__init__(parent)
         self.setWindowTitle("ROV Topside (PyQt6)")
+        self._settings = QSettings("TritonPilot", "ROVTopside")
+        self._preferred_save_dir: str = str(self._settings.value(self.SAVE_DIR_SETTINGS_KEY, "") or "").strip()
+        self._save_dir_act: QAction | None = None
+        self._reset_save_dir_act: QAction | None = None
+        self._analysis_transfer_start_act: QAction | None = None
+        self._analysis_transfer_stop_act: QAction | None = None
+        self._analysis_transfer_restart_act: QAction | None = None
+        self._analysis_transfer_server = None
+        self._analysis_transfer_thread = None
+        self._analysis_transfer_root: Path | None = None
+        self._analysis_transfer_error = ""
+        self._analysis_transfer_host = os.environ.get("TRITON_PILOT_TRANSFER_HOST", "0.0.0.0").strip() or "0.0.0.0"
+        self._analysis_transfer_advertise_host = (
+            os.environ.get("TRITON_PILOT_TRANSFER_ADVERTISE_HOST", "10.77.0.1").strip() or "10.77.0.1"
+        )
+        self._analysis_transfer_port = int(os.environ.get("TRITON_PILOT_TRANSFER_PORT", "8765") or "8765")
+        self._analysis_transfer_stable_seconds = float(
+            os.environ.get("TRITON_PILOT_TRANSFER_STABLE_SECONDS", "2.0") or "2.0"
+        )
+        self._analysis_transfer_include_hidden = (
+            os.environ.get("TRITON_PILOT_TRANSFER_INCLUDE_HIDDEN", "").strip().lower() in {"1", "true", "yes", "on"}
+        )
+        self._analysis_transfer_autostart = (
+            os.environ.get("TRITON_PILOT_TRANSFER_AUTOSTART", "1").strip().lower()
+            not in {"0", "false", "no", "off"}
+        )
 
         # link status
         self._last_sensor_ts = 0.0
@@ -467,6 +494,9 @@ class MainWindow(QMainWindow):
 
         self._mode_lbl = QLabel("Mode: FORWARD | Depth Hold: OFF")
         self.statusBar().addPermanentWidget(self._mode_lbl, 1)
+
+        self._analysis_transfer_lbl = QLabel("Analysis Share: starting")
+        self.statusBar().addPermanentWidget(self._analysis_transfer_lbl)
 
         self._video_lbl = QLabel("Camera: -")
         self._power_lbl = QLabel("Power: -")
@@ -515,6 +545,7 @@ class MainWindow(QMainWindow):
             (self._depth_lbl, 190),
             (self._gain_lbl, 150),
             (self._mode_lbl, 520),
+            (self._analysis_transfer_lbl, 320),
         ]:
             try:
                 _lbl.setMinimumWidth(int(_w))
@@ -527,6 +558,9 @@ class MainWindow(QMainWindow):
         self._link_timer.timeout.connect(self._update_link_status)
         self._link_timer.start(200)
 
+        self._analysis_transfer_timer = QTimer(self)
+        self._analysis_transfer_timer.timeout.connect(self._refresh_analysis_transfer_status)
+        self._analysis_transfer_timer.start(2000)
 
         # connect signals to slots
         self.sensor_msg_sig.connect(self._handle_sensor_msg_on_ui)
@@ -582,10 +616,6 @@ class MainWindow(QMainWindow):
         # optional stream recorder (pilot + sensors + heartbeat)
         self._stream_recorder: StreamRecorder | None = None
         self._record_dir: str | None = None
-        self._settings = QSettings("TritonPilot", "ROVTopside")
-        self._preferred_save_dir: str = str(self._settings.value(self.SAVE_DIR_SETTINGS_KEY, "") or "").strip()
-        self._save_dir_act: QAction | None = None
-        self._reset_save_dir_act: QAction | None = None
         # 2) sensor subscriber (ROV -> topside)
         self.sensor_panel = SensorPanel()
         self.instrument_panel = InstrumentPanel()
@@ -759,6 +789,10 @@ class MainWindow(QMainWindow):
         self._refresh_arm_disarm_button()
         self._refresh_drive_status()
         self._refresh_video_status()
+        if self._analysis_transfer_autostart:
+            QTimer.singleShot(0, self._start_analysis_transfer_server)
+        else:
+            self._set_analysis_transfer_label("Analysis Share: OFF", "warn")
 
         try:
             self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
@@ -1748,6 +1782,147 @@ class MainWindow(QMainWindow):
         labels = {1: "single-camera", 2: "stacked dual-camera", 3: "reverse-pane", 4: "quad-camera"}
         self.statusBar().showMessage(f"Video layout set to {labels.get(int(pane_count), 'custom')} view", 3000)
 
+    def _analysis_transfer_configured_root(self) -> Path:
+        override = os.environ.get("TRITON_PILOT_TRANSFER_ROOT", "").strip()
+        if override:
+            root = Path(override).expanduser()
+            root.mkdir(parents=True, exist_ok=True)
+            return root.resolve()
+        root, _location = self._recordings_output_dir()
+        return root.resolve()
+
+    def _analysis_transfer_display_url(self) -> str:
+        if self._analysis_transfer_server is None:
+            port = self._analysis_transfer_port
+        else:
+            _bound_host, port = self._analysis_transfer_server.server_address
+        host = self._analysis_transfer_advertise_host
+        if self._analysis_transfer_host not in {"0.0.0.0", "::"}:
+            host = self._analysis_transfer_host
+        return f"http://{host}:{int(port)}"
+
+    def _set_analysis_transfer_label(self, text: str, tone: str | None = None) -> None:
+        self._set_status(self._analysis_transfer_lbl, text)
+        self._set_status_tone(self._analysis_transfer_lbl, tone)
+        self._refresh_analysis_transfer_actions()
+
+    def _refresh_analysis_transfer_actions(self) -> None:
+        running = self._analysis_transfer_server is not None
+        if self._analysis_transfer_start_act is not None:
+            self._analysis_transfer_start_act.setEnabled(not running)
+        if self._analysis_transfer_stop_act is not None:
+            self._analysis_transfer_stop_act.setEnabled(running)
+        if self._analysis_transfer_restart_act is not None:
+            self._analysis_transfer_restart_act.setEnabled(True)
+
+    def _start_analysis_transfer_server(self) -> None:
+        if self._analysis_transfer_server is not None:
+            self._refresh_analysis_transfer_status()
+            return
+        try:
+            root = self._analysis_transfer_configured_root()
+            server = create_server(
+                root=root,
+                host=self._analysis_transfer_host,
+                port=self._analysis_transfer_port,
+                stable_seconds=self._analysis_transfer_stable_seconds,
+                include_hidden=self._analysis_transfer_include_hidden,
+            )
+            thread = start_server_in_thread(server)
+        except Exception as exc:
+            self._analysis_transfer_server = None
+            self._analysis_transfer_thread = None
+            self._analysis_transfer_root = None
+            self._analysis_transfer_error = str(exc)
+            self._set_analysis_transfer_label(f"Analysis Share: ERR | {self._analysis_transfer_error}", "alert")
+            self.statusBar().showMessage(f"Analysis transfer server failed: {exc}", 7000)
+            return
+
+        self._analysis_transfer_server = server
+        self._analysis_transfer_thread = thread
+        self._analysis_transfer_root = root
+        self._analysis_transfer_error = ""
+        self._refresh_analysis_transfer_status()
+        self.statusBar().showMessage(f"Analysis transfer serving {root}", 5000)
+
+    def _stop_analysis_transfer_server(self) -> None:
+        server = self._analysis_transfer_server
+        thread = self._analysis_transfer_thread
+        self._analysis_transfer_server = None
+        self._analysis_transfer_thread = None
+        self._analysis_transfer_root = None
+        self._analysis_transfer_error = ""
+        if server is not None:
+            try:
+                server.shutdown()
+            except Exception:
+                pass
+            try:
+                server.server_close()
+            except Exception:
+                pass
+        if thread is not None:
+            try:
+                thread.join(timeout=1.0)
+            except Exception:
+                pass
+        self._set_analysis_transfer_label("Analysis Share: OFF", "warn")
+
+    def _restart_analysis_transfer_server(self) -> None:
+        self._stop_analysis_transfer_server()
+        self._start_analysis_transfer_server()
+
+    def _copy_analysis_transfer_url(self) -> None:
+        url = self._analysis_transfer_display_url()
+        try:
+            QApplication.clipboard().setText(url)
+        except Exception:
+            pass
+        self.statusBar().showMessage(f"Analysis transfer URL copied: {url}", 3000)
+
+    def _refresh_analysis_transfer_status(self) -> None:
+        server = self._analysis_transfer_server
+        if server is None:
+            if self._analysis_transfer_error:
+                self._set_analysis_transfer_label(f"Analysis Share: ERR | {self._analysis_transfer_error}", "alert")
+            else:
+                self._set_analysis_transfer_label("Analysis Share: OFF", "warn")
+            return
+
+        root = self._analysis_transfer_root or Path(getattr(server, "root", ""))
+        try:
+            index = build_index(
+                root,
+                stable_seconds=self._analysis_transfer_stable_seconds,
+                include_hidden=self._analysis_transfer_include_hidden,
+            )
+            file_count = int(index.get("file_count", 0))
+            total_mb = float(index.get("total_bytes", 0)) / (1024 * 1024)
+        except Exception as exc:
+            self._analysis_transfer_error = str(exc)
+            self._set_analysis_transfer_label(f"Analysis Share: ERR | {exc}", "alert")
+            return
+
+        try:
+            snapshot = server.request_snapshot()
+        except Exception:
+            snapshot = {}
+        last_request_ts = float(snapshot.get("last_request_ts") or 0.0)
+        if last_request_ts > 0:
+            age = max(0.0, time.time() - last_request_ts)
+            pull_text = f"last pull {age:.0f}s" if age < 60.0 else f"last pull {age / 60.0:.0f}m"
+            tone = "ok" if age < 20.0 else "warn"
+        else:
+            pull_text = "waiting for Analysis"
+            tone = ""
+
+        root_name = root.name or str(root)
+        text = (
+            f"Analysis Share: ON {self._analysis_transfer_display_url()} "
+            f"| {root_name} | {file_count} files/{total_mb:.1f} MB | {pull_text}"
+        )
+        self._set_analysis_transfer_label(text, tone)
+
     def _recordings_location(self) -> SaveLocation:
         return resolve_recordings_dir(self._preferred_save_dir)
 
@@ -1833,6 +2008,8 @@ class MainWindow(QMainWindow):
             )
         else:
             self.statusBar().showMessage(f"Save directory set: {location.path}", 5000)
+        if not os.environ.get("TRITON_PILOT_TRANSFER_ROOT", "").strip():
+            self._restart_analysis_transfer_server()
 
     def _reset_save_directory(self) -> None:
         self._preferred_save_dir = ""
@@ -1841,11 +2018,14 @@ class MainWindow(QMainWindow):
             self._record_dir = None
         self._refresh_save_directory_actions()
         self.statusBar().showMessage(f"Save directory reset: {DEFAULT_RECORDINGS_DIR}", 5000)
+        if not os.environ.get("TRITON_PILOT_TRANSFER_ROOT", "").strip():
+            self._restart_analysis_transfer_server()
 
     def _make_menu(self):
         bar = self.menuBar()
         file_menu = bar.addMenu("&File")
         rec_menu = bar.addMenu("&Record")
+        transfer_menu = bar.addMenu("&Transfer")
         view_menu = bar.addMenu("&View")
 
         self._save_dir_act = QAction("Set Save Directory...", self)
@@ -1856,6 +2036,22 @@ class MainWindow(QMainWindow):
         self._reset_save_dir_act.triggered.connect(self._reset_save_directory)
         rec_menu.addAction(self._reset_save_dir_act)
         rec_menu.addSeparator()
+
+        self._analysis_transfer_start_act = QAction("Start Analysis Transfer Server", self)
+        self._analysis_transfer_start_act.triggered.connect(self._start_analysis_transfer_server)
+        transfer_menu.addAction(self._analysis_transfer_start_act)
+
+        self._analysis_transfer_stop_act = QAction("Stop Analysis Transfer Server", self)
+        self._analysis_transfer_stop_act.triggered.connect(self._stop_analysis_transfer_server)
+        transfer_menu.addAction(self._analysis_transfer_stop_act)
+
+        self._analysis_transfer_restart_act = QAction("Restart Analysis Transfer Server", self)
+        self._analysis_transfer_restart_act.triggered.connect(self._restart_analysis_transfer_server)
+        transfer_menu.addAction(self._analysis_transfer_restart_act)
+
+        copy_transfer_url_act = QAction("Copy Transfer URL", self)
+        copy_transfer_url_act.triggered.connect(self._copy_analysis_transfer_url)
+        transfer_menu.addAction(copy_transfer_url_act)
 
         self._reverse_act = QAction("Reverse Drive", self)
         self._reverse_act.setCheckable(True)
@@ -1908,6 +2104,7 @@ class MainWindow(QMainWindow):
         rec_menu.addAction(stop_vid)
 
         self._refresh_save_directory_actions()
+        self._refresh_analysis_transfer_actions()
 
         quit_act = QAction("Quit", self)
         quit_act.triggered.connect(self.close)
@@ -1927,6 +2124,10 @@ class MainWindow(QMainWindow):
 
         try:
             self._netdiag_stop.set()
+        except Exception:
+            pass
+        try:
+            self._stop_analysis_transfer_server()
         except Exception:
             pass
         # stop services

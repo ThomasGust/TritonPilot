@@ -1,0 +1,108 @@
+# Analysis Transfer Link
+
+TritonPilot can expose saved recordings to TritonAnalysis over a dedicated
+analysis Ethernet link. This is a file handoff path only; it does not carry ROV
+control, telemetry, or live video.
+
+## Recommended Network
+
+Use USB-to-Ethernet adapters or a small unmanaged switch between the pilot and
+analysis laptops:
+
+```text
+Pilot analysis adapter    10.77.0.1/24
+Analysis adapter          10.77.0.2/24
+Gateway                   leave blank
+DNS                       leave blank
+```
+
+Keep the normal ROV tether on its existing `192.168.1.x` network.
+
+## Integrated App Status
+
+The TritonPilot app starts the transfer server automatically. The status bar
+shows:
+
+```text
+Analysis Share: ON http://10.77.0.1:8765 | recordings | 12 files/840.0 MB | last pull 3s
+```
+
+Use the `Transfer` menu to start, stop, restart, or copy the URL. If the label
+says `waiting for Analysis`, the pilot computer is serving files but the
+analysis computer has not pulled the index yet.
+
+Useful environment overrides:
+
+```powershell
+$env:TRITON_PILOT_TRANSFER_AUTOSTART="0"
+$env:TRITON_PILOT_TRANSFER_HOST="0.0.0.0"
+$env:TRITON_PILOT_TRANSFER_ADVERTISE_HOST="10.77.0.1"
+$env:TRITON_PILOT_TRANSFER_PORT="8765"
+$env:TRITON_PILOT_TRANSFER_ROOT="C:\TritonRecordings"
+```
+
+## Backup CLI Server
+
+From the TritonPilot repository root:
+
+```powershell
+python -m tools.analysis_transfer_server --root recordings --host 0.0.0.0 --port 8765
+```
+
+The server is read-only. It publishes:
+
+- `http://10.77.0.1:8765/health`
+- `http://10.77.0.1:8765/index.json`
+- `http://10.77.0.1:8765/files/<relative-path>`
+
+Files modified in the last two seconds are skipped by default so an active
+recording is less likely to be copied mid-write. For bench simulation only, you
+can lower that:
+
+```powershell
+python -m tools.analysis_transfer_server --root recordings --host 127.0.0.1 --port 8765 --stable-seconds 0
+```
+
+## Pull From TritonAnalysis
+
+The unified TritonAnalysis app pulls automatically and shows its destination in
+the status bar. From the TritonAnalysis repository root on the analysis
+computer, this CLI command is still available as a backup:
+
+```powershell
+python -m tools.pilot_transfer_sync http://10.77.0.1:8765 --output C:\TritonCompetitionMedia\incoming
+```
+
+Use `--dry-run` first when you want to confirm what will copy:
+
+```powershell
+python -m tools.pilot_transfer_sync http://10.77.0.1:8765 --output C:\TritonCompetitionMedia\incoming --dry-run
+```
+
+## One-Computer Simulation
+
+You can test without a second laptop:
+
+1. In a TritonPilot terminal:
+
+   ```powershell
+   python -m tools.analysis_transfer_server --root recordings --host 127.0.0.1 --port 8765 --stable-seconds 0
+   ```
+
+2. In a TritonAnalysis terminal on the same computer:
+
+   ```powershell
+   python -m tools.pilot_transfer_sync http://127.0.0.1:8765 --output .transfer-test --dry-run
+   python -m tools.pilot_transfer_sync http://127.0.0.1:8765 --output .transfer-test
+   ```
+
+Delete `.transfer-test` after the simulation if you do not need the copied
+files.
+
+## Field Notes
+
+- Start the transfer server before the run and leave it open.
+- Pull from TritonAnalysis after a capture/session completes.
+- Avoid making the pilot station depend on the analysis laptop.
+- If Windows Firewall prompts, allow private-network access for Python on the
+  dedicated analysis link.

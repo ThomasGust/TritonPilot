@@ -10,6 +10,8 @@ stays close to the code.
   Windows helper environment needed to run the topside app.
 - [Network Guide](NETWORKING.md) - Tether addressing, ZeroMQ endpoints, video
   ports, Windows NAT routing, firewalls, and diagnostics.
+- [Analysis Transfer Link](ANALYSIS_TRANSFER.md) - Optional read-only
+  USB-Ethernet handoff from TritonPilot recordings to TritonAnalysis.
 - [Operations Guide](OPERATIONS.md) - Pilot-station startup, preflight,
   controller use, recording, raw sensor checks, management tools, and shutdown.
 - [Architecture Overview](ARCHITECTURE.md) - How GUI, controller, telemetry,

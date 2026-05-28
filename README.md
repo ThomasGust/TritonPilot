@@ -68,6 +68,7 @@ docs/               Maintained setup, operations, and architecture docs
 - [Documentation Index](docs/README.md)
 - [Setup Guide](docs/SETUP.md)
 - [Network Guide](docs/NETWORKING.md)
+- [Analysis Transfer Link](docs/ANALYSIS_TRANSFER.md)
 - [Operations Guide](docs/OPERATIONS.md)
 - [Architecture Overview](docs/ARCHITECTURE.md)
 - [Subsystem Reference](docs/SUBSYSTEMS.md)
@@ -131,7 +132,10 @@ A healthy workflow is:
 2. Start TritonPilot on the pilot computer.
 3. Verify controller, telemetry, management RPC, and video.
 4. Record the mission data needed by the team.
-5. Hand saved captures or measurements to the analysis computer.
+5. Hand saved captures or measurements to the analysis computer, either by
+   USB drive or the integrated read-only
+   [Analysis Transfer Link](docs/ANALYSIS_TRANSFER.md). TritonPilot shows the
+   transfer server state as `Analysis Share` in the status bar.
 
 TritonPilot is allowed to display raw data and diagnostics, but it should not
 grow mission-scoring applets. That separation keeps the piloting station

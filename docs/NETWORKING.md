@@ -28,6 +28,28 @@ The pilot computer runs TritonPilot. The ROV runs TritonOS.
 | Aux camera video | ROV -> Pilot | UDP `5002` |
 | Back gripper camera video | ROV -> Pilot | UDP `5003` |
 
+## Optional Analysis Transfer Link
+
+TritonPilot can also expose saved recordings to TritonAnalysis over a separate
+USB-Ethernet link. This is not part of the live ROV control network.
+
+Recommended addressing:
+
+```text
+Pilot analysis adapter    10.77.0.1/24
+Analysis adapter          10.77.0.2/24
+Gateway                   leave blank
+```
+
+Start the read-only server from the pilot computer:
+
+```powershell
+python -m tools.analysis_transfer_server --root recordings --host 0.0.0.0 --port 8765
+```
+
+See [Analysis Transfer Link](ANALYSIS_TRANSFER.md) for the TritonAnalysis pull
+command, firewall note, and one-computer localhost simulation.
+
 Camera ports are defined in `data/streams.json`.
 
 ## Host And Endpoint Selection
