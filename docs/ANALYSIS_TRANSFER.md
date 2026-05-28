@@ -18,6 +18,49 @@ DNS                       leave blank
 
 Keep the normal ROV tether on its existing `192.168.1.x` network.
 
+## Adapter Setup Script
+
+Use the helper script when setting up a new laptop, a new USB Ethernet adapter,
+or a Windows adapter whose name changed.
+
+First list adapters and current network state:
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File .\tools\setup_analysis_link.ps1 -ProbeOnly
+```
+
+On the TritonPilot computer, run from an elevated/Admin PowerShell:
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File .\tools\setup_analysis_link.ps1 -Role Pilot -AdapterAlias "Ethernet 4"
+```
+
+On the TritonAnalysis computer, run from an elevated/Admin PowerShell, changing
+the adapter name to match that computer:
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File .\tools\setup_analysis_link.ps1 -Role Analysis -AdapterAlias "Ethernet"
+```
+
+The script:
+
+- Disables DHCP on the selected adapter.
+- Sets the static address for the selected role.
+- Removes stale `169.254.x.x` and conflicting `10.77.0.x` addresses on that
+  adapter.
+- Leaves the gateway and DNS blank.
+- Sets the network profile to Private when Windows allows it.
+- Adds a direct peer route for the other laptop.
+- Adds Private-profile firewall rules for ping, and for TCP `8765` on the
+  Pilot side.
+
+After setup, this should pass on the Analysis computer:
+
+```powershell
+Test-NetConnection 10.77.0.1 -Port 8765
+Invoke-RestMethod http://10.77.0.1:8765/health
+```
+
 ## Integrated App Status
 
 The TritonPilot app starts the transfer server automatically. The status bar
@@ -104,5 +147,9 @@ files.
 - Start the transfer server before the run and leave it open.
 - Pull from TritonAnalysis after a capture/session completes.
 - Avoid making the pilot station depend on the analysis laptop.
+- Keep this analysis link on `10.77.0.x`; keep the ROV tether on
+  `192.168.1.x`.
+- Do not put a gateway on either analysis-link adapter. Wi-Fi or another
+  adapter should keep handling internet.
 - If Windows Firewall prompts, allow private-network access for Python on the
   dedicated analysis link.

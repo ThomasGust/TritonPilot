@@ -47,6 +47,14 @@ Start the read-only server from the pilot computer:
 python -m tools.analysis_transfer_server --root recordings --host 0.0.0.0 --port 8765
 ```
 
+Set up a new Pilot or Analysis adapter with:
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File .\tools\setup_analysis_link.ps1 -ProbeOnly
+powershell -NoProfile -ExecutionPolicy Bypass -File .\tools\setup_analysis_link.ps1 -Role Pilot -AdapterAlias "Ethernet 4"
+powershell -NoProfile -ExecutionPolicy Bypass -File .\tools\setup_analysis_link.ps1 -Role Analysis -AdapterAlias "Ethernet"
+```
+
 See [Analysis Transfer Link](ANALYSIS_TRANSFER.md) for the TritonAnalysis pull
 command, firewall note, and one-computer localhost simulation.
 
