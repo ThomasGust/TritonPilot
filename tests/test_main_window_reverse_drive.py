@@ -10,7 +10,7 @@ pytest.importorskip("PyQt6")
 
 from PyQt6.QtCore import QEvent, Qt, pyqtSignal
 from PyQt6.QtGui import QKeyEvent
-from PyQt6.QtWidgets import QApplication, QWidget
+from PyQt6.QtWidgets import QApplication, QLabel, QWidget
 
 import gui.main_window as main_window
 
@@ -324,6 +324,9 @@ def test_analysis_transfer_status_bar_shows_served_root(monkeypatch, tmp_path):
         assert "Analysis Share: ON http://127.0.0.1:49123" in text
         assert "recordings" in text
         assert "3 files/5.0 MB" in text
+        assert win._analysis_transfer_line.text() == text
+        assert win._analysis_transfer_line.wordWrap() is True
+        assert win._analysis_transfer_line.toolTip() == text
     finally:
         win.close()
         app.processEvents()
@@ -389,6 +392,64 @@ def test_stereo_page_applies_configured_pair_layout(monkeypatch, tmp_path):
         app.processEvents()
 
         assert panel.restore_layout_snapshot_calls
+    finally:
+        win.close()
+        app.processEvents()
+
+
+def test_stereo_page_controller_x_b_route_to_stereo_capture(monkeypatch, tmp_path):
+    app = _app()
+    streams_path = tmp_path / "streams.json"
+    streams_path.write_text(
+        """
+        {
+          "streams": [
+            {"name": "Primary Camera"},
+            {"name": "Aux Camera"}
+          ],
+          "stereo_pairs": [
+            {
+              "name": "Forward Stereo",
+              "left": "Primary Camera",
+              "right": "Aux Camera",
+              "rig_id": "rig-a"
+            }
+          ]
+        }
+        """,
+        encoding="utf-8",
+    )
+
+    monkeypatch.setattr(main_window, "QSettings", lambda *args, **kwargs: _FakeSettings())
+    monkeypatch.setattr(main_window, "PilotPublisherService", _FakePilotService)
+    monkeypatch.setattr(main_window, "SensorSubscriberService", _FakeSensorService)
+    monkeypatch.setattr(main_window, "RemoteCameraManager", _FakeRemoteCameraManager)
+    monkeypatch.setattr(main_window, "VideoTabs", _FakeVideoPanel)
+    monkeypatch.setattr(main_window, "HoldTestPanel", _SimplePage)
+    monkeypatch.setattr(main_window, "ManagementPage", _SimplePage)
+    monkeypatch.setattr(main_window.threading, "Thread", _NoopThread)
+
+    win = main_window.MainWindow(str(streams_path))
+    try:
+        app.processEvents()
+        stereo_actions = []
+        camera_actions = []
+        win._stereo_page.capture_pair = lambda: stereo_actions.append("pair")
+        win._stereo_page.toggle_recording = lambda: stereo_actions.append("record")
+        win._save_snapshot = lambda: camera_actions.append("snapshot")
+        win._toggle_video_recording = lambda: camera_actions.append("record")
+
+        win._set_center_page("stereo", announce=False)
+        win._handle_pilot_msg_on_ui({"edges": {"x": "down", "b": "down"}, "modes": {}})
+
+        assert stereo_actions == ["pair", "record"]
+        assert camera_actions == []
+
+        win._set_center_page("pilot", announce=False)
+        win._handle_pilot_msg_on_ui({"edges": {"x": "down", "b": "down"}, "modes": {}})
+
+        assert stereo_actions == ["pair", "record"]
+        assert camera_actions == ["snapshot", "record"]
     finally:
         win.close()
         app.processEvents()
@@ -466,15 +527,11 @@ def test_stereo_page_resumes_existing_capture_session(tmp_path):
         app.processEvents()
 
 
-def test_stereo_page_resolves_disparity_calibration_from_metadata(tmp_path):
+def test_stereo_page_omits_disparity_preview_controls(tmp_path):
     app = _app()
     from gui.stereo_page import StereoPage
 
-    data_dir = tmp_path / "data"
-    calibration_path = data_dir / "calibrations" / "rig-a.json"
-    calibration_path.parent.mkdir(parents=True)
-    calibration_path.write_text("{}", encoding="utf-8")
-    streams_path = data_dir / "streams.json"
+    streams_path = tmp_path / "streams.json"
     streams_path.write_text(
         json.dumps(
             {
@@ -485,7 +542,6 @@ def test_stereo_page_resolves_disparity_calibration_from_metadata(tmp_path):
                         "left": "Primary Camera",
                         "right": "Aux Camera",
                         "rig_id": "rig-a",
-                        "metadata": {"calibration_path": "calibrations/rig-a.json"},
                     }
                 ],
             }
@@ -500,8 +556,11 @@ def test_stereo_page_resolves_disparity_calibration_from_metadata(tmp_path):
     )
     try:
         app.processEvents()
-        assert page._resolve_disparity_calibration_path() == calibration_path.resolve()
-        assert page.disparity_calibration_lbl.text() == str(calibration_path.resolve())
+        section_titles = [label.text() for label in page.findChildren(QLabel, "stereoSectionTitle")]
+        assert "Disparity" not in section_titles
+        assert page.findChildren(QWidget, "stereoDisparityPreview") == []
+        assert page.findChildren(QWidget, "stereoDisparityFrame") == []
+        assert not hasattr(page, "disparity_toggle")
     finally:
         page.close()
         app.processEvents()

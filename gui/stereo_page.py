@@ -8,11 +8,8 @@ from dataclasses import replace
 from pathlib import Path
 from typing import Callable
 
-import numpy as np
 from PyQt6.QtCore import QThread, QTimer, Qt, pyqtSignal
-from PyQt6.QtGui import QImage, QPixmap
 from PyQt6.QtWidgets import (
-    QCheckBox,
     QComboBox,
     QDoubleSpinBox,
     QFileDialog,
@@ -23,7 +20,6 @@ from PyQt6.QtWidgets import (
     QLineEdit,
     QPushButton,
     QSizePolicy,
-    QSplitter,
     QSpinBox,
     QTableWidget,
     QTableWidgetItem,
@@ -32,11 +28,8 @@ from PyQt6.QtWidgets import (
 )
 
 from recording.save_location import DEFAULT_RECORDINGS_DIR
-from stereo.calibration import resolve_stereo_calibration_path
 from stereo.capture import StereoCaptureInterrupted, StereoCaptureSession
-from stereo.disparity import StereoDisparityProcessor
 from stereo.pairs import StereoPairConfig, load_stereo_pairs
-from video.frame_rotation import rotate_frame
 
 
 class _SectionCard(QFrame):
@@ -144,150 +137,6 @@ class _CaptureWorker(QThread):
         return not self.isInterruptionRequested()
 
 
-class _DisparityWorker(QThread):
-    frameReady = pyqtSignal(object)
-    status = pyqtSignal(str, str)
-    failed = pyqtSignal(str)
-
-    def __init__(
-        self,
-        *,
-        manager,
-        pair: StereoPairConfig,
-        packet_provider: Callable[[str], object | None],
-        calibration_path: Path,
-        max_width: int,
-        fps: float,
-        parent=None,
-    ):
-        super().__init__(parent)
-        self.manager = manager
-        self.pair = pair
-        self.packet_provider = packet_provider
-        self.calibration_path = Path(calibration_path)
-        self.max_width = max(160, int(max_width))
-        self.period_s = 1.0 / max(0.5, float(fps))
-        self._last_status_text = ""
-        self._last_status_ts = 0.0
-
-    def run(self) -> None:
-        try:
-            from stereo.calibration import load_stereo_calibration
-
-            calibration = load_stereo_calibration(self.calibration_path)
-        except Exception as exc:
-            self.failed.emit(f"Could not load stereo calibration: {exc}")
-            return
-
-        processor: StereoDisparityProcessor | None = None
-        processor_shape: tuple[int, int] | None = None
-        last_pair_key: tuple[int, int] | None = None
-        last_frame_ts: float | None = None
-        self._emit_status(f"Using calibration {calibration.path.name}", "warn", force=True)
-
-        while not self.isInterruptionRequested():
-            loop_started = time.monotonic()
-            left = self.packet_provider(self.pair.left)
-            right = self.packet_provider(self.pair.right)
-            if left is None or right is None:
-                self._emit_status("Waiting for stereo frames", "warn")
-                if not self._sleep_interruptibly(0.03):
-                    break
-                continue
-
-            try:
-                pair_key = (int(left.seq), int(right.seq))
-                delta_ms = abs(float(left.monotonic_ts) - float(right.monotonic_ts)) * 1000.0
-            except Exception:
-                self._emit_status("Frame timing unavailable", "error")
-                if not self._sleep_interruptibly(0.05):
-                    break
-                continue
-
-            if pair_key == last_pair_key:
-                if not self._sleep_interruptibly(0.01):
-                    break
-                continue
-
-            if delta_ms > float(self.pair.max_pair_delta_ms):
-                self._emit_status(f"Pair delta high: {delta_ms:.1f} ms", "warn")
-                if not self._sleep_interruptibly(0.02):
-                    break
-                continue
-
-            try:
-                left_frame = self._prepared_frame(left, self.pair.left)
-                right_frame = self._prepared_frame(right, self.pair.right)
-                height, width = left_frame.shape[:2]
-                shape = (int(width), int(height))
-                if processor is None or processor_shape != shape:
-                    processor = StereoDisparityProcessor(
-                        calibration,
-                        source_size=shape,
-                        max_width=self.max_width,
-                    )
-                    processor_shape = shape
-                preview = processor.compute(left_frame, right_frame)
-            except Exception as exc:
-                self.failed.emit(f"Live disparity failed: {exc}")
-                return
-
-            now = time.monotonic()
-            fps = 0.0 if last_frame_ts is None else 1.0 / max(0.001, now - last_frame_ts)
-            last_frame_ts = now
-            last_pair_key = pair_key
-            self.frameReady.emit(
-                {
-                    "frame_bgr": preview.preview_bgr,
-                    "delta_ms": delta_ms,
-                    "fps": fps,
-                    "valid_fraction": preview.valid_fraction,
-                    "process_size": preview.process_size,
-                    "disparity_min": preview.disparity_min,
-                    "disparity_max": preview.disparity_max,
-                    "left_seq": pair_key[0],
-                    "right_seq": pair_key[1],
-                }
-            )
-            self._emit_status(
-                f"Live | {delta_ms:.1f} ms | {preview.valid_fraction * 100.0:.0f}% valid",
-                "ok",
-            )
-            if not self._sleep_interruptibly((loop_started + self.period_s) - time.monotonic()):
-                break
-
-    def _prepared_frame(self, packet: object, stream_name: str) -> np.ndarray:
-        frame = np.ascontiguousarray(packet.frame_bgr)
-        if self.pair.apply_stream_rotation:
-            rotation_deg = self._stream_rotation(stream_name)
-            if rotation_deg:
-                frame = rotate_frame(frame, rotation_deg)
-        return np.ascontiguousarray(frame)
-
-    def _stream_rotation(self, stream_name: str) -> int:
-        try:
-            stream = dict(getattr(self.manager, "stream_defs", {}).get(stream_name, {}) or {})
-            return int(stream.get("rotation_deg", 0) or 0)
-        except Exception:
-            return 0
-
-    def _emit_status(self, text: str, tone: str, *, force: bool = False) -> None:
-        now = time.monotonic()
-        if not force and text == self._last_status_text and (now - self._last_status_ts) < 1.0:
-            return
-        self._last_status_text = text
-        self._last_status_ts = now
-        self.status.emit(text, tone)
-
-    def _sleep_interruptibly(self, duration_s: float) -> bool:
-        deadline = time.monotonic() + max(0.0, float(duration_s))
-        while time.monotonic() < deadline:
-            if self.isInterruptionRequested():
-                return False
-            time.sleep(min(0.02, deadline - time.monotonic()))
-        return not self.isInterruptionRequested()
-
-
 class StereoPage(QWidget):
     """Operator page for one configured stereo pair."""
 
@@ -314,9 +163,6 @@ class StereoPage(QWidget):
         self._last_manifest_path: str = ""
         self._active_session_name: str = ""
         self._active_output_root: Path | None = None
-        self._disparity_worker: _DisparityWorker | None = None
-        self._disparity_calibration_override: Path | None = None
-        self._last_disparity_frame: np.ndarray | None = None
 
         self._build_ui()
         self.reload_pairs(emit=False)
@@ -327,7 +173,6 @@ class StereoPage(QWidget):
         self._health_timer.start()
 
     def shutdown(self) -> None:
-        self._stop_disparity_preview()
         if self._capture_worker is not None and self._capture_worker.isRunning():
             self._capture_worker.requestInterruption()
             self._capture_worker.wait(1000)
@@ -338,37 +183,9 @@ class StereoPage(QWidget):
         root.setSpacing(8)
 
         self.video_host = QWidget()
-        video_area = QVBoxLayout(self.video_host)
-        video_area.setContentsMargins(0, 0, 0, 0)
-        video_area.setSpacing(4)
-
-        self.video_splitter = QSplitter(Qt.Orientation.Vertical)
-        self.video_splitter.setChildrenCollapsible(False)
-
-        self.camera_host = QWidget()
-        self.video_host_layout = QVBoxLayout(self.camera_host)
+        self.video_host_layout = QVBoxLayout(self.video_host)
         self.video_host_layout.setContentsMargins(0, 0, 0, 0)
         self.video_host_layout.setSpacing(0)
-        self.video_splitter.addWidget(self.camera_host)
-
-        self.disparity_frame = QFrame()
-        self.disparity_frame.setObjectName("stereoDisparityFrame")
-        disparity_frame_layout = QVBoxLayout(self.disparity_frame)
-        disparity_frame_layout.setContentsMargins(0, 0, 0, 0)
-        disparity_frame_layout.setSpacing(0)
-        self.disparity_preview_lbl = QLabel("Live disparity stopped")
-        self.disparity_preview_lbl.setObjectName("stereoDisparityPreview")
-        self.disparity_preview_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.disparity_preview_lbl.setWordWrap(True)
-        self.disparity_preview_lbl.setMinimumSize(320, 180)
-        self.disparity_preview_lbl.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
-        disparity_frame_layout.addWidget(self.disparity_preview_lbl, 1)
-        self.video_splitter.addWidget(self.disparity_frame)
-        self.video_splitter.setStretchFactor(0, 3)
-        self.video_splitter.setStretchFactor(1, 2)
-        self.disparity_frame.hide()
-
-        video_area.addWidget(self.video_splitter, 1)
         root.addWidget(self.video_host, 3)
 
         self.side_panel = QWidget()
@@ -447,66 +264,6 @@ class StereoPage(QWidget):
         health_card.body.addLayout(health_grid)
         side.addWidget(health_card)
 
-        disparity_card = _SectionCard("Disparity")
-        self.disparity_state_lbl = QLabel("Stopped")
-        self.disparity_state_lbl.setObjectName("stereoPill")
-        self.disparity_state_lbl.setProperty("tone", "warn")
-        self.disparity_state_lbl.setWordWrap(True)
-        disparity_card.body.addWidget(self.disparity_state_lbl)
-
-        self.disparity_toggle = QCheckBox("Live Preview")
-        self.disparity_toggle.toggled.connect(self._on_disparity_toggled)
-        disparity_card.body.addWidget(self.disparity_toggle)
-
-        disparity_path_row = QHBoxLayout()
-        self.disparity_calibration_lbl = self._value_label()
-        self.disparity_choose_btn = QPushButton("Choose Calibration")
-        self.disparity_choose_btn.clicked.connect(self._choose_disparity_calibration)
-        disparity_path_row.addWidget(self.disparity_calibration_lbl, 1)
-        disparity_path_row.addWidget(self.disparity_choose_btn, 0)
-        disparity_card.body.addWidget(QLabel("Calibration"))
-        disparity_card.body.addLayout(disparity_path_row)
-
-        disparity_grid = QGridLayout()
-        disparity_grid.setHorizontalSpacing(8)
-        disparity_grid.setVerticalSpacing(6)
-        self.disparity_fps_spin = QDoubleSpinBox()
-        self.disparity_fps_spin.setRange(1.0, 20.0)
-        self.disparity_fps_spin.setDecimals(1)
-        self.disparity_fps_spin.setSingleStep(1.0)
-        self.disparity_fps_spin.setSuffix(" fps")
-        self.disparity_fps_spin.setValue(8.0)
-        self.disparity_width_spin = QSpinBox()
-        self.disparity_width_spin.setRange(320, 1280)
-        self.disparity_width_spin.setSingleStep(80)
-        self.disparity_width_spin.setSuffix(" px")
-        self.disparity_width_spin.setValue(960)
-        self.disparity_width_spin.valueChanged.connect(lambda _v: self._restart_disparity_preview_if_running())
-        self.disparity_fps_spin.valueChanged.connect(lambda _v: self._restart_disparity_preview_if_running())
-        disparity_grid.addWidget(QLabel("Preview FPS"), 0, 0)
-        disparity_grid.addWidget(QLabel("Max Width"), 0, 1)
-        disparity_grid.addWidget(self.disparity_fps_spin, 1, 0)
-        disparity_grid.addWidget(self.disparity_width_spin, 1, 1)
-        disparity_card.body.addLayout(disparity_grid)
-
-        disparity_metrics = QGridLayout()
-        disparity_metrics.setHorizontalSpacing(10)
-        disparity_metrics.setVerticalSpacing(6)
-        self.disparity_delta_lbl = self._value_label()
-        self.disparity_valid_lbl = self._value_label()
-        self.disparity_size_lbl = self._value_label()
-        for row, (label_text, value) in enumerate(
-            [
-                ("Delta", self.disparity_delta_lbl),
-                ("Valid", self.disparity_valid_lbl),
-                ("Size", self.disparity_size_lbl),
-            ]
-        ):
-            disparity_metrics.addWidget(QLabel(label_text), row, 0)
-            disparity_metrics.addWidget(value, row, 1)
-        disparity_card.body.addLayout(disparity_metrics)
-        side.addWidget(disparity_card)
-
         capture_card = _SectionCard("Capture")
         self.session_edit = QLineEdit()
         self.session_edit.setPlaceholderText("auto timestamp")
@@ -553,7 +310,7 @@ class StereoPage(QWidget):
 
         button_row = QHBoxLayout()
         self.capture_one_btn = QPushButton("Capture Pair")
-        self.capture_one_btn.clicked.connect(lambda: self._start_capture(count=1, mode="single"))
+        self.capture_one_btn.clicked.connect(self.capture_pair)
         self.capture_burst_btn = QPushButton("Capture Burst")
         self.capture_burst_btn.clicked.connect(lambda: self._start_capture(count=self.count_spin.value(), mode="burst"))
         button_row.addWidget(self.capture_one_btn)
@@ -620,7 +377,6 @@ class StereoPage(QWidget):
         finally:
             self.pair_combo.blockSignals(False)
         self._update_pair_fields()
-        self._update_disparity_calibration_label()
         self._set_capture_enabled(self.current_pair() is not None and self.manager is not None)
         if emit and self.current_pair() is not None:
             self.pairSelectionChanged.emit(self.current_pair())
@@ -634,11 +390,9 @@ class StereoPage(QWidget):
 
     def _on_pair_changed(self, _index: int) -> None:
         self._update_pair_fields()
-        self._update_disparity_calibration_label()
         pair = self.current_pair()
         if pair is not None:
             self.pairSelectionChanged.emit(pair)
-        self._restart_disparity_preview_if_running()
         self.refresh_health()
 
     def _update_pair_fields(self) -> None:
@@ -687,199 +441,6 @@ class StereoPage(QWidget):
         label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         label.setWordWrap(True)
         self.video_host_layout.addWidget(label, 1)
-
-    def _resolve_disparity_calibration_path(self, pair: StereoPairConfig | None = None) -> Path | None:
-        pair = pair or self.current_pair()
-        if pair is None:
-            return None
-        if self._disparity_calibration_override is not None and self._disparity_calibration_override.is_file():
-            return self._disparity_calibration_override.resolve()
-
-        identifiers: list[object] = [
-            pair.metadata.get("calibration_path"),
-            pair.calibration_id,
-        ]
-        if self._active_session_name:
-            try:
-                output_root = self._active_output_root or Path(self.output_root_provider())
-                identifiers.append(output_root / "stereo_sessions" / self._active_session_name / "stereo_calibration.json")
-            except Exception:
-                pass
-
-        base_dir = Path(self.streams_path).expanduser().resolve().parent
-        for identifier in identifiers:
-            resolved = resolve_stereo_calibration_path(identifier, base_dir=base_dir)
-            if resolved is not None:
-                return resolved
-        return None
-
-    def _update_disparity_calibration_label(self) -> None:
-        pair = self.current_pair()
-        path = self._resolve_disparity_calibration_path(pair)
-        if path is not None:
-            self.disparity_calibration_lbl.setText(str(path))
-            return
-        if pair is None:
-            self.disparity_calibration_lbl.setText("-")
-        elif pair.calibration_id:
-            self.disparity_calibration_lbl.setText(f"{pair.calibration_id} (not found)")
-        else:
-            self.disparity_calibration_lbl.setText("pending")
-
-    def _choose_disparity_calibration(self) -> None:
-        try:
-            output_root = Path(self.output_root_provider())
-        except Exception:
-            output_root = Path(DEFAULT_RECORDINGS_DIR)
-        start_dir = output_root / "stereo_sessions"
-        path, _filter = QFileDialog.getOpenFileName(
-            self,
-            "Choose stereo calibration",
-            str(start_dir if start_dir.exists() else output_root),
-            "Stereo calibration JSON (*.json);;JSON files (*.json);;All files (*)",
-        )
-        if not path:
-            return
-        selected = Path(path)
-        self._disparity_calibration_override = selected
-        self._update_disparity_calibration_label()
-        self.statusMessage.emit(f"Stereo calibration selected: {selected.name}", 3000)
-        self._restart_disparity_preview_if_running()
-
-    def _on_disparity_toggled(self, enabled: bool) -> None:
-        if enabled:
-            if not self._start_disparity_preview():
-                previous = self.disparity_toggle.blockSignals(True)
-                try:
-                    self.disparity_toggle.setChecked(False)
-                finally:
-                    self.disparity_toggle.blockSignals(previous)
-        else:
-            self._stop_disparity_preview()
-            self.disparity_frame.hide()
-            self._last_disparity_frame = None
-            self.disparity_preview_lbl.setPixmap(QPixmap())
-            self.disparity_preview_lbl.setText("Live disparity stopped")
-            self._set_disparity_state("Stopped", "warn")
-
-    def _start_disparity_preview(self) -> bool:
-        pair = self.current_pair()
-        if pair is None:
-            self._set_disparity_state("No pair selected", "error")
-            self.statusMessage.emit("No stereo pair available for disparity", 3000)
-            return False
-        if self.packet_provider is None:
-            self._set_disparity_state("No frame source", "error")
-            return False
-
-        calibration_path = self._resolve_disparity_calibration_path(pair)
-        if calibration_path is None:
-            self._set_disparity_state("Calibration required", "error")
-            self.statusMessage.emit("Choose a stereo calibration JSON before starting live disparity", 5000)
-            return False
-
-        self._stop_disparity_preview()
-        self.disparity_frame.show()
-        self.disparity_preview_lbl.setPixmap(QPixmap())
-        self.disparity_preview_lbl.setText("Starting live disparity...")
-        self._last_disparity_frame = None
-        self._set_disparity_state("Starting", "warn")
-        self._disparity_worker = _DisparityWorker(
-            manager=self.manager,
-            pair=pair,
-            packet_provider=self.packet_provider,
-            calibration_path=calibration_path,
-            max_width=int(self.disparity_width_spin.value()),
-            fps=float(self.disparity_fps_spin.value()),
-            parent=self,
-        )
-        self._disparity_worker.frameReady.connect(self._on_disparity_frame)
-        self._disparity_worker.status.connect(self._set_disparity_state)
-        self._disparity_worker.failed.connect(self._on_disparity_failed)
-        self._disparity_worker.finished.connect(self._on_disparity_finished)
-        self._disparity_worker.start()
-        return True
-
-    def _stop_disparity_preview(self) -> None:
-        worker = self._disparity_worker
-        if worker is not None and worker.isRunning():
-            worker.requestInterruption()
-            worker.wait(1000)
-        self._disparity_worker = None
-
-    def _restart_disparity_preview_if_running(self) -> None:
-        if self._disparity_worker is None or not self.disparity_toggle.isChecked():
-            return
-        if not self._start_disparity_preview():
-            previous = self.disparity_toggle.blockSignals(True)
-            try:
-                self.disparity_toggle.setChecked(False)
-            finally:
-                self.disparity_toggle.blockSignals(previous)
-
-    def _on_disparity_frame(self, payload: object) -> None:
-        if not isinstance(payload, dict):
-            return
-        frame = payload.get("frame_bgr")
-        if frame is None:
-            return
-        self._last_disparity_frame = np.ascontiguousarray(frame)
-        self._render_disparity_frame()
-        try:
-            self.disparity_delta_lbl.setText(f"{float(payload.get('delta_ms', 0.0)):.1f} ms")
-            self.disparity_valid_lbl.setText(f"{float(payload.get('valid_fraction', 0.0)) * 100.0:.0f}%")
-            size = payload.get("process_size") or ("-", "-")
-            self.disparity_size_lbl.setText(f"{int(size[0])}x{int(size[1])}")
-        except Exception:
-            pass
-
-    def _render_disparity_frame(self) -> None:
-        frame = self._last_disparity_frame
-        if frame is None:
-            return
-        try:
-            h, w, ch = frame.shape
-            image = QImage(frame.data, w, h, ch * w, QImage.Format.Format_BGR888)
-            dpr = max(1.0, float(self.devicePixelRatioF()))
-            target_w = max(1, int(self.disparity_preview_lbl.width() * dpr))
-            target_h = max(1, int(self.disparity_preview_lbl.height() * dpr))
-            pix = QPixmap.fromImage(image).scaled(
-                target_w,
-                target_h,
-                Qt.AspectRatioMode.KeepAspectRatio,
-                Qt.TransformationMode.FastTransformation,
-            )
-            pix.setDevicePixelRatio(dpr)
-            self.disparity_preview_lbl.setText("")
-            self.disparity_preview_lbl.setPixmap(pix)
-        except Exception:
-            pass
-
-    def _on_disparity_failed(self, error: str) -> None:
-        self._set_disparity_state(error, "error")
-        self.disparity_preview_lbl.setPixmap(QPixmap())
-        self.disparity_preview_lbl.setText(error)
-        previous = self.disparity_toggle.blockSignals(True)
-        try:
-            self.disparity_toggle.setChecked(False)
-        finally:
-            self.disparity_toggle.blockSignals(previous)
-        self.statusMessage.emit(error, 7000)
-
-    def _on_disparity_finished(self) -> None:
-        if self.sender() is self._disparity_worker:
-            self._disparity_worker = None
-
-    def _set_disparity_state(self, text: str, tone: str) -> None:
-        self.disparity_state_lbl.setText(text)
-        self.disparity_state_lbl.setProperty("tone", tone)
-        self.disparity_state_lbl.style().unpolish(self.disparity_state_lbl)
-        self.disparity_state_lbl.style().polish(self.disparity_state_lbl)
-        self.disparity_state_lbl.update()
-
-    def resizeEvent(self, event) -> None:
-        super().resizeEvent(event)
-        self._render_disparity_frame()
 
     def refresh_health(self) -> None:
         pair = self.current_pair()
@@ -1019,7 +580,6 @@ class StereoPage(QWidget):
         self._active_output_root = session_dir.parent.parent
         self.session_edit.setText(self._active_session_name)
         self.output_lbl.setText(str(path))
-        self._update_disparity_calibration_label()
         self.frames_table.setRowCount(0)
         for frame in manifest.get("frames") or []:
             self._on_capture_progress(frame)
@@ -1028,6 +588,18 @@ class StereoPage(QWidget):
             5000,
         )
         return True
+
+    def capture_pair(self) -> None:
+        self._start_capture(count=1, mode="single")
+
+    def toggle_recording(self) -> None:
+        if self._capture_worker is not None and self._capture_worker.isRunning():
+            if self._capture_mode == "recording":
+                self._stop_recording()
+            else:
+                self.statusMessage.emit("Stereo capture already running", 3000)
+            return
+        self._start_recording()
 
     def _start_recording(self) -> None:
         fps = max(0.1, float(self.record_fps_spin.value()))

@@ -28,6 +28,7 @@ from PyQt6.QtWidgets import (
     QLabel,
     QMessageBox,
     QPushButton,
+    QSizePolicy,
     QStackedWidget,
     QTabBar,
 )
@@ -497,6 +498,34 @@ class MainWindow(QMainWindow):
 
         self._analysis_transfer_lbl = QLabel("Analysis Share: starting")
         self.statusBar().addPermanentWidget(self._analysis_transfer_lbl)
+        self._analysis_transfer_line = QLabel("Analysis Share: starting")
+        self._analysis_transfer_line.setObjectName("analysisTransferLine")
+        self._analysis_transfer_line.setWordWrap(True)
+        self._analysis_transfer_line.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        self._analysis_transfer_line.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Maximum)
+        self._analysis_transfer_line.setStyleSheet(
+            """
+            QLabel#analysisTransferLine {
+                background: #202028;
+                border: 1px solid #343442;
+                border-radius: 6px;
+                padding: 5px 8px;
+                color: #f0f4ff;
+                font-weight: 600;
+            }
+            QLabel#analysisTransferLine[tone="alert"] {
+                background: #3b2525;
+                border-color: #9c4a4a;
+                color: #ffd9d9;
+                font-weight: 700;
+            }
+            QLabel#analysisTransferLine[tone="warn"] {
+                background: #332b1d;
+                border-color: #a07e34;
+                color: #ffe6ae;
+            }
+            """
+        )
 
         self._video_lbl = QLabel("Camera: -")
         self._power_lbl = QLabel("Power: -")
@@ -699,6 +728,7 @@ class MainWindow(QMainWindow):
         self._arm_disarm_btn.clicked.connect(self._toggle_arm_disarm_from_ui)
         top_bar_lay.addWidget(self._arm_disarm_btn, 0)
         root.addWidget(top_bar, 0)
+        root.addWidget(self._analysis_transfer_line, 0)
 
         self._page_stack = QStackedWidget()
         root.addWidget(self._page_stack, 1)
@@ -1103,15 +1133,23 @@ class MainWindow(QMainWindow):
         except Exception:
             pass
 
-        # Controller-local video actions on the active pane:
-        #   X -> snapshot
-        #   B -> start/stop recording
+        # Controller-local capture actions:
+        #   X -> snapshot / stereo pair
+        #   B -> start/stop active-camera or stereo recording
         try:
             edges = (msg or {}).get("edges", {}) or {}
+            stereo_page = getattr(self, "_stereo_page", None)
+            in_stereo_view = getattr(self, "_active_page_name", "") == "stereo" and stereo_page is not None
             if edges.get("x") == "down":
-                self._save_snapshot()
+                if in_stereo_view:
+                    stereo_page.capture_pair()
+                else:
+                    self._save_snapshot()
             if edges.get("b") == "down":
-                self._toggle_video_recording()
+                if in_stereo_view:
+                    stereo_page.toggle_recording()
+                else:
+                    self._toggle_video_recording()
         except Exception:
             pass
 
@@ -1811,6 +1849,8 @@ class MainWindow(QMainWindow):
     def _set_analysis_transfer_label(self, text: str, tone: str | None = None) -> None:
         self._set_status(self._analysis_transfer_lbl, text)
         self._set_status_tone(self._analysis_transfer_lbl, tone)
+        self._set_status(self._analysis_transfer_line, text)
+        self._set_status_tone(self._analysis_transfer_line, tone)
         self._refresh_analysis_transfer_actions()
 
     def _refresh_analysis_transfer_actions(self) -> None:

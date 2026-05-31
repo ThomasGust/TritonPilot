@@ -51,8 +51,9 @@ The script:
 - Leaves the gateway and DNS blank.
 - Sets the network profile to Private when Windows allows it.
 - Adds a direct peer route for the other laptop.
-- Adds Private-profile firewall rules for ping, and for TCP `8765` on the
-  Pilot side.
+- Adds firewall rules for ping, and for TCP `8765` on the Pilot side. The
+  rules allow any Windows network profile because Windows may temporarily mark
+  the direct adapter as Public.
 
 After setup, this should pass on the Analysis computer:
 

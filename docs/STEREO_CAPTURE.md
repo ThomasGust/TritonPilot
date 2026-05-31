@@ -48,26 +48,10 @@ In TritonPilot, open the Stereo tab. The tab shows the selected stereo pair,
 left/right stream settings, live frame age, pair delta, rig metadata, and
 capture controls. When the tab is active, the shared video panel is temporarily
 set to the left/right pair and the normal pilot layout is restored when leaving
-the tab.
-
-## Live Disparity Preview
-
-The Stereo tab can also show a near-live disparity preview. Enable
-`Live Preview` in the Disparity section, then choose the TritonAnalysis stereo
-calibration JSON if the pair configuration does not already point to one. The
-preview reuses the live decoded frames, pairs them by receiver timestamp,
-rectifies them with OpenCV, and computes a throttled color disparity view.
-
-For best responsiveness, keep the preview width below full camera resolution
-and use a modest preview rate such as 8 to 10 fps. The view is intended for
-operator awareness and obstacle shape cues. Because the exploreHD cameras are
-rolling-shutter and software-paired, do not treat the live preview as precise
-measurement when the ROV or target is moving.
-
-Calibration lookup accepts an absolute JSON path, a path relative to
-`data/streams.json`, or a short id found under common calibration folders such
-as `data/calibrations/<id>.json`. A pair can set either `calibration_id` or
-`metadata.calibration_path`.
+the tab. Controller X captures one stereo pair, and controller B starts or
+stops stereo recording while this tab is active. Disparity review stays in
+TritonAnalysis so both live camera streams keep the full available video area
+during capture.
 
 The command-line capture helper is also available on the pilot computer after
 TritonOS video RPC is reachable:

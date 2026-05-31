@@ -200,22 +200,26 @@ function Ensure-Firewall {
     Write-Step "Configuring firewall rules"
 
     $icmpRuleName = "Triton Analysis Link ICMPv4 Echo"
-    if (-not (Get-NetFirewallRule -DisplayName $icmpRuleName -ErrorAction SilentlyContinue)) {
-        New-NetFirewallRule -DisplayName $icmpRuleName -Direction Inbound -Action Allow -Protocol ICMPv4 -IcmpType 8 -Profile Private | Out-Null
+    $icmpRule = Get-NetFirewallRule -DisplayName $icmpRuleName -ErrorAction SilentlyContinue
+    if (-not $icmpRule) {
+        New-NetFirewallRule -DisplayName $icmpRuleName -Direction Inbound -Action Allow -Protocol ICMPv4 -IcmpType 8 -Profile Any | Out-Null
         Write-Host "Added firewall rule: $icmpRuleName"
     }
     else {
-        Write-Host "Firewall rule already present: $icmpRuleName"
+        Set-NetFirewallRule -DisplayName $icmpRuleName -Profile Any -Enabled True -Action Allow | Out-Null
+        Write-Host "Updated firewall rule: $icmpRuleName"
     }
 
     if ($RoleName -eq "Pilot") {
         $tcpRuleName = "TritonPilot Analysis Transfer TCP $TransferPort"
-        if (-not (Get-NetFirewallRule -DisplayName $tcpRuleName -ErrorAction SilentlyContinue)) {
-            New-NetFirewallRule -DisplayName $tcpRuleName -Direction Inbound -Action Allow -Protocol TCP -LocalPort $TransferPort -Profile Private | Out-Null
+        $tcpRule = Get-NetFirewallRule -DisplayName $tcpRuleName -ErrorAction SilentlyContinue
+        if (-not $tcpRule) {
+            New-NetFirewallRule -DisplayName $tcpRuleName -Direction Inbound -Action Allow -Protocol TCP -LocalPort $TransferPort -Profile Any | Out-Null
             Write-Host "Added firewall rule: $tcpRuleName"
         }
         else {
-            Write-Host "Firewall rule already present: $tcpRuleName"
+            Set-NetFirewallRule -DisplayName $tcpRuleName -Profile Any -Enabled True -Action Allow | Out-Null
+            Write-Host "Updated firewall rule: $tcpRuleName"
         }
     }
 }
