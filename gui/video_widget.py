@@ -513,11 +513,14 @@ class VideoWidget(QWidget):
         except Exception:
             pass
 
-        # Stop any in-flight connect attempt
+        # Stop any in-flight connect attempt. The worker can be inside the
+        # video RPC timeout path; deleting a running QThread can terminate the
+        # process on Windows/PyQt, so wait for the bounded RPC attempt to exit.
         if self._connect_worker is not None:
+            worker = self._connect_worker
             try:
-                self._connect_worker.quit()
-                self._connect_worker.wait(200)
+                worker.quit()
+                worker.wait(5000)
             except Exception:
                 pass
             self._connect_worker = None

@@ -14,6 +14,14 @@ ROV eth0                  192.168.1.4/24
 
 The pilot computer runs TritonPilot. The ROV runs TritonOS.
 
+When the USB/Ethernet tether adapter is connected, configure the pilot side
+with [Pilot Tether Adapter Setup](PILOT_TETHER_SETUP.md):
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File .\tools\setup_pilot_tether_adapter.ps1 -ProbeOnly
+powershell -NoProfile -ExecutionPolicy Bypass -File .\tools\setup_pilot_tether_adapter.ps1 -AdapterAlias "Ethernet 2"
+```
+
 ## Default Ports
 
 | Purpose | Direction | Default |

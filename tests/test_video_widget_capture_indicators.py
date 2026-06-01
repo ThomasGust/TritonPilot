@@ -121,3 +121,34 @@ def test_video_widget_default_capture_names_are_flat_with_camera_and_time(monkey
         widget.close()
         widget.deleteLater()
         app.processEvents()
+
+
+def test_video_widget_shutdown_waits_for_inflight_connect_worker(monkeypatch):
+    app = _app()
+    monkeypatch.setattr("gui.video_widget.VideoWidget._start_connect", lambda self: None)
+
+    class _FakeConnectWorker:
+        def __init__(self):
+            self.quit_called = False
+            self.wait_ms = None
+
+        def quit(self):
+            self.quit_called = True
+
+        def wait(self, timeout_ms):
+            self.wait_ms = int(timeout_ms)
+            return True
+
+    widget = VideoWidget(_DummyManager(), "front")
+    worker = _FakeConnectWorker()
+    widget._connect_worker = worker
+    try:
+        widget.shutdown()
+
+        assert worker.quit_called is True
+        assert worker.wait_ms == 5000
+        assert widget._connect_worker is None
+    finally:
+        widget.close()
+        widget.deleteLater()
+        app.processEvents()

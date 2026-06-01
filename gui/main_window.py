@@ -1062,9 +1062,11 @@ class MainWindow(QMainWindow):
                 synced = self._set_yaw_hold_target_to_current_attitude(reason="track") or synced
                 self._yh_last_track_ts = now
         elif was_manual_active or self._yh_release_ts is not None:
+            release_started = False
             if self._yh_release_ts is None:
                 self._yh_release_ts = now
-            if (now - float(self._yh_release_ts)) >= float(YAW_HOLD_RELEASE_SETTLE_S):
+                release_started = True
+            if (not release_started) and (now - float(self._yh_release_ts)) >= float(YAW_HOLD_RELEASE_SETTLE_S):
                 synced = (
                     self._set_yaw_hold_target_to_current_attitude(
                         reason="release",

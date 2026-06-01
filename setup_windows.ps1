@@ -179,9 +179,35 @@ function Install-WithChocolatey {
     throw "Failed to install package via Chocolatey. Tried: $($PackageNames -join ', ')"
 }
 
+function Test-PythonCandidate {
+    param(
+        [string]$Exe,
+        [string[]]$CommandArgs
+    )
+
+    try {
+        $versionOutput = & $Exe @CommandArgs --version 2>&1
+        if ($LASTEXITCODE -ne 0) {
+            return $false
+        }
+    }
+    catch {
+        return $false
+    }
+
+    $versionText = ($versionOutput | Out-String).Trim()
+    if ($versionText -notmatch "Python\s+(\d+)\.(\d+)") {
+        return $false
+    }
+
+    $major = [int]$Matches[1]
+    $minor = [int]$Matches[2]
+    return ($major -gt 3) -or (($major -eq 3) -and ($minor -ge 10))
+}
+
 function Find-PythonCommand {
     $py = Get-Command py -ErrorAction SilentlyContinue
-    if ($py) {
+    if ($py -and (Test-PythonCandidate -Exe $py.Source -CommandArgs @("-3"))) {
         return @{
             Exe = $py.Source
             Args = @("-3")
@@ -189,7 +215,7 @@ function Find-PythonCommand {
     }
 
     $python = Get-Command python -ErrorAction SilentlyContinue
-    if ($python) {
+    if ($python -and (Test-PythonCandidate -Exe $python.Source -CommandArgs @())) {
         return @{
             Exe = $python.Source
             Args = @()
@@ -206,7 +232,7 @@ function Find-PythonCommand {
         $candidates += Get-ChildItem -Path $pattern -ErrorAction SilentlyContinue
     }
     $candidate = $candidates | Sort-Object FullName -Descending | Select-Object -First 1
-    if ($candidate) {
+    if ($candidate -and (Test-PythonCandidate -Exe $candidate.FullName -CommandArgs @())) {
         return @{
             Exe = $candidate.FullName
             Args = @()
