@@ -163,11 +163,10 @@ map to actuator output.
 
 ## Depth-Hold Display Helpers
 
-These settings only affect topside display and interaction:
+These settings only affect topside display. Manual-heave override and release
+latching are controlled onboard in TritonOS:
 
 ```powershell
-$env:TRITON_DEPTH_HOLD_WALK_DEADBAND="0.10"
-$env:TRITON_DEPTH_HOLD_WALK_RATE_MPS="0.45"
 $env:TRITON_DEPTH_HOLD_SENSOR_STALE_S="2.0"
 ```
 

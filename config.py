@@ -257,9 +257,9 @@ T200_WRIST_GAIN_MAX = float(os.environ.get("TRITON_T200_WRIST_GAIN_MAX", "1.0"))
 T200_WRIST_GAIN_STEP = float(os.environ.get("TRITON_T200_WRIST_GAIN_STEP", "0.05"))
 
 
-# These are for TOPSIDE display/interaction only (they don't change onboard behavior
-# unless you also update rov_config.py on the ROV side). They are used to show the
-# estimated setpoint when using "walk target" depth hold.
+# Legacy topside walk-target display settings. Current depth-hold manual
+# override/latching behavior is owned by TritonOS; keep these only for older
+# environments that still reference the names.
 DEPTH_HOLD_WALK_DEADBAND = float(os.environ.get("TRITON_DEPTH_HOLD_WALK_DEADBAND", "0.10"))
 DEPTH_HOLD_WALK_RATE_MPS = float(os.environ.get("TRITON_DEPTH_HOLD_WALK_RATE_MPS", "0.45"))
 DEPTH_HOLD_SENSOR_STALE_S = float(os.environ.get("TRITON_DEPTH_HOLD_SENSOR_STALE_S", "2.0"))

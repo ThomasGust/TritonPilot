@@ -642,6 +642,51 @@ def test_yaw_hold_latches_current_attitude_target(monkeypatch, tmp_path):
         app.processEvents()
 
 
+def test_depth_hold_status_uses_rov_runtime_target(monkeypatch, tmp_path):
+    app = _app()
+    streams_path = tmp_path / "streams.json"
+    streams_path.write_text("{}", encoding="utf-8")
+
+    monkeypatch.setattr(main_window, "QSettings", lambda *args, **kwargs: _FakeSettings())
+    monkeypatch.setattr(main_window, "PilotPublisherService", _FakePilotService)
+    monkeypatch.setattr(main_window, "SensorSubscriberService", _FakeSensorService)
+    monkeypatch.setattr(main_window, "RemoteCameraManager", _FakeRemoteCameraManager)
+    monkeypatch.setattr(main_window, "VideoTabs", _FakeVideoPanel)
+    monkeypatch.setattr(main_window, "HoldTestPanel", _SimplePage)
+    monkeypatch.setattr(main_window, "ManagementPage", _SimplePage)
+    monkeypatch.setattr(main_window.threading, "Thread", _NoopThread)
+
+    win = main_window.MainWindow(str(streams_path))
+    try:
+        app.processEvents()
+        win._handle_sensor_msg_on_ui({"type": "external_depth", "sensor": "external_depth", "depth_m": 1.23})
+        win._handle_sensor_msg_on_ui(
+            {
+                "type": "autopilot_status",
+                "sensor": "autopilot_status",
+                "depth_hold": {
+                    "active": False,
+                    "reason": "manual_override",
+                    "target_m": 1.40,
+                },
+            }
+        )
+        win._handle_pilot_msg_on_ui(
+            {
+                "ts": 1.0,
+                "axes": {"ry": 0.5, "rx": 0.0},
+                "modes": {"depth_hold": True, "autopilot": {"depth": True, "targets": {}}},
+            }
+        )
+
+        assert "1.23m" in win._depth_hold_status_text
+        assert "1.40m" in win._depth_hold_status_text
+        assert "[manual]" in win._depth_hold_status_text
+    finally:
+        win.close()
+        app.processEvents()
+
+
 def test_yaw_hold_latches_target_after_manual_yaw_release(monkeypatch, tmp_path):
     app = _app()
     streams_path = tmp_path / "streams.json"

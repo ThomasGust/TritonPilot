@@ -43,8 +43,6 @@ from config import (
     CONTROLLER_DEBUG,
     CONTROLLER_DUMP_RAW_EVERY_S,
     ROV_HOST,
-    DEPTH_HOLD_WALK_DEADBAND,
-    DEPTH_HOLD_WALK_RATE_MPS,
     DEPTH_HOLD_SENSOR_STALE_S,
     YAW_HOLD_ATTITUDE_STALE_S,
     YAW_HOLD_MANUAL_AXIS,
@@ -538,11 +536,12 @@ class MainWindow(QMainWindow):
         self._last_power_ts = 0.0
         self._last_power: dict = {}
 
-        # Depth-hold setpoint tracking (topside estimate).
-        # This is purely for UI visibility; the real controller runs on the ROV.
+        # Depth-hold display cache. The real controller and release latch run
+        # on the ROV; TritonPilot only mirrors the reported runtime target.
         self._dh_enabled: bool = False
         self._dh_target_m: float | None = None
-        self._dh_prev_pilot_ts: float | None = None
+        self._last_autopilot_status_ts = 0.0
+        self._last_autopilot_status: dict = {}
 
         # Yaw-hold target latching. This keeps the yaw target explicit on the
         # wire when the pilot engages hold or releases manual yaw input.
@@ -1005,6 +1004,45 @@ class MainWindow(QMainWindow):
         except Exception:
             return 0.0
 
+    def _latest_depth_m(self) -> tuple[float | None, bool]:
+        stale = (time.time() - float(self._last_depth_ts)) > float(DEPTH_HOLD_SENSOR_STALE_S)
+        if (self._last_depth or {}).get("error"):
+            return None, True
+        depth_m = self._finite_float((self._last_depth or {}).get("depth_m"))
+        if depth_m is None:
+            return None, True
+        return float(depth_m), stale
+
+    def _runtime_depth_hold_status(self) -> dict:
+        runtime = self._last_autopilot_status.get("depth_hold")
+        return dict(runtime) if isinstance(runtime, dict) else {}
+
+    def _format_depth_hold_status(self, msg: dict, depth_hold: bool) -> str:
+        if not depth_hold:
+            return "Depth Hold: OFF"
+
+        depth_m, stale = self._latest_depth_m()
+        modes = (msg or {}).get("modes", {}) or {}
+        ap = modes.get("autopilot") if isinstance(modes.get("autopilot"), dict) else {}
+        targets = ap.get("targets") if isinstance(ap.get("targets"), dict) else {}
+        runtime = self._runtime_depth_hold_status()
+        target = self._finite_float(targets.get("depth_m"))
+        if target is None:
+            target = self._finite_float(runtime.get("target_m"))
+        if target is None:
+            target = self._dh_target_m
+        elif bool(runtime):
+            self._dh_target_m = float(target)
+
+        z_txt = "-" if depth_m is None else f"{float(depth_m):.2f}m"
+        target_txt = "-" if target is None else f"{float(target):.2f}m"
+        text = f"Depth Hold: z {z_txt} -> set {target_txt}"
+        if str(runtime.get("reason", "")).strip().lower() == "manual_override":
+            text += " [manual]"
+        if stale:
+            text += " [DEPTH STALE]"
+        return text
+
     def _latest_attitude_yaw_deg(self) -> tuple[float | None, bool]:
         stale = (time.time() - float(self._last_attitude_ts)) > float(YAW_HOLD_ATTITUDE_STALE_S)
         if stale:
@@ -1156,8 +1194,6 @@ class MainWindow(QMainWindow):
             pass
 
         # Update mode indicator from locally-transmitted modes.
-        # Also maintain a simple "walk target" estimate so the pilot can see the
-        # *intended* setpoint even if the onboard controller temporarily pauses.
         try:
             modes = (msg or {}).get("modes", {}) or {}
             dh = bool(modes.get("depth_hold", False))
@@ -1177,71 +1213,10 @@ class MainWindow(QMainWindow):
             except Exception:
                 pass
 
-            # Compute dt from pilot timestamps.
-            ts = float((msg or {}).get("ts", 0.0) or 0.0)
-            dt = None
-            if self._dh_prev_pilot_ts is not None and ts > 0:
-                dt = max(0.0, min(0.25, ts - float(self._dh_prev_pilot_ts)))
-            self._dh_prev_pilot_ts = ts if ts > 0 else self._dh_prev_pilot_ts
-
-            # Rising edge: capture current depth as the initial setpoint.
-            if dh and (not self._dh_enabled):
-                try:
-                    if (self._last_depth or {}).get("error"):
-                        self._dh_target_m = None
-                    else:
-                        d = (self._last_depth or {}).get("depth_m", None)
-                        self._dh_target_m = float(d) if d is not None else None
-                except Exception:
-                    self._dh_target_m = None
-
-            # Falling edge: clear setpoint.
-            if (not dh) and self._dh_enabled:
-                self._dh_target_m = None
-
-            self._dh_enabled = dh
-
-            # Walk target while enabled.
-            if dh and self._dh_target_m is not None and dt is not None and dt > 0:
-                axes = (msg or {}).get("axes", {}) or {}
-                heave = float(axes.get("ry", 0.0) or 0.0)
-                if abs(heave) > float(DEPTH_HOLD_WALK_DEADBAND):
-                    # heave > 0 means "UP" => setpoint depth decreases
-                    self._dh_target_m += (-heave) * float(DEPTH_HOLD_WALK_RATE_MPS) * float(dt)
-
             manual_yaw = self._pilot_axis_value(msg or {}, YAW_HOLD_MANUAL_AXIS)
             self._sync_yaw_hold_target_from_pilot(yaw_hold, manual_yaw)
 
-            # Compose status text.
-            if dh:
-                # Depth freshness (UI only)
-                import time
-                depth_stale = (time.time() - float(self._last_depth_ts)) > float(DEPTH_HOLD_SENSOR_STALE_S)
-
-                z_txt = "-"
-                try:
-                    if (self._last_depth or {}).get("error"):
-                        z_txt = "ERR"
-                    else:
-                        d = (self._last_depth or {}).get("depth_m", None)
-                        if d is not None:
-                            z_txt = f"{float(d):.2f}m"
-                except Exception:
-                    pass
-
-                t_txt = "-"
-                if self._dh_target_m is not None:
-                    t_txt = f"{float(self._dh_target_m):.2f}m"
-
-                #s = f"Mode: DEPTH HOLD (z {z_txt} -> set {t_txt})"
-                s = f"z {z_txt} -> set {t_txt}"
-                s = f"Depth Hold: z {z_txt} -> set {t_txt}"
-                if depth_stale:
-                    s += " [DEPTH STALE]"
-                self._depth_hold_status_text = s
-            else:
-                self._depth_hold_status_text = "Depth Hold: OFF"
-
+            self._depth_hold_status_text = self._format_depth_hold_status(msg or {}, dh)
             self._attitude_hold_status_text = "RP Level: ON" if rp_level else "RP Level: OFF"
             self._yaw_hold_status_text = self._format_yaw_hold_status(msg or {}, yaw_hold, manual_yaw)
 
@@ -1301,6 +1276,14 @@ class MainWindow(QMainWindow):
             self._last_net = msg
         else:
             self._last_sensor_ts = time.time()
+
+            if typ == "autopilot_status":
+                self._last_autopilot_status_ts = time.time()
+                self._last_autopilot_status = dict(msg or {})
+                runtime_depth = self._runtime_depth_hold_status()
+                target = self._finite_float(runtime_depth.get("target_m"))
+                if target is not None:
+                    self._dh_target_m = float(target)
 
             # Update a compact depth readout in the status bar.
             if typ == "external_depth":
