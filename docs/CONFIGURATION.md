@@ -172,20 +172,14 @@ $env:TRITON_DEPTH_HOLD_SENSOR_STALE_S="2.0"
 
 Change onboard depth-hold behavior in TritonOS, not in TritonPilot.
 
-Yaw-hold target latching:
+Yaw-hold display freshness:
 
 ```powershell
-$env:TRITON_YAW_HOLD_MANUAL_AXIS="rx"
-$env:TRITON_YAW_HOLD_MANUAL_DEADBAND="0.12"
 $env:TRITON_YAW_HOLD_ATTITUDE_STALE_S="1.0"
-$env:TRITON_YAW_HOLD_RELEASE_SETTLE_S="0.20"
-$env:TRITON_YAW_HOLD_TRACK_INTERVAL_S="0.10"
 ```
 
-TritonPilot uses fresh attitude telemetry to send an explicit yaw target when
-yaw hold engages, while the pilot is manually yawing, and when the pilot
-releases manual yaw input. TritonOS still owns the closed-loop controller,
-output limits, and mixing.
+Manual yaw override and release latching are controlled onboard in TritonOS.
+TritonPilot displays the ROV-reported runtime yaw target and controller reason.
 
 ## Attitude Display Convention
 
