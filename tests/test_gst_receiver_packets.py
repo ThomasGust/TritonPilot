@@ -66,3 +66,25 @@ def test_frame_packet_applies_channel_order(monkeypatch):
 
     assert packet is not None
     assert packet.data == b"\x03\x02\x01\x06\x05\x04"
+
+
+def test_receiver_pipeline_uses_configured_udp_buffer_and_jitter(monkeypatch):
+    receiver = _receiver(monkeypatch)
+
+    cmd = receiver._build_cmd(
+        RxConfig(
+            name="test",
+            codec="h264",
+            port=5000,
+            mode="raw",
+            width=2,
+            height=1,
+            latency_ms=60,
+            udp_buffer_size=1234567,
+            drop_on_latency=False,
+        )
+    )
+
+    assert "buffer-size=1234567" in cmd
+    assert "latency=60" in cmd
+    assert "drop-on-latency=false" in cmd

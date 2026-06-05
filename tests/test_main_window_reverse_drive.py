@@ -850,7 +850,7 @@ def test_keyboard_wrist_controls_swap_ws_and_ad_axes(monkeypatch, tmp_path):
         app.processEvents()
 
 
-def test_yaw_hold_latches_current_attitude_target(monkeypatch, tmp_path):
+def test_yaw_hold_status_uses_rov_runtime_target(monkeypatch, tmp_path):
     app = _app()
     streams_path = tmp_path / "streams.json"
     streams_path.write_text("{}", encoding="utf-8")
@@ -876,22 +876,39 @@ def test_yaw_hold_latches_current_attitude_target(monkeypatch, tmp_path):
                 "yaw_deg": 37.5,
             }
         )
+        win._handle_sensor_msg_on_ui(
+            {
+                "type": "autopilot_status",
+                "sensor": "autopilot_status",
+                "attitude": {
+                    "axes": {
+                        "yaw": {
+                            "active": False,
+                            "reason": "manual_override",
+                            "target_deg": 42.0,
+                        },
+                    },
+                },
+            }
+        )
         win._handle_pilot_msg_on_ui(
             {
                 "ts": 1.0,
-                "axes": {"rx": 0.0, "ry": 0.0},
+                "axes": {"rx": 0.5, "ry": 0.0},
                 "modes": {"yaw_hold": True, "autopilot": {"yaw": "hold", "targets": {}}},
             }
         )
 
-        assert win.pilot_svc.axis_target_calls[-1] == ("yaw", 37.5, "hold")
+        assert win.pilot_svc.axis_target_calls == []
         assert "37.5deg" in win._yaw_hold_status_text
+        assert "42.0deg" in win._yaw_hold_status_text
+        assert "[manual]" in win._yaw_hold_status_text
     finally:
         win.close()
         app.processEvents()
 
 
-def test_yaw_hold_latches_target_after_manual_yaw_release(monkeypatch, tmp_path):
+def test_depth_hold_status_uses_rov_runtime_target(monkeypatch, tmp_path):
     app = _app()
     streams_path = tmp_path / "streams.json"
     streams_path.write_text("{}", encoding="utf-8")
@@ -904,42 +921,33 @@ def test_yaw_hold_latches_target_after_manual_yaw_release(monkeypatch, tmp_path)
     monkeypatch.setattr(main_window, "HoldTestPanel", _SimplePage)
     monkeypatch.setattr(main_window, "ManagementPage", _SimplePage)
     monkeypatch.setattr(main_window.threading, "Thread", _NoopThread)
-    monkeypatch.setattr(main_window, "YAW_HOLD_RELEASE_SETTLE_S", 0.0)
 
     win = main_window.MainWindow(str(streams_path))
     try:
         app.processEvents()
-        win._handle_sensor_msg_on_ui({"type": "attitude", "sensor": "roll_pitch_estimator", "yaw_deg": 10.0})
+        win._handle_sensor_msg_on_ui({"type": "external_depth", "sensor": "external_depth", "depth_m": 1.23})
+        win._handle_sensor_msg_on_ui(
+            {
+                "type": "autopilot_status",
+                "sensor": "autopilot_status",
+                "depth_hold": {
+                    "active": False,
+                    "reason": "manual_override",
+                    "target_m": 1.40,
+                },
+            }
+        )
         win._handle_pilot_msg_on_ui(
             {
                 "ts": 1.0,
-                "axes": {"rx": 0.5, "ry": 0.0},
-                "modes": {"yaw_hold": True, "autopilot": {"yaw": "hold", "targets": {}}},
-            }
-        )
-        assert win.pilot_svc.axis_target_calls[-1] == ("yaw", 10.0, "hold")
-
-        win._handle_sensor_msg_on_ui({"type": "attitude", "sensor": "roll_pitch_estimator", "yaw_deg": 22.0})
-        win._handle_pilot_msg_on_ui(
-            {
-                "ts": 1.1,
-                "axes": {"rx": 0.0, "ry": 0.0},
-                "modes": {"yaw_hold": True, "autopilot": {"yaw": "hold", "targets": {}}},
-            }
-        )
-        assert win.pilot_svc.axis_target_calls[-1] == ("yaw", 10.0, "hold")
-        assert win._yh_release_ts is not None
-
-        win._handle_sensor_msg_on_ui({"type": "attitude", "sensor": "roll_pitch_estimator", "yaw_deg": 23.0})
-        win._handle_pilot_msg_on_ui(
-            {
-                "ts": 1.2,
-                "axes": {"rx": 0.0, "ry": 0.0},
-                "modes": {"yaw_hold": True, "autopilot": {"yaw": "hold", "targets": {}}},
+                "axes": {"ry": 0.5, "rx": 0.0},
+                "modes": {"depth_hold": True, "autopilot": {"depth": True, "targets": {}}},
             }
         )
 
-        assert win.pilot_svc.axis_target_calls[-1] == ("yaw", 23.0, "hold")
+        assert "1.23m" in win._depth_hold_status_text
+        assert "1.40m" in win._depth_hold_status_text
+        assert "[manual]" in win._depth_hold_status_text
     finally:
         win.close()
         app.processEvents()

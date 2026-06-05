@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import time
 import threading
+import logging
 from collections import deque
 from pathlib import Path
 
@@ -29,6 +30,8 @@ from config import (
     VIDEO_FIRST_FRAME_TIMEOUT_S,
     VIDEO_STALL_TIMEOUT_S,
 )
+
+logger = logging.getLogger(__name__)
 
 
 class _VideoWorker(QThread):
@@ -466,17 +469,33 @@ class VideoWidget(QWidget):
         return str(target)
 
     def stop_recording(self) -> None:
-        if self._rec is not None:
+        rec = self._rec
+        if rec is not None:
+            self._rec = None
+            self._record_started_ts = None
+            self._refresh_capture_indicators()
+
+            def _finish_recording() -> None:
+                try:
+                    rec.stop()
+                except Exception as exc:
+                    logger.warning("Video recording finalization failed for '%s': %s", self.stream_name, exc)
+
             try:
-                self._rec.stop()
-            finally:
-                self._rec = None
-                self._record_started_ts = None
-                self._refresh_capture_indicators()
+                threading.Thread(
+                    target=_finish_recording,
+                    name=f"video-rec-stop-{self.stream_name}",
+                ).start()
+            except Exception:
+                _finish_recording()
 
     def save_snapshot(self, out_dir: str | None = None, basename: str | None = None) -> str | None:
         """Save the most recent frame as a PNG. Returns path or None if no frame yet."""
         if self.last_frame is None:
+            return None
+        try:
+            frame = np.array(self.last_frame, copy=True)
+        except Exception:
             return None
         if out_dir is None:
             out_dir = str(DEFAULT_RECORDINGS_DIR)
@@ -488,19 +507,29 @@ class VideoWidget(QWidget):
             base = Path(basename).stem or self.stream_name
 
         out_path = unique_capture_path(out_dir, base, ".png")
+
+        def _write_snapshot() -> None:
+            try:
+                save_snapshot(frame, out_path)
+            except Exception as exc:
+                logger.warning("Snapshot write failed for '%s' -> %s: %s", self.stream_name, out_path, exc)
+
         try:
-            save_snapshot(self.last_frame, out_path)
+            threading.Thread(
+                target=_write_snapshot,
+                name=f"video-snapshot-{self.stream_name}",
+            ).start()
         except Exception:
-            return None
+            try:
+                _write_snapshot()
+            except Exception:
+                return None
 
-        if out_path.exists():
-            self._flash_snapshot_indicator("SNAP")
-            return str(out_path)
-        return None
-
+        self._flash_snapshot_indicator("SNAP")
+        return str(out_path)
 
     # --- lifecycle ---
-    def shutdown(self, release_only: bool = True):
+    def shutdown(self, release_only: bool = True, *, async_release: bool = True):
         """Stop decode/recording and release underlying stream resources.
 
         release_only:
@@ -526,15 +555,27 @@ class VideoWidget(QWidget):
             self._connect_worker = None
 
         if self.camera is not None:
-            try:
-                # Prefer manager.close to keep its bookkeeping consistent
-                try:
-                    self.manager.close(self.stream_name)
-                except Exception:
-                    self.camera.release()
-            except Exception:
-                pass
+            camera = self.camera
             self.camera = None
+            released = False
+            try:
+                close_async = getattr(self.manager, "close_async", None)
+                if async_release and callable(close_async):
+                    released = bool(close_async(self.stream_name))
+            except Exception:
+                released = False
+            if not released:
+                try:
+                    # Prefer manager.close to keep its bookkeeping consistent.
+                    self.manager.close(self.stream_name)
+                    released = True
+                except Exception:
+                    released = False
+            if not released:
+                try:
+                    camera.release()
+                except Exception:
+                    pass
 
         # Reset label if we have no pixmap
         if release_only:

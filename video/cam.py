@@ -10,6 +10,7 @@ import json
 import logging
 import socket
 import threading
+import time
 from dataclasses import dataclass
 
 import numpy as np
@@ -48,7 +49,7 @@ class RemoteCv2Camera:
         video_format: str = "mjpeg",
         port: int = 5000,
         codec: str = "jpeg",     # must match video_format or what you send
-        latency_ms: int = 25,
+        latency_ms: int = 60,
         channel_order: str = "BGR",
         windows_host: str | None = None,
         stream_opts: dict | None = None,
@@ -117,6 +118,7 @@ class RemoteCv2Camera:
             "transport",
             "rtp_pt_jpeg",
             "rtp_pt_h264",
+            "rtp_mtu",
             "latency_ms",
             "sync",
             "extra",
@@ -145,6 +147,8 @@ class RemoteCv2Camera:
             width=self.width,
             height=self.height,
             channel_order=self.channel_order,
+            udp_buffer_size=int(stream_opts.get("receiver_udp_buffer_size", 4 * 1024 * 1024)),
+            drop_on_latency=bool(stream_opts.get("receiver_drop_on_latency", True)),
         )
         self.rx = ReceiverProcess(rx_cfg)
         self.rx.start()
@@ -265,6 +269,8 @@ class RemoteCameraManager:
         ]
         # If a stream def omits "enabled", assume True.
         self._opened: dict[str, RemoteCv2Camera] = {}
+        self._closing: dict[str, threading.Thread] = {}
+        self._name_locks: dict[str, threading.Lock] = {}
         # Serialize open/close across background connect workers. This avoids
         # racing on shared bookkeeping and on the single ROV video RPC REQ socket.
         self._mgr_lock = threading.RLock()
@@ -286,48 +292,106 @@ class RemoteCameraManager:
                 ordered_names.append(name)
         return ordered_names
 
+    def _lock_for_name(self, name: str) -> threading.Lock:
+        with self._mgr_lock:
+            lock = self._name_locks.get(name)
+            if lock is None:
+                lock = threading.Lock()
+                self._name_locks[name] = lock
+            return lock
+
+    def _wait_for_pending_close(self, name: str, timeout_s: float = 5.0) -> None:
+        deadline = time.monotonic() + max(0.0, float(timeout_s))
+        while True:
+            with self._mgr_lock:
+                thread = self._closing.get(name)
+            if thread is None:
+                return
+            remaining = max(0.0, deadline - time.monotonic())
+            thread.join(timeout=remaining)
+            with self._mgr_lock:
+                if not thread.is_alive() and self._closing.get(name) is thread:
+                    self._closing.pop(name, None)
+                    return
+            if time.monotonic() >= deadline:
+                raise TimeoutError(f"Timed out waiting for previous close of stream '{name}'")
+
     def open(self, name: str) -> RemoteCv2Camera:
         """Open a named stream or return the existing active camera."""
-        with self._mgr_lock:
-            if name in self._opened:
-                return self._opened[name]
+        name_lock = self._lock_for_name(name)
+        with name_lock:
+            self._wait_for_pending_close(name)
+            with self._mgr_lock:
+                if name in self._opened:
+                    return self._opened[name]
 
-            if name not in self.stream_defs:
-                raise KeyError(f"Unknown stream '{name}'")
-            s = self.stream_defs[name]
-            if not s.get('enabled', True):
-                raise ValueError(f"Stream '{name}' is disabled in config")
+                if name not in self.stream_defs:
+                    raise KeyError(f"Unknown stream '{name}'")
+                s = self.stream_defs[name]
+                if not s.get('enabled', True):
+                    raise ValueError(f"Stream '{name}' is disabled in config")
 
-            # Merge stream options with top-level defaults.
-            stream_opts = dict(self._defaults)
-            stream_opts.update(s)
+                # Merge stream options with top-level defaults.
+                stream_opts = dict(self._defaults)
+                stream_opts.update(s)
 
-        cam = RemoteCv2Camera(
-            rov=self.rov,
-            name=s['name'],
-            device=s['device'],
-            width=s['width'],
-            height=s['height'],
-            fps=s['fps'],
-            video_format=s.get('video_format', 'mjpeg'),
-            port=s.get('port', 5000),
-            windows_host=self.windows_host,
-            stream_opts=stream_opts,
-        )
-        with self._mgr_lock:
-            existing = self._opened.get(name)
-            if existing is not None:
-                try:
-                    cam.release()
-                except Exception:
-                    pass
-                return existing
-            self._opened[name] = cam
-            return cam
+            cam = RemoteCv2Camera(
+                rov=self.rov,
+                name=s['name'],
+                device=s['device'],
+                width=s['width'],
+                height=s['height'],
+                fps=s['fps'],
+                video_format=s.get('video_format', 'mjpeg'),
+                port=s.get('port', 5000),
+                windows_host=self.windows_host,
+                stream_opts=stream_opts,
+            )
+            with self._mgr_lock:
+                existing = self._opened.get(name)
+                if existing is not None:
+                    try:
+                        cam.release()
+                    except Exception:
+                        pass
+                    return existing
+                self._opened[name] = cam
+                return cam
 
-    def close(self, name: str):
+    def close(self, name: str) -> bool:
         """Close a named stream if it is currently active."""
+        name_lock = self._lock_for_name(name)
+        with name_lock:
+            with self._mgr_lock:
+                cam = self._opened.pop(name, None)
+            if cam:
+                cam.release()
+                return True
+            self._wait_for_pending_close(name)
+            return False
+
+    def close_async(self, name: str) -> bool:
+        """Close a stream on a background thread so Qt never waits on RPC/GStreamer cleanup."""
+
         with self._mgr_lock:
             cam = self._opened.pop(name, None)
-        if cam:
-            cam.release()
+            if cam is None:
+                return False
+
+            thread_ref: dict[str, threading.Thread] = {}
+
+            def _release() -> None:
+                try:
+                    cam.release()
+                finally:
+                    thread = thread_ref.get("thread")
+                    with self._mgr_lock:
+                        if thread is not None and self._closing.get(name) is thread:
+                            self._closing.pop(name, None)
+
+            thread = threading.Thread(target=_release, name=f"video-close-{name}", daemon=True)
+            thread_ref["thread"] = thread
+            self._closing[name] = thread
+
+        thread.start()
+        return True
