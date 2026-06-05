@@ -331,12 +331,23 @@ class PilotTelemetryColumn(QWidget):
         self.capture_mode_text.setObjectName("pilotCaptureModeText")
         self.capture_mode_text.setWordWrap(True)
         self.capture_mode_text.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.capture_activity_text = QLabel("")
+        self.capture_activity_text.setObjectName("pilotCaptureActivityText")
+        self.capture_activity_text.setWordWrap(True)
+        self.capture_activity_text.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.analysis_text = QLabel("Analysis Share: -")
         self.analysis_text.setObjectName("pilotAnalysisText")
         self.analysis_text.setWordWrap(True)
         self.analysis_text.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
         self.analysis_card.body.addWidget(self.capture_mode_text)
+        self.analysis_card.body.addWidget(self.capture_activity_text)
         self.analysis_card.body.addWidget(self.analysis_text)
+        self._capture_mode_key = "camera"
+        self._capture_activity: dict = {"state": "idle"}
+        self._capture_activity_timer = QTimer(self)
+        self._capture_activity_timer.setInterval(500)
+        self._capture_activity_timer.timeout.connect(self._refresh_capture_activity_text)
+        self._capture_activity_timer.start()
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
@@ -391,6 +402,7 @@ class PilotTelemetryColumn(QWidget):
 
     def set_capture_mode(self, mode: str) -> None:
         mode_key = str(mode or "camera").strip().lower()
+        self._capture_mode_key = "stereo" if mode_key == "stereo" else "camera"
         if mode_key == "stereo":
             text = "Capture: Stereo pairs  |  R toggles"
             tip = "X captures a stereo pair. B starts or stops stereo pair recording."
@@ -402,6 +414,69 @@ class PilotTelemetryColumn(QWidget):
         self.capture_mode_text.setText(text)
         self.capture_mode_text.setToolTip(tip)
         self.capture_mode_text.setStyleSheet(f"color: {color}; font-weight: 700;")
+        self._refresh_capture_activity_text()
+
+    def set_capture_activity(self, activity: dict | None = None) -> None:
+        self._capture_activity = dict(activity or {"state": "idle"})
+        self._refresh_capture_activity_text()
+
+    def _format_elapsed(self, started_ts: object) -> str:
+        try:
+            elapsed = max(0, int(time.time() - float(started_ts)))
+        except Exception:
+            elapsed = 0
+        minutes, seconds = divmod(elapsed, 60)
+        hours, minutes = divmod(minutes, 60)
+        if hours:
+            return f"{hours:d}:{minutes:02d}:{seconds:02d}"
+        return f"{minutes:02d}:{seconds:02d}"
+
+    def _refresh_capture_activity_text(self) -> None:
+        if getattr(self, "_capture_mode_key", "camera") != "stereo":
+            self.capture_activity_text.setText("")
+            self.capture_activity_text.hide()
+            return
+
+        activity = dict(getattr(self, "_capture_activity", {}) or {})
+        state = str(activity.get("state") or "idle").strip().lower()
+        capture_mode = str(activity.get("mode") or "").strip().lower()
+        try:
+            count = max(0, int(activity.get("count") or 0))
+        except Exception:
+            count = 0
+        pair_word = "pair" if count == 1 else "pairs"
+
+        if state == "failed":
+            text = "STEREO ERROR"
+            style = "color: #ffd9d9; background: #4a2424; border: 1px solid #995252;"
+            tip = str(activity.get("error") or "Stereo capture failed.")
+        elif state == "completed":
+            text = f"STEREO SAVED | {count} {pair_word}"
+            style = "color: #d9ffea; background: #204530; border: 1px solid #2f7a4f;"
+            tip = str(activity.get("manifest_path") or "Stereo capture finished.")
+        elif state == "stopping":
+            text = f"STEREO FINALIZING | {count} {pair_word}"
+            style = "color: #fff2cc; background: #5a4020; border: 1px solid #c8953e;"
+            tip = "Stereo pair recording is stopping."
+        elif state == "recording" or capture_mode == "recording":
+            text = f"STEREO REC {self._format_elapsed(activity.get('started_ts'))} | {count} {pair_word}"
+            style = "color: #fff4f4; background: #8e2020; border: 1px solid #e66f6f;"
+            tip = "Stereo pair recording is active."
+        elif state in {"single", "burst", "capturing"} or capture_mode in {"single", "burst"}:
+            text = f"STEREO CAPTURE | {count} {pair_word}"
+            style = "color: #f7fbff; background: #274876; border: 1px solid #8cbcff;"
+            tip = "Stereo pair capture is active."
+        else:
+            text = "STEREO READY"
+            style = "color: #d9ecff; background: #22364d; border: 1px solid #4576a8;"
+            tip = "Stereo capture is selected."
+
+        self.capture_activity_text.setText(text)
+        self.capture_activity_text.setToolTip(tip)
+        self.capture_activity_text.setStyleSheet(
+            f"{style} border-radius: 10px; padding: 4px 10px; font-weight: 800;"
+        )
+        self.capture_activity_text.show()
 
 
 class InstrumentPanel(QWidget):

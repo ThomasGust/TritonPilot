@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import threading
 import time
 from dataclasses import asdict
 from pathlib import Path
@@ -56,6 +57,9 @@ class StereoCaptureSession:
         self._last_pair_key: tuple[int, int] | None = None
         self._started_wall_ts: float | None = None
         self._manifest: dict[str, Any] = {}
+        self._manifest_dirty = False
+        self._last_manifest_write_ts = 0.0
+        self._manifest_flush_interval_s = 1.0
 
     @property
     def manifest_path(self) -> Path:
@@ -79,6 +83,7 @@ class StereoCaptureSession:
 
         if self._manifest:
             self._manifest["ended_wall_ts"] = time.time()
+            self._manifest_dirty = True
             self._write_manifest()
         if self.close_on_stop:
             for stream_name in (self.pair.left, self.pair.right):
@@ -92,6 +97,7 @@ class StereoCaptureSession:
         *,
         wait_s: float = 2.0,
         require_fresh: bool = True,
+        flush_manifest: bool = True,
         stop_requested: Callable[[], bool] | None = None,
     ) -> dict[str, Any]:
         """Capture one stereo pair whose receiver timestamps are close enough."""
@@ -113,7 +119,7 @@ class StereoCaptureSession:
             delta_s = abs(float(left.monotonic_ts) - float(right.monotonic_ts))
             best_delta_s = delta_s if best_delta_s is None else min(best_delta_s, delta_s)
             if delta_s <= self.pair.max_pair_delta_s:
-                return self._save_pair(left, right, delta_s)
+                return self._save_pair(left, right, delta_s, flush_manifest=flush_manifest)
             time.sleep(0.002)
 
         detail = "no frames received" if best_delta_s is None else f"best delta {best_delta_s * 1000.0:.1f} ms"
@@ -238,6 +244,17 @@ class StereoCaptureSession:
         with self.manifest_path.open("w", encoding="utf-8") as f:
             json.dump(self._manifest, f, indent=2, sort_keys=True)
             f.write("\n")
+        self._manifest_dirty = False
+        self._last_manifest_write_ts = time.monotonic()
+
+    def _flush_manifest_if_needed(self, *, force: bool = False) -> None:
+        if not self._manifest_dirty:
+            return
+        if force or self._last_manifest_write_ts <= 0.0:
+            self._write_manifest()
+            return
+        if (time.monotonic() - self._last_manifest_write_ts) >= self._manifest_flush_interval_s:
+            self._write_manifest()
 
     def _prepared_frame(self, packet: CameraFramePacket, stream_name: str) -> np.ndarray:
         frame = np.ascontiguousarray(packet.frame_bgr)
@@ -247,7 +264,34 @@ class StereoCaptureSession:
                 frame = rotate_frame(frame, rotation_deg)
         return frame
 
-    def _save_pair(self, left: CameraFramePacket, right: CameraFramePacket, delta_s: float) -> dict[str, Any]:
+    def _save_images(self, left_frame: np.ndarray, left_path: Path, right_frame: np.ndarray, right_path: Path) -> None:
+        errors: list[str] = []
+
+        def _write_one(frame: np.ndarray, path: Path) -> None:
+            try:
+                save_snapshot(frame, path)
+            except Exception as exc:
+                errors.append(f"{path.name}: {exc}")
+
+        threads = [
+            threading.Thread(target=_write_one, args=(left_frame, left_path)),
+            threading.Thread(target=_write_one, args=(right_frame, right_path)),
+        ]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join()
+        if errors:
+            raise StereoCaptureError("Failed to write stereo images: " + "; ".join(errors))
+
+    def _save_pair(
+        self,
+        left: CameraFramePacket,
+        right: CameraFramePacket,
+        delta_s: float,
+        *,
+        flush_manifest: bool = True,
+    ) -> dict[str, Any]:
         self._frame_index += 1
         stem = f"pair_{self._frame_index:06d}"
         left_path = self.left_dir / f"{stem}_left.png"
@@ -255,8 +299,7 @@ class StereoCaptureSession:
 
         left_frame = self._prepared_frame(left, self.pair.left)
         right_frame = self._prepared_frame(right, self.pair.right)
-        save_snapshot(left_frame, left_path)
-        save_snapshot(right_frame, right_path)
+        self._save_images(left_frame, left_path, right_frame, right_path)
         if not left_path.exists() or not right_path.exists():
             raise StereoCaptureError("Failed to write one or both stereo images")
 
@@ -285,5 +328,6 @@ class StereoCaptureSession:
             },
         }
         self._manifest.setdefault("frames", []).append(record)
-        self._write_manifest()
+        self._manifest_dirty = True
+        self._flush_manifest_if_needed(force=flush_manifest)
         return record

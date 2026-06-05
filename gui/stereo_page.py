@@ -96,6 +96,7 @@ class _CaptureWorker(QThread):
                     record = session.capture_once(
                         wait_s=self.wait_s,
                         require_fresh=True,
+                        flush_manifest=False,
                         stop_requested=self.isInterruptionRequested,
                     )
                     captured += 1
@@ -143,6 +144,7 @@ class StereoPage(QWidget):
 
     pairSelectionChanged = pyqtSignal(object)
     statusMessage = pyqtSignal(str, int)
+    captureStateChanged = pyqtSignal(dict)
 
     def __init__(
         self,
@@ -167,9 +169,14 @@ class StereoPage(QWidget):
         self._next_still_new_session = False
         self._last_generated_session_base = ""
         self._generated_session_suffix = 0
+        self._capture_started_ts: float | None = None
+        self._capture_pair_count = 0
+        self._capture_indicator_state = "idle"
+        self._capture_stopping = False
 
         self._build_ui()
         self.reload_pairs(emit=False)
+        self._emit_capture_state("idle")
 
         self._health_timer = QTimer(self)
         self._health_timer.setInterval(250)
@@ -302,7 +309,7 @@ class StereoPage(QWidget):
         self.interval_spin.setDecimals(2)
         self.interval_spin.setSingleStep(0.05)
         self.interval_spin.setSuffix(" s")
-        self.interval_spin.setValue(0.5)
+        self.interval_spin.setValue(0.4)
         self.wait_spin = QDoubleSpinBox()
         self.wait_spin.setRange(0.1, 30.0)
         self.wait_spin.setDecimals(2)
@@ -337,7 +344,7 @@ class StereoPage(QWidget):
         self.record_fps_spin.setDecimals(1)
         self.record_fps_spin.setSingleStep(0.5)
         self.record_fps_spin.setSuffix(" fps")
-        self.record_fps_spin.setValue(2.0)
+        self.record_fps_spin.setValue(2.5)
         record_grid.addWidget(QLabel("Record FPS"), 0, 0)
         record_grid.addWidget(self.record_fps_spin, 1, 0)
         capture_card.body.addLayout(record_grid)
@@ -512,6 +519,23 @@ class StereoPage(QWidget):
         for widget in (self.resume_session_btn, self.new_session_btn):
             widget.setEnabled(session_enabled)
 
+    def capture_state(self) -> dict:
+        return {
+            "state": self._capture_indicator_state,
+            "mode": self._capture_mode,
+            "count": int(self._capture_pair_count),
+            "started_ts": self._capture_started_ts,
+            "manifest_path": self._last_manifest_path,
+            "stopping": bool(self._capture_stopping),
+        }
+
+    def _emit_capture_state(self, state: str | None = None, **updates) -> None:
+        if state is not None:
+            self._capture_indicator_state = str(state or "idle")
+        payload = self.capture_state()
+        payload.update(updates)
+        self.captureStateChanged.emit(payload)
+
     def _resolve_session_name(self) -> str:
         typed = self.session_edit.text().strip()
         if typed:
@@ -657,6 +681,8 @@ class StereoPage(QWidget):
         if self._capture_worker is None or not self._capture_worker.isRunning() or self._capture_mode != "recording":
             return
         self._capture_worker.requestInterruption()
+        self._capture_stopping = True
+        self._emit_capture_state("stopping")
         self.record_stop_btn.setEnabled(False)
         self.statusMessage.emit("Stopping stereo recording...", 3000)
 
@@ -689,6 +715,10 @@ class StereoPage(QWidget):
             parent=self,
         )
         self._capture_mode = mode
+        self._capture_started_ts = time.time()
+        self._capture_pair_count = 0
+        self._capture_stopping = False
+        self._emit_capture_state("recording" if mode == "recording" else mode)
         self._capture_worker.progress.connect(self._on_capture_progress)
         self._capture_worker.completed.connect(self._on_capture_completed)
         self._capture_worker.failed.connect(self._on_capture_failed)
@@ -704,7 +734,11 @@ class StereoPage(QWidget):
 
     def _on_capture_worker_finished(self) -> None:
         self._capture_mode = ""
+        self._capture_started_ts = None
+        self._capture_stopping = False
         self._set_capture_enabled(self.current_pair() is not None and self.manager is not None)
+        if self._capture_indicator_state not in {"completed", "failed"}:
+            self._emit_capture_state("idle")
 
     def _on_capture_progress(self, record: dict) -> None:
         row = self.frames_table.rowCount()
@@ -720,16 +754,24 @@ class StereoPage(QWidget):
             item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
             self.frames_table.setItem(row, col, item)
         self.frames_table.scrollToBottom()
+        self._capture_pair_count = self.frames_table.rowCount()
+        if self._capture_indicator_state == "stopping":
+            self._emit_capture_state("stopping")
+        elif self._capture_indicator_state != "failed":
+            self._emit_capture_state("recording" if self._capture_mode == "recording" else self._capture_mode)
 
     def _on_capture_completed(self, manifest_path: str, count: int) -> None:
         self._last_manifest_path = manifest_path
         self.output_lbl.setText(manifest_path)
+        self._capture_pair_count = max(int(count or 0), int(self._capture_pair_count))
+        self._emit_capture_state("completed", manifest_path=manifest_path)
         if self._capture_mode == "recording":
             self.statusMessage.emit(f"Stereo recording saved {count} pair(s)", 5000)
         else:
             self.statusMessage.emit(f"Stereo capture saved {count} pair(s)", 5000)
 
     def _on_capture_failed(self, error: str) -> None:
+        self._emit_capture_state("failed", error=str(error or "capture failed"))
         if self._capture_mode == "recording":
             self.statusMessage.emit(f"Stereo recording failed: {error}", 7000)
         else:

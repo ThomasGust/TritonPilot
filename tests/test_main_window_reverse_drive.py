@@ -515,6 +515,11 @@ def test_stereo_page_controller_x_b_route_to_stereo_capture(monkeypatch, tmp_pat
         win.eventFilter(win, key_event)
         assert win._capture_route_mode == "stereo"
         assert "Stereo pairs" in win.pilot_telemetry_column.capture_mode_text.text()
+        assert win.pilot_telemetry_column.capture_activity_text.text() == "STEREO READY"
+
+        win._on_stereo_capture_state_changed({"state": "recording", "mode": "recording", "count": 2, "started_ts": main_window.time.time()})
+        assert "STEREO REC" in win.pilot_telemetry_column.capture_activity_text.text()
+        assert "2 pairs" in win.pilot_telemetry_column.capture_activity_text.text()
 
         win._handle_pilot_msg_on_ui({"edges": {"x": "down", "b": "down"}, "modes": {}})
 

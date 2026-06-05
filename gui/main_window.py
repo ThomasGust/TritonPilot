@@ -228,6 +228,7 @@ class MainWindow(QMainWindow):
             self.pilot_telemetry_column.set_capture_mode(mode_key)
         except Exception:
             pass
+        self._refresh_capture_activity_indicator()
         stereo_page = getattr(self, "_stereo_page", None)
         if stereo_page is not None and previous != mode_key:
             try:
@@ -241,6 +242,31 @@ class MainWindow(QMainWindow):
     def _toggle_capture_route_mode(self) -> None:
         next_mode = "stereo" if getattr(self, "_capture_route_mode", "camera") != "stereo" else "camera"
         self._set_capture_route_mode(next_mode)
+
+    def _refresh_capture_activity_indicator(self) -> None:
+        column = getattr(self, "pilot_telemetry_column", None)
+        if column is None:
+            return
+        if getattr(self, "_capture_route_mode", "camera") != "stereo":
+            try:
+                column.set_capture_activity({"state": "idle", "mode": "camera"})
+            except Exception:
+                pass
+            return
+        stereo_page = getattr(self, "_stereo_page", None)
+        try:
+            state = stereo_page.capture_state() if stereo_page is not None else {"state": "idle", "mode": "stereo"}
+            column.set_capture_activity(state)
+        except Exception:
+            pass
+
+    def _on_stereo_capture_state_changed(self, state: dict) -> None:
+        if getattr(self, "_capture_route_mode", "camera") != "stereo":
+            return
+        try:
+            self.pilot_telemetry_column.set_capture_activity(dict(state or {}))
+        except Exception:
+            pass
 
     def _capture_still(self) -> None:
         if self._capture_should_use_stereo():
@@ -842,6 +868,7 @@ class MainWindow(QMainWindow):
         )
         self._stereo_page.pairSelectionChanged.connect(self._on_stereo_pair_changed)
         self._stereo_page.statusMessage.connect(lambda msg, timeout: self.statusBar().showMessage(msg, int(timeout)))
+        self._stereo_page.captureStateChanged.connect(self._on_stereo_capture_state_changed)
         if self.video_panel is None:
             self._stereo_page.attach_video_placeholder("Video unavailable.")
         self._page_stack.addWidget(self._stereo_page)

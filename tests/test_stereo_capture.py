@@ -170,6 +170,48 @@ def test_stereo_capture_session_appends_existing_manifest(tmp_path: Path):
     assert (second.session_dir / manifest["frames"][1]["left_path"]).exists()
 
 
+def test_stereo_capture_can_defer_manifest_flush_until_stop(tmp_path: Path):
+    streams_path = tmp_path / "streams.json"
+    streams_path.write_text(
+        json.dumps(
+            {
+                "streams": [{"name": "Left"}, {"name": "Right"}],
+                "stereo_pairs": [
+                    {
+                        "name": "Forward",
+                        "left": "Left",
+                        "right": "Right",
+                        "rig_id": "rig-a",
+                        "max_pair_delta_ms": 20,
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    pair = load_stereo_pairs(streams_path)[0]
+    manager = _FakeManager()
+    session = StereoCaptureSession(
+        manager,  # type: ignore[arg-type]
+        pair,
+        output_root=tmp_path,
+        session_name="deferred-session",
+    )
+
+    session.start()
+    record = session.capture_once(wait_s=0.1, flush_manifest=False)
+    manifest_before_stop = json.loads(session.manifest_path.read_text(encoding="utf-8"))
+    assert manifest_before_stop["frames"] == []
+    assert (session.session_dir / record["left_path"]).exists()
+    assert (session.session_dir / record["right_path"]).exists()
+
+    session.stop()
+
+    manifest_after_stop = json.loads(session.manifest_path.read_text(encoding="utf-8"))
+    assert len(manifest_after_stop["frames"]) == 1
+    assert manifest_after_stop["frames"][0]["stem"] == "pair_000001"
+
+
 def test_stereo_capture_chooses_closest_buffered_frame_pair(tmp_path: Path):
     streams_path = tmp_path / "streams.json"
     streams_path.write_text(
