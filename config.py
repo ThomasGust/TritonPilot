@@ -100,6 +100,28 @@ VIDEO_WARM_HIDDEN_STREAMS = os.environ.get("TRITON_VIDEO_WARM_HIDDEN_STREAMS", "
 )
 VIDEO_WARMUP_INTERVAL_MS = int(os.environ.get("TRITON_VIDEO_WARMUP_INTERVAL_MS", "750"))
 
+
+def _layout_count_env(name: str, default: int) -> int:
+    raw = os.environ.get(name, "").strip()
+    if not raw:
+        return int(default)
+    try:
+        value = int(raw)
+    except Exception:
+        return int(default)
+    return value if value in (1, 2, 3, 4) else int(default)
+
+
+# Default to quad view for piloting, and keep hidden streams warm once started
+# so layout/camera switches do not need to ask TritonOS to recreate pipelines.
+VIDEO_DEFAULT_LAYOUT_COUNT = _layout_count_env("TRITON_VIDEO_DEFAULT_LAYOUT_COUNT", 4)
+VIDEO_STOP_HIDDEN_STREAMS = os.environ.get("TRITON_VIDEO_STOP_HIDDEN_STREAMS", "0").strip().lower() in (
+    "1",
+    "true",
+    "yes",
+    "on",
+)
+
 # Where your JSON with stream definitions lives
 STREAMS_FILE = Path(__file__).parent / "data" / "streams.json"
 

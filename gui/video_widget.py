@@ -424,7 +424,7 @@ class VideoWidget(QWidget):
         pix = QPixmap.fromImage(image).scaled(
             target_w,
             target_h,
-            Qt.AspectRatioMode.KeepAspectRatio,
+            Qt.AspectRatioMode.KeepAspectRatioByExpanding,
             Qt.TransformationMode.FastTransformation,
         )
         pix.setDevicePixelRatio(dpr)

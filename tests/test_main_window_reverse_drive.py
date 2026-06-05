@@ -34,6 +34,8 @@ class _FakePilotService:
         self._reverse = False
         self.queued_edges = []
         self.axis_target_calls = []
+        self.aux_axis_calls = []
+        self.aux_axes = {}
 
     def start(self):
         return None
@@ -49,7 +51,9 @@ class _FakePilotService:
         self._reverse = bool(enabled)
         return changed
 
-    def set_aux_axis(self, *_args, **_kwargs):
+    def set_aux_axis(self, name, value):
+        self.aux_axis_calls.append((str(name), float(value)))
+        self.aux_axes[str(name)] = float(value)
         return None
 
     def queue_edge(self, *_args, **_kwargs):
@@ -325,12 +329,68 @@ def test_analysis_transfer_status_bar_shows_served_root(monkeypatch, tmp_path):
         assert "recordings" in text
         assert "3 files/5.0 MB" in text
         assert win._analysis_transfer_line.text() == text
+        assert win._analysis_transfer_line.isHidden() is True
         assert win._analysis_transfer_line.wordWrap() is True
         assert win._analysis_transfer_line.toolTip() == text
+        assert win.pilot_telemetry_column.analysis_text.text() == text
     finally:
         win.close()
         app.processEvents()
         assert servers[0][0].shutdown_called is True
+
+
+def test_pilot_page_adds_compact_telemetry_column_and_frees_status_bar(monkeypatch, tmp_path):
+    app = _app()
+    streams_path = tmp_path / "streams.json"
+    streams_path.write_text("{}", encoding="utf-8")
+
+    monkeypatch.setattr(main_window, "QSettings", lambda *args, **kwargs: _FakeSettings())
+    monkeypatch.setattr(main_window, "PilotPublisherService", _FakePilotService)
+    monkeypatch.setattr(main_window, "SensorSubscriberService", _FakeSensorService)
+    monkeypatch.setattr(main_window, "RemoteCameraManager", _FakeRemoteCameraManager)
+    monkeypatch.setattr(main_window, "VideoTabs", _FakeVideoPanel)
+    monkeypatch.setattr(main_window, "HoldTestPanel", _SimplePage)
+    monkeypatch.setattr(main_window, "ManagementPage", _SimplePage)
+    monkeypatch.setattr(main_window.threading, "Thread", _NoopThread)
+
+    win = main_window.MainWindow(str(streams_path))
+    try:
+        app.processEvents()
+        pilot_layout = win._pilot_page.layout()
+        assert pilot_layout.indexOf(win._pilot_video_host) < pilot_layout.indexOf(win.pilot_telemetry_column)
+        assert win.pilot_telemetry_column.minimumWidth() >= 200
+        assert win._analysis_transfer_lbl.parent() is win
+        assert win._depth_lbl.parent() is win
+        assert win._analysis_transfer_line.isHidden() is True
+
+        win._handle_sensor_msg_on_ui(
+            {
+                "type": "attitude",
+                "sensor": "roll_pitch_estimator",
+                "roll_deg": 4.0,
+                "pitch_deg": -2.0,
+                "yaw_deg": 91.0,
+            }
+        )
+        win._handle_sensor_msg_on_ui(
+            {
+                "type": "external_depth",
+                "sensor": "external_depth",
+                "depth_m": 1.25,
+                "pressure_mbar": 1125.0,
+                "temperature_c": 12.5,
+            }
+        )
+        win._flush_sensor_ui()
+        assert win.pilot_telemetry_column.attitude_indicator.roll_deg == pytest.approx(4.0)
+        assert win.pilot_telemetry_column.attitude_indicator.pitch_deg == pytest.approx(-2.0)
+        assert win.pilot_telemetry_column.attitude_indicator.yaw_deg == pytest.approx(91.0)
+        assert win.pilot_telemetry_column.depth_gauge.value == pytest.approx(1.25)
+        assert "1.25 m" in win.pilot_telemetry_column.depth_text.text()
+        assert "Analysis Share: OFF" in win.pilot_telemetry_column.analysis_text.text()
+    finally:
+        win.close()
+        app.processEvents()
 
 
 def test_stereo_page_applies_configured_pair_layout(monkeypatch, tmp_path):
@@ -450,8 +510,113 @@ def test_stereo_page_controller_x_b_route_to_stereo_capture(monkeypatch, tmp_pat
 
         assert stereo_actions == ["pair", "record"]
         assert camera_actions == ["snapshot", "record"]
+
+        key_event = QKeyEvent(QEvent.Type.KeyPress, Qt.Key.Key_R, Qt.KeyboardModifier.NoModifier, "r")
+        win.eventFilter(win, key_event)
+        assert win._capture_route_mode == "stereo"
+        assert "Stereo pairs" in win.pilot_telemetry_column.capture_mode_text.text()
+
+        win._handle_pilot_msg_on_ui({"edges": {"x": "down", "b": "down"}, "modes": {}})
+
+        assert stereo_actions == ["pair", "record", "pair", "record"]
+        assert camera_actions == ["snapshot", "record"]
     finally:
         win.close()
+        app.processEvents()
+
+
+def test_capture_outputs_share_app_session_directory(monkeypatch, tmp_path):
+    app = _app()
+    streams_path = tmp_path / "streams.json"
+    streams_path.write_text("{}", encoding="utf-8")
+    save_root = tmp_path / "recordings"
+
+    monkeypatch.setattr(main_window, "QSettings", lambda *args, **kwargs: _FakeSettings())
+    monkeypatch.setattr(main_window, "PilotPublisherService", _FakePilotService)
+    monkeypatch.setattr(main_window, "SensorSubscriberService", _FakeSensorService)
+    monkeypatch.setattr(main_window, "RemoteCameraManager", _FakeRemoteCameraManager)
+    monkeypatch.setattr(main_window, "VideoTabs", _FakeVideoPanel)
+    monkeypatch.setattr(main_window, "HoldTestPanel", _SimplePage)
+    monkeypatch.setattr(main_window, "ManagementPage", _SimplePage)
+    monkeypatch.setattr(main_window.threading, "Thread", _NoopThread)
+    monkeypatch.setattr(main_window, "resolve_recordings_dir", lambda _preferred: main_window.SaveLocation(save_root))
+
+    win = main_window.MainWindow(str(streams_path))
+    try:
+        app.processEvents()
+
+        first_dir, first_location = win._capture_output_dir()
+        second_dir, second_location = win._capture_output_dir()
+        raw_dir, raw_location = win._make_recording_session_dir()
+
+        assert first_dir == second_dir == raw_dir
+        assert first_dir.parent == save_root
+        assert first_dir.exists()
+        assert first_dir != save_root
+        assert first_location.path == save_root
+        assert second_location.path == save_root
+        assert raw_location.path == save_root
+        assert win._analysis_transfer_configured_root() == save_root.resolve()
+    finally:
+        win.close()
+        app.processEvents()
+
+
+def test_stereo_page_rolls_sessions_on_mode_changes(monkeypatch, tmp_path):
+    app = _app()
+    from gui import stereo_page as stereo_module
+    from gui.stereo_page import StereoPage
+
+    streams_path = tmp_path / "streams.json"
+    streams_path.write_text(
+        json.dumps(
+            {
+                "streams": [{"name": "Primary Camera"}, {"name": "Aux Camera"}],
+                "stereo_pairs": [
+                    {
+                        "name": "Forward Stereo",
+                        "left": "Primary Camera",
+                        "right": "Aux Camera",
+                        "rig_id": "rig-a",
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(stereo_module.time, "strftime", lambda _fmt: "20260605-120000")
+    monkeypatch.setattr(stereo_module.time, "time", lambda: 1000.456)
+
+    page = StereoPage(
+        streams_path=str(streams_path),
+        manager=_FakeRemoteCameraManager(str(streams_path)),
+        output_root_provider=lambda: tmp_path / "recordings",
+    )
+    try:
+        app.processEvents()
+        sessions = []
+
+        def _fake_start_capture(**kwargs):
+            sessions.append((kwargs["mode"], page._resolve_session_name()))
+
+        page._start_capture = _fake_start_capture
+
+        page.capture_pair()
+        page.capture_pair()
+        assert sessions[0] == ("single", "20260605-120000-456")
+        assert sessions[1] == ("single", "20260605-120000-456")
+
+        page.prepare_next_still_session()
+        page.capture_pair()
+        assert sessions[2] == ("single", "20260605-120000-456-01")
+
+        page.start_recording()
+        assert sessions[3] == ("recording", "20260605-120000-456-02")
+
+        page.capture_pair()
+        assert sessions[4] == ("single", "20260605-120000-456-03")
+    finally:
+        page.close()
         app.processEvents()
 
 
@@ -566,6 +731,43 @@ def test_stereo_page_omits_disparity_preview_controls(tmp_path):
         app.processEvents()
 
 
+def test_stereo_page_scrolls_control_column_independently(tmp_path):
+    app = _app()
+    from gui.stereo_page import StereoPage
+
+    streams_path = tmp_path / "streams.json"
+    streams_path.write_text(
+        json.dumps(
+            {
+                "streams": [{"name": "Primary Camera"}, {"name": "Aux Camera"}],
+                "stereo_pairs": [
+                    {
+                        "name": "Forward Stereo",
+                        "left": "Primary Camera",
+                        "right": "Aux Camera",
+                        "rig_id": "rig-a",
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    page = StereoPage(
+        streams_path=str(streams_path),
+        manager=_FakeRemoteCameraManager(str(streams_path)),
+    )
+    try:
+        app.processEvents()
+        assert page.side_scroll.widget() is page.side_panel
+        assert page.side_scroll.widgetResizable() is True
+        assert page.side_scroll.horizontalScrollBarPolicy() == Qt.ScrollBarPolicy.ScrollBarAlwaysOff
+        assert page.layout().indexOf(page.video_host) < page.layout().indexOf(page.side_scroll)
+    finally:
+        page.close()
+        app.processEvents()
+
+
 def test_arm_disarm_backup_controls_queue_menu_edge(monkeypatch, tmp_path):
     app = _app()
     streams_path = tmp_path / "streams.json"
@@ -596,6 +798,53 @@ def test_arm_disarm_backup_controls_queue_menu_edge(monkeypatch, tmp_path):
         assert win._arm_disarm_btn.text() == "Arm (O)"
         win._handle_sensor_msg_on_ui({"type": "heartbeat", "sensor": "heartbeat", "armed": True})
         assert win._arm_disarm_btn.text() == "Disarm (O)"
+    finally:
+        win.close()
+        app.processEvents()
+
+
+def test_keyboard_wrist_controls_swap_ws_and_ad_axes(monkeypatch, tmp_path):
+    app = _app()
+    streams_path = tmp_path / "streams.json"
+    streams_path.write_text("{}", encoding="utf-8")
+
+    monkeypatch.setattr(main_window, "QSettings", lambda *args, **kwargs: _FakeSettings())
+    monkeypatch.setattr(main_window, "PilotPublisherService", _FakePilotService)
+    monkeypatch.setattr(main_window, "SensorSubscriberService", _FakeSensorService)
+    monkeypatch.setattr(main_window, "RemoteCameraManager", _FakeRemoteCameraManager)
+    monkeypatch.setattr(main_window, "VideoTabs", _FakeVideoPanel)
+    monkeypatch.setattr(main_window, "HoldTestPanel", _SimplePage)
+    monkeypatch.setattr(main_window, "ManagementPage", _SimplePage)
+    monkeypatch.setattr(main_window.threading, "Thread", _NoopThread)
+
+    win = main_window.MainWindow(str(streams_path))
+    try:
+        app.processEvents()
+        assert win._servo_wrist_keymap[Qt.Key.Key_W][0] == "gripper_yaw"
+        assert win._servo_wrist_keymap[Qt.Key.Key_S][0] == "gripper_yaw"
+        assert win._servo_wrist_keymap[Qt.Key.Key_D][0] == "gripper_pitch"
+        assert win._servo_wrist_keymap[Qt.Key.Key_A][0] == "gripper_pitch"
+
+        win._servo_wrist_pitch = 0.0
+        win._servo_wrist_yaw = 0.0
+        win._servo_wrist_keys_down = {"W"}
+        win._servo_wrist_last_update = main_window.time.monotonic() - 0.1
+        win._update_servo_wrist_keyboard_axes()
+        assert win.pilot_svc.aux_axes["gripper_pitch"] == pytest.approx(0.0)
+        assert win.pilot_svc.aux_axes["gripper_yaw"] > 0.0
+
+        win._servo_wrist_pitch = 0.0
+        win._servo_wrist_yaw = 0.0
+        win._servo_wrist_keys_down = {"D"}
+        win._servo_wrist_last_update = main_window.time.monotonic() - 0.1
+        win._update_servo_wrist_keyboard_axes()
+        assert win.pilot_svc.aux_axes["gripper_pitch"] > 0.0
+        assert win.pilot_svc.aux_axes["gripper_yaw"] == pytest.approx(0.0)
+
+        win._servo_wrist_keys_down = {"S"}
+        assert win._servo_wrist_keyboard_targets()[1] == pytest.approx(-1.0)
+        win._servo_wrist_keys_down = {"A"}
+        assert win._servo_wrist_keyboard_targets()[0] == pytest.approx(-1.0)
     finally:
         win.close()
         app.processEvents()

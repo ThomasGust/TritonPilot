@@ -12,8 +12,10 @@ from gui.video_tabs import VideoTabs
 
 
 class _DummyManager:
-    def __init__(self, default_pane_order=None):
+    def __init__(self, default_pane_order=None, default_layout_count=None, stop_hidden_streams=None):
         self.default_pane_order = list(default_pane_order or [])
+        self.default_layout_count = default_layout_count
+        self.stop_hidden_streams = stop_hidden_streams
 
 
 class _FakeSettings:
@@ -94,6 +96,26 @@ def test_video_tabs_prefers_configured_default_pane_order_over_saved_assignments
         app.processEvents()
 
 
+def test_video_tabs_uses_tight_pane_spacing(monkeypatch):
+    app = _app()
+    fake_settings = _FakeSettings({"video/layout_count": 4})
+    monkeypatch.setattr("gui.video_tabs.QSettings", lambda *args, **kwargs: fake_settings)
+    monkeypatch.setattr("gui.video_tabs.VideoWidget", _DummyVideoWidget)
+
+    tabs = VideoTabs(
+        _DummyManager(default_pane_order=["Primary Camera", "Aux Camera"]),
+        stream_names=["Primary Camera", "Aux Camera"],
+    )
+    try:
+        app.processEvents()
+        assert tabs._grid.spacing() == 0
+        assert tabs.layout().spacing() == 1
+    finally:
+        tabs.close()
+        tabs.deleteLater()
+        app.processEvents()
+
+
 def test_video_tabs_reverse_layout_spans_rear_camera_without_saving(monkeypatch):
     app = _app()
     fake_settings = _FakeSettings({"video/layout_count": 4})
@@ -147,6 +169,91 @@ def test_video_tabs_reverse_layout_spans_rear_camera_without_saving(monkeypatch)
             "Downward Camera",
             "Arm Camera",
         ]
+    finally:
+        tabs.close()
+        tabs.deleteLater()
+        app.processEvents()
+
+
+def test_video_tabs_uses_configured_default_layout_count(monkeypatch):
+    app = _app()
+    fake_settings = _FakeSettings({"video/layout_count": 4})
+    monkeypatch.setattr("gui.video_tabs.QSettings", lambda *args, **kwargs: fake_settings)
+    monkeypatch.setattr("gui.video_tabs.VideoWidget", _DummyVideoWidget)
+
+    tabs = VideoTabs(
+        _DummyManager(
+            default_pane_order=["Primary Camera", "Aux Camera", "Arm Camera"],
+            default_layout_count=1,
+        ),
+        stream_names=["Primary Camera", "Aux Camera", "Arm Camera"],
+    )
+    try:
+        app.processEvents()
+        assert tabs.layout_count() == 1
+        assert tabs.visible_stream_names() == ["Primary Camera"]
+        assert tabs._widgets["Primary Camera"] is not None
+        assert tabs._widgets["Aux Camera"] is None
+        assert tabs._widgets["Arm Camera"] is None
+    finally:
+        tabs.close()
+        tabs.deleteLater()
+        app.processEvents()
+
+
+def test_video_tabs_stops_hidden_streams_after_layout_shrinks(monkeypatch):
+    app = _app()
+    fake_settings = _FakeSettings({"video/layout_count": 4})
+    monkeypatch.setattr("gui.video_tabs.QSettings", lambda *args, **kwargs: fake_settings)
+    monkeypatch.setattr("gui.video_tabs.VideoWidget", _DummyVideoWidget)
+
+    tabs = VideoTabs(
+        _DummyManager(default_pane_order=["Primary Camera", "Aux Camera", "Arm Camera"], stop_hidden_streams=True),
+        stream_names=["Primary Camera", "Aux Camera", "Arm Camera"],
+    )
+    try:
+        app.processEvents()
+        assert all(tabs._widgets[name] is not None for name in tabs.visible_stream_names())
+
+        tabs.set_layout_count(1)
+        app.processEvents()
+
+        assert tabs.visible_stream_names() == ["Primary Camera"]
+        assert tabs._widgets["Primary Camera"] is not None
+        assert tabs._widgets["Aux Camera"] is None
+        assert tabs._widgets["Arm Camera"] is None
+    finally:
+        tabs.close()
+        tabs.deleteLater()
+        app.processEvents()
+
+
+def test_video_tabs_keeps_hidden_streams_warm_without_duplicate_widgets(monkeypatch):
+    app = _app()
+    fake_settings = _FakeSettings({"video/layout_count": 4})
+    monkeypatch.setattr("gui.video_tabs.QSettings", lambda *args, **kwargs: fake_settings)
+    monkeypatch.setattr("gui.video_tabs.VideoWidget", _DummyVideoWidget)
+
+    tabs = VideoTabs(
+        _DummyManager(default_pane_order=["Primary Camera", "Aux Camera", "Arm Camera"], stop_hidden_streams=False),
+        stream_names=["Primary Camera", "Aux Camera", "Arm Camera"],
+    )
+    try:
+        app.processEvents()
+        original_widgets = dict(tabs._widgets)
+        assert all(widget is not None for widget in original_widgets.values())
+
+        tabs.set_layout_count(1)
+        app.processEvents()
+
+        assert tabs.visible_stream_names() == ["Primary Camera"]
+        assert tabs._widgets == original_widgets
+
+        tabs.set_layout_count(4)
+        app.processEvents()
+
+        assert tabs.visible_stream_names() == ["Primary Camera", "Aux Camera", "Arm Camera"]
+        assert tabs._widgets == original_widgets
     finally:
         tabs.close()
         tabs.deleteLater()

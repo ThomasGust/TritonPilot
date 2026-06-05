@@ -246,6 +246,11 @@ class RemoteCameraManager:
             "tether_prefer_wired": bool(cfg.get("tether_prefer_wired", True)),
             "bind_receiver_to_host": bool(cfg.get("bind_receiver_to_host", True)),
         }
+        try:
+            self.default_layout_count = int(cfg.get("default_layout_count"))
+        except Exception:
+            self.default_layout_count = None
+        self.stop_hidden_streams = cfg.get("stop_hidden_streams", None)
 
         self.stream_defs = {}
         for raw_stream in cfg.get("streams", []):

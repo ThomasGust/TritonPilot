@@ -199,12 +199,12 @@ def _iter_candidate_roots(
         seen.add(key)
         return (path,)
 
+    for root in _iter_env_roots(env):
+        yield from emit(root)
+
     command_path = command_lookup("gst-launch-1.0") or command_lookup("gst-launch-1.0.exe")
     if command_path:
         yield from emit(Path(command_path).parent.parent)
-
-    for root in _iter_env_roots(env):
-        yield from emit(root)
 
     if registry_roots is None:
         for root in _iter_registry_env_roots():

@@ -123,6 +123,27 @@ def test_video_widget_default_capture_names_are_flat_with_camera_and_time(monkey
         app.processEvents()
 
 
+def test_video_widget_scales_frames_to_fill_pane_without_stretching(monkeypatch):
+    app = _app()
+    monkeypatch.setattr("gui.video_widget.VideoWidget._start_connect", lambda self: None)
+
+    widget = VideoWidget(_DummyManager(), "front")
+    widget.resize(200, 100)
+    widget.show()
+    try:
+        app.processEvents()
+        widget._on_frame(np.zeros((108, 192, 3), dtype=np.uint8))
+        pix = widget.label.pixmap()
+        dpr = max(1.0, float(pix.devicePixelRatio()))
+        assert pix.width() / dpr >= widget.label.width()
+        assert pix.height() / dpr >= widget.label.height()
+        assert pix.height() / dpr > widget.label.height()
+    finally:
+        widget.close()
+        widget.deleteLater()
+        app.processEvents()
+
+
 def test_video_widget_shutdown_waits_for_inflight_connect_worker(monkeypatch):
     app = _app()
     monkeypatch.setattr("gui.video_widget.VideoWidget._start_connect", lambda self: None)

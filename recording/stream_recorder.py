@@ -39,9 +39,16 @@ class StreamRecorder:
     @staticmethod
     def make_session_dir(base_dir: str | os.PathLike = DEFAULT_RECORDINGS_DIR) -> Path:
         ts = time.strftime("%Y%m%d-%H%M%S")
-        p = Path(base_dir) / ts
-        p.mkdir(parents=True, exist_ok=True)
-        return p
+        root = Path(base_dir)
+        for suffix in range(0, 1000):
+            name = ts if suffix == 0 else f"{ts}-{suffix:02d}"
+            p = root / name
+            try:
+                p.mkdir(parents=True, exist_ok=False)
+                return p
+            except FileExistsError:
+                continue
+        raise RuntimeError(f"Could not create a unique recording session under {root}")
 
     def start(self) -> None:
         self.out_path.parent.mkdir(parents=True, exist_ok=True)

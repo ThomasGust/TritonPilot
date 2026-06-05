@@ -13,7 +13,12 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 
-from config import VIDEO_WARM_HIDDEN_STREAMS, VIDEO_WARMUP_INTERVAL_MS
+from config import (
+    VIDEO_DEFAULT_LAYOUT_COUNT,
+    VIDEO_STOP_HIDDEN_STREAMS,
+    VIDEO_WARM_HIDDEN_STREAMS,
+    VIDEO_WARMUP_INTERVAL_MS,
+)
 from gui.video_widget import VideoWidget
 from video.cam import RemoteCameraManager
 
@@ -83,6 +88,12 @@ class VideoTabs(QWidget):
         configured_order = list(getattr(manager, "default_pane_order", []) or [])
         self._config_default_pane_order = [name for name in configured_order if name in self.stream_names]
         self._config_order_locked = bool(self._config_default_pane_order)
+        self._config_default_layout_count = getattr(manager, "default_layout_count", None)
+        config_stop_hidden = getattr(manager, "stop_hidden_streams", None)
+        if config_stop_hidden is None:
+            self._stop_hidden_streams_enabled = bool(VIDEO_STOP_HIDDEN_STREAMS)
+        else:
+            self._stop_hidden_streams_enabled = bool(config_stop_hidden)
         self._water_correction_enabled: bool = False
         self._settings = QSettings("TritonPilot", "ROVTopside")
 
@@ -142,7 +153,7 @@ class VideoTabs(QWidget):
         self._panes: list[_VideoPane] = []
         self._grid = QGridLayout()
         self._grid.setContentsMargins(0, 0, 0, 0)
-        self._grid.setSpacing(2)
+        self._grid.setSpacing(0)
 
         for idx in range(4):
             pane = _VideoPane(idx)
@@ -151,7 +162,7 @@ class VideoTabs(QWidget):
 
         outer = QVBoxLayout(self)
         outer.setContentsMargins(0, 0, 0, 0)
-        outer.setSpacing(4)
+        outer.setSpacing(1)
         outer.addWidget(self._controls_bar, 0)
         outer.addLayout(self._grid, 1)
 
@@ -198,11 +209,18 @@ class VideoTabs(QWidget):
         return 0
 
     def _load_preferences(self) -> None:
-        saved_count = self._settings.value("video/layout_count", 4)
+        default_count = self._allowed_layout_count(VIDEO_DEFAULT_LAYOUT_COUNT)
+        if self._config_default_layout_count is not None:
+            default_count = self._allowed_layout_count(self._config_default_layout_count)
+            # Treat streams.json as the deployment default, so a machine that
+            # previously auto-saved Quad does not keep starting every stream.
+            saved_count = default_count
+        else:
+            saved_count = self._settings.value("video/layout_count", default_count)
         try:
             self._pane_count = self._allowed_layout_count(int(saved_count))
         except Exception:
-            self._pane_count = 4
+            self._pane_count = default_count
 
         if self._config_order_locked:
             seeded = list(self._config_default_pane_order)
@@ -349,6 +367,49 @@ class VideoTabs(QWidget):
                 if not isinstance(w, VideoWidget):
                     w.deleteLater()
 
+    def _add_placeholder(self, cont: QWidget, text: str) -> None:
+        lay = cont.layout()
+        if lay is None:
+            return
+        placeholder = QLabel(text)
+        placeholder.setObjectName("videoPanePlaceholder")
+        placeholder.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        placeholder.setWordWrap(True)
+        lay.addWidget(placeholder)
+
+    def _stop_stream_widget(self, name: str, *, placeholder: str | None = None, force: bool = False) -> bool:
+        widget = self._widgets.get(name)
+        if widget is None:
+            return False
+        try:
+            if bool(widget.is_recording()) and not force:
+                return False
+        except Exception:
+            pass
+        try:
+            widget.shutdown()
+        except Exception:
+            pass
+        try:
+            widget.deleteLater()
+        except Exception:
+            pass
+        self._widgets[name] = None
+
+        cont = self._containers.get(name)
+        if cont is not None:
+            self._clear_container(cont)
+            self._add_placeholder(cont, placeholder or f"{name}\n(starting when needed)")
+        return True
+
+    def _stop_hidden_streams(self) -> None:
+        if VIDEO_WARM_HIDDEN_STREAMS or not self._stop_hidden_streams_enabled:
+            return
+        visible = set(self.visible_stream_names())
+        for name in list(self._widgets.keys()):
+            if name not in visible:
+                self._stop_stream_widget(name)
+
     def _ensure_stream_started(self, name: str) -> None:
         cont = self._containers.get(name)
         if cont is None:
@@ -399,6 +460,7 @@ class VideoTabs(QWidget):
                     self._warmup_timer.start(0)
             except Exception:
                 pass
+        self._stop_hidden_streams()
 
     def suspend_all(self) -> bool:
         for widget in self._widgets.values():
@@ -435,6 +497,7 @@ class VideoTabs(QWidget):
         if current:
             self._ensure_stream_started(current)
         self._refresh_layout(save=save, emit=emit)
+        self._stop_hidden_streams()
         return True
 
     def _on_layout_changed(self, _index: int) -> None:
@@ -462,6 +525,7 @@ class VideoTabs(QWidget):
         self._refresh_layout(save=True, emit=True)
         for name in self.visible_stream_names():
             self._ensure_stream_started(name)
+        self._stop_hidden_streams()
 
     def set_active_pane(self, pane_index: int, *, save: bool = True, emit: bool = True) -> bool:
         if pane_index < 0 or pane_index >= self._visible_pane_count():
@@ -513,6 +577,7 @@ class VideoTabs(QWidget):
         self._refresh_layout(save=save, emit=emit)
         for name in self.visible_stream_names():
             self._ensure_stream_started(name)
+        self._stop_hidden_streams()
 
     def apply_temporary_layout(
         self,
@@ -541,6 +606,7 @@ class VideoTabs(QWidget):
         self._refresh_layout(save=False, emit=emit)
         for name in self.visible_stream_names():
             self._ensure_stream_started(name)
+        self._stop_hidden_streams()
 
     def current_video_widget(self) -> VideoWidget | None:
         name = self.current_stream_name()
@@ -625,26 +691,7 @@ class VideoTabs(QWidget):
         for name, widget in list(self._widgets.items()):
             if widget is None:
                 continue
-            try:
-                widget.shutdown()
-            except Exception:
-                pass
-            try:
-                widget.deleteLater()
-            except Exception:
-                pass
-            self._widgets[name] = None
-
-            cont = self._containers.get(name)
-            if cont is not None:
-                self._clear_container(cont)
-                lay = cont.layout()
-                if lay is not None:
-                    placeholder = QLabel(f"{name}\n(stopped)")
-                    placeholder.setObjectName("videoPanePlaceholder")
-                    placeholder.setAlignment(Qt.AlignmentFlag.AlignCenter)
-                    placeholder.setWordWrap(True)
-                    lay.addWidget(placeholder)
+            self._stop_stream_widget(name, placeholder=f"{name}\n(stopped)", force=True)
 
     def closeEvent(self, event) -> None:
         try:

@@ -7,7 +7,7 @@ import time
 from typing import Optional
 
 from PyQt6.QtCore import Qt, QRectF, QTimer, pyqtSignal
-from PyQt6.QtGui import QColor, QFont, QPainter, QPen
+from PyQt6.QtGui import QColor, QFont, QPainter, QPainterPath, QPen
 from PyQt6.QtWidgets import (
     QWidget,
     QFrame,
@@ -23,6 +23,16 @@ from PyQt6.QtWidgets import (
 )
 
 from network.management_rpc import ManagementRpcService
+
+
+def _finite_float(value) -> Optional[float]:
+    try:
+        numeric = float(value)
+    except Exception:
+        return None
+    if not math.isfinite(numeric):
+        return None
+    return numeric
 
 
 class _Card(QFrame):
@@ -140,6 +150,258 @@ class VerticalGaugeWidget(QWidget):
             p.setPen(QColor(190, 190, 200))
             line = self.secondary if self.secondary else self.state_text
             p.drawText(r.adjusted(4, 0, -4, -4), Qt.AlignmentFlag.AlignBottom | Qt.AlignmentFlag.AlignHCenter, line)
+
+
+class AttitudeIndicatorWidget(QWidget):
+    """Compact artificial-horizon attitude indicator for the pilot page."""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.roll_deg: Optional[float] = None
+        self.pitch_deg: Optional[float] = None
+        self.yaw_deg: Optional[float] = None
+        self.setMinimumSize(170, 210)
+        self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+
+    def clear(self) -> None:
+        self.roll_deg = None
+        self.pitch_deg = None
+        self.yaw_deg = None
+        self.update()
+
+    def set_attitude(self, msg: dict | None) -> None:
+        msg = msg or {}
+        roll = _finite_float(msg.get("roll_deg"))
+        pitch = _finite_float(msg.get("pitch_deg"))
+        yaw = _finite_float(msg.get("yaw_deg"))
+        if roll is None and pitch is None and yaw is None:
+            self.clear()
+            return
+        self.roll_deg = roll if roll is not None else self.roll_deg
+        self.pitch_deg = pitch if pitch is not None else self.pitch_deg
+        self.yaw_deg = yaw if yaw is not None else self.yaw_deg
+        self.update()
+
+    def paintEvent(self, _event):  # noqa: N802
+        p = QPainter(self)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        bounds = self.rect().adjusted(8, 8, -8, -8)
+        heading_h = 36
+        dial_bounds = bounds.adjusted(0, 0, 0, -heading_h)
+        side = min(dial_bounds.width(), dial_bounds.height())
+        left = bounds.center().x() - side / 2
+        top = dial_bounds.center().y() - side / 2
+        dial = QRectF(left, top, side, side)
+        cx = dial.center().x()
+        cy = dial.center().y()
+        radius = dial.width() / 2
+
+        p.setPen(QPen(QColor(58, 62, 76), 2))
+        p.setBrush(QColor(12, 13, 18))
+        p.drawEllipse(dial)
+
+        if self.roll_deg is None and self.pitch_deg is None:
+            p.setPen(QColor(160, 168, 190))
+            p.drawText(dial, Qt.AlignmentFlag.AlignCenter, "Attitude\nwaiting")
+            self._draw_heading_tape(p, bounds, None)
+            return
+
+        roll = float(self.roll_deg or 0.0)
+        pitch = max(-45.0, min(45.0, float(self.pitch_deg or 0.0)))
+        pitch_px_per_deg = radius / 42.0
+        horizon_y = pitch * pitch_px_per_deg
+
+        clip = QPainterPath()
+        clip.addEllipse(dial.adjusted(3, 3, -3, -3))
+        p.save()
+        p.setClipPath(clip)
+        p.translate(cx, cy)
+        p.rotate(-roll)
+
+        span = radius * 3.0
+        p.fillRect(QRectF(-span, -span + horizon_y, span * 2, span), QColor(46, 92, 142))
+        p.fillRect(QRectF(-span, horizon_y, span * 2, span), QColor(74, 94, 80))
+        p.setPen(QPen(QColor(246, 248, 255), 2))
+        p.drawLine(int(-span), int(horizon_y), int(span), int(horizon_y))
+
+        p.setPen(QPen(QColor(230, 234, 246), 1))
+        for mark in range(-30, 31, 10):
+            if mark == 0:
+                continue
+            y = horizon_y - (mark * pitch_px_per_deg)
+            half = radius * (0.34 if mark % 20 == 0 else 0.24)
+            p.drawLine(int(-half), int(y), int(half), int(y))
+            label = str(abs(mark))
+            p.drawText(QRectF(-half - 28, y - 8, 22, 16), Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter, label)
+            p.drawText(QRectF(half + 6, y - 8, 22, 16), Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter, label)
+
+        p.restore()
+
+        p.setPen(QPen(QColor(245, 220, 104), 2))
+        wing_y = cy
+        p.drawLine(int(cx - radius * 0.42), int(wing_y), int(cx - radius * 0.12), int(wing_y))
+        p.drawLine(int(cx + radius * 0.12), int(wing_y), int(cx + radius * 0.42), int(wing_y))
+        p.drawLine(int(cx), int(wing_y - radius * 0.08), int(cx), int(wing_y + radius * 0.08))
+
+        p.setPen(QPen(QColor(210, 216, 232), 1))
+        for deg in (-60, -45, -30, -20, -10, 0, 10, 20, 30, 45, 60):
+            rad = math.radians(deg)
+            outer = radius * 0.96
+            inner = radius * (0.86 if deg in (-60, -30, 0, 30, 60) else 0.90)
+            x1 = cx + math.sin(rad) * inner
+            y1 = cy - math.cos(rad) * inner
+            x2 = cx + math.sin(rad) * outer
+            y2 = cy - math.cos(rad) * outer
+            p.drawLine(int(x1), int(y1), int(x2), int(y2))
+
+        p.setPen(QPen(QColor(78, 84, 104), 2))
+        p.setBrush(Qt.BrushStyle.NoBrush)
+        p.drawEllipse(dial)
+        self._draw_heading_tape(p, bounds, self.yaw_deg)
+
+    def _draw_heading_tape(self, p: QPainter, bounds, yaw: Optional[float]) -> None:
+        tape = QRectF(bounds.left() + 10, bounds.bottom() - 30, bounds.width() - 20, 28)
+        p.setPen(QPen(QColor(58, 62, 76), 1))
+        p.setBrush(QColor(15, 16, 22))
+        p.drawRoundedRect(tape, 7.0, 7.0)
+
+        if yaw is None:
+            p.setPen(QColor(150, 158, 180))
+            p.drawText(tape, Qt.AlignmentFlag.AlignCenter, "deg -")
+            return
+
+        heading = float(yaw) % 360.0
+        center_x = tape.center().x()
+        px_per_deg = max(1.2, tape.width() / 95.0)
+        nearest = int(round(heading / 30.0) * 30)
+
+        p.save()
+        clip = QPainterPath()
+        clip.addRoundedRect(tape.adjusted(2, 2, -2, -2), 6.0, 6.0)
+        p.setClipPath(clip)
+        p.setPen(QPen(QColor(112, 122, 148), 1))
+        for mark in range(nearest - 90, nearest + 91, 15):
+            normalized = mark % 360
+            offset = ((float(mark) - heading + 540.0) % 360.0) - 180.0
+            x = center_x + offset * px_per_deg
+            if x < tape.left() - 12 or x > tape.right() + 12:
+                continue
+            is_major = normalized % 30 == 0
+            y1 = tape.top() + (5 if is_major else 9)
+            y2 = tape.top() + 14
+            p.drawLine(int(x), int(y1), int(x), int(y2))
+            if is_major:
+                text = f"{int(normalized):03d}"
+                p.drawText(QRectF(x - 16, tape.top() + 12, 32, 13), Qt.AlignmentFlag.AlignCenter, text)
+        p.restore()
+
+        p.setPen(QPen(QColor(245, 220, 104), 2))
+        p.drawLine(int(center_x), int(tape.top() + 3), int(center_x), int(tape.bottom() - 3))
+
+
+class PilotTelemetryColumn(QWidget):
+    """Right-side pilot instruments kept compact enough for quad video."""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setObjectName("pilotTelemetryColumn")
+        self.setMinimumWidth(210)
+        self.setMaximumWidth(245)
+        self.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Expanding)
+
+        self.attitude_card = _Card("Attitude")
+        self.attitude_indicator = AttitudeIndicatorWidget()
+        self.attitude_text = QLabel("roll - | pitch - | yaw -")
+        self.attitude_text.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.attitude_text.setWordWrap(True)
+        self.attitude_card.body.addWidget(self.attitude_indicator)
+        self.attitude_card.body.addWidget(self.attitude_text)
+
+        self.depth_card = _Card("Depth")
+        self.depth_gauge = VerticalGaugeWidget(label="Depth", unit="m", vmin=0.0, vmax=30.0)
+        self.depth_gauge.setMinimumSize(100, 190)
+        self.depth_text = QLabel("-")
+        self.depth_text.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.depth_text.setWordWrap(True)
+        self.depth_card.body.addWidget(self.depth_gauge)
+        self.depth_card.body.addWidget(self.depth_text)
+
+        self.analysis_card = _Card("Capture / Analysis")
+        self.capture_mode_text = QLabel("Capture: Camera  |  R toggles")
+        self.capture_mode_text.setObjectName("pilotCaptureModeText")
+        self.capture_mode_text.setWordWrap(True)
+        self.capture_mode_text.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.analysis_text = QLabel("Analysis Share: -")
+        self.analysis_text.setObjectName("pilotAnalysisText")
+        self.analysis_text.setWordWrap(True)
+        self.analysis_text.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        self.analysis_card.body.addWidget(self.capture_mode_text)
+        self.analysis_card.body.addWidget(self.analysis_text)
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(4)
+        layout.addWidget(self.attitude_card, 0)
+        layout.addWidget(self.depth_card, 0)
+        layout.addWidget(self.analysis_card, 1)
+
+    def update_from_sensor(self, msg: dict) -> None:
+        typ = (msg or {}).get("type")
+        if typ == "attitude":
+            self.attitude_indicator.set_attitude(msg or {})
+            roll = _finite_float((msg or {}).get("roll_deg"))
+            pitch = _finite_float((msg or {}).get("pitch_deg"))
+            yaw = _finite_float((msg or {}).get("yaw_deg"))
+            parts = [
+                f"roll {roll:.1f}" if roll is not None else "roll -",
+                f"pitch {pitch:.1f}" if pitch is not None else "pitch -",
+                f"yaw {yaw:.1f}" if yaw is not None else "yaw -",
+            ]
+            self.attitude_text.setText(" | ".join(parts))
+            return
+
+        if typ == "external_depth":
+            if (msg or {}).get("error"):
+                self.depth_gauge.set_value(None, state_text="ERR")
+                self.depth_text.setText(str((msg or {}).get("error") or "sensor error"))
+                return
+            depth = _finite_float((msg or {}).get("depth_m"))
+            temp = _finite_float((msg or {}).get("temperature_c"))
+            pressure = _finite_float((msg or {}).get("pressure_mbar"))
+            self.depth_gauge.set_value(depth, secondary=(f"{temp:.1f} C" if temp is not None else ""))
+            parts = []
+            if depth is not None:
+                parts.append(f"{depth:.2f} m")
+            if pressure is not None:
+                parts.append(f"{pressure:.0f} mbar")
+            if temp is not None:
+                parts.append(f"{temp:.1f} C")
+            self.depth_text.setText(" | ".join(parts) if parts else "-")
+
+    def set_analysis_share(self, text: str, tone: str | None = None) -> None:
+        text = str(text or "Analysis Share: -")
+        self.analysis_text.setText(text)
+        self.analysis_text.setToolTip(text)
+        if tone == "alert":
+            self.analysis_text.setStyleSheet("color: #ffd9d9; font-weight: 700;")
+        elif tone == "warn":
+            self.analysis_text.setStyleSheet("color: #ffe6ae; font-weight: 700;")
+        else:
+            self.analysis_text.setStyleSheet("color: #f0f4ff; font-weight: 600;")
+
+    def set_capture_mode(self, mode: str) -> None:
+        mode_key = str(mode or "camera").strip().lower()
+        if mode_key == "stereo":
+            text = "Capture: Stereo pairs  |  R toggles"
+            tip = "X captures a stereo pair. B starts or stops stereo pair recording."
+            color = "#9fd1ff"
+        else:
+            text = "Capture: Camera  |  R toggles"
+            tip = "X saves the active camera image. B starts or stops active-camera video."
+            color = "#dfe6f5"
+        self.capture_mode_text.setText(text)
+        self.capture_mode_text.setToolTip(tip)
+        self.capture_mode_text.setStyleSheet(f"color: {color}; font-weight: 700;")
 
 
 class InstrumentPanel(QWidget):

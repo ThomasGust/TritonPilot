@@ -89,6 +89,19 @@ def test_raw_sensor_page_fallback_estimator_uses_configured_vehicle_axis(tmp_pat
         app.processEvents()
 
 
+def test_raw_sensor_page_places_attitude_display_above_live_values(tmp_path):
+    app = _app()
+    page = RawSensorPage(recording_session_provider=lambda: tmp_path)
+    try:
+        layout = page.attitude_card.parentWidget().layout()
+        assert layout.indexOf(page.attitude_card) < layout.indexOf(page.summary_card)
+    finally:
+        page.shutdown()
+        page.close()
+        page.deleteLater()
+        app.processEvents()
+
+
 def test_raw_sensor_page_updates_separate_mag_and_attitude_rows(tmp_path):
     app = _app()
     page = RawSensorPage(recording_session_provider=lambda: tmp_path)

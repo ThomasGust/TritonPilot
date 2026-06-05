@@ -19,6 +19,7 @@ from PyQt6.QtWidgets import (
     QLabel,
     QLineEdit,
     QPushButton,
+    QScrollArea,
     QSizePolicy,
     QSpinBox,
     QTableWidget,
@@ -163,6 +164,9 @@ class StereoPage(QWidget):
         self._last_manifest_path: str = ""
         self._active_session_name: str = ""
         self._active_output_root: Path | None = None
+        self._next_still_new_session = False
+        self._last_generated_session_base = ""
+        self._generated_session_suffix = 0
 
         self._build_ui()
         self.reload_pairs(emit=False)
@@ -183,18 +187,26 @@ class StereoPage(QWidget):
         root.setSpacing(8)
 
         self.video_host = QWidget()
+        self.video_host.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
         self.video_host_layout = QVBoxLayout(self.video_host)
         self.video_host_layout.setContentsMargins(0, 0, 0, 0)
         self.video_host_layout.setSpacing(0)
         root.addWidget(self.video_host, 3)
 
+        self.side_scroll = QScrollArea()
+        self.side_scroll.setObjectName("stereoSideScroll")
+        self.side_scroll.setWidgetResizable(True)
+        self.side_scroll.setFrameShape(QFrame.Shape.NoFrame)
+        self.side_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.side_scroll.setMinimumWidth(360)
+        self.side_scroll.setMaximumWidth(490)
+        self.side_scroll.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Expanding)
         self.side_panel = QWidget()
-        self.side_panel.setMinimumWidth(360)
-        self.side_panel.setMaximumWidth(470)
         side = QVBoxLayout(self.side_panel)
         side.setContentsMargins(0, 0, 0, 0)
         side.setSpacing(8)
-        root.addWidget(self.side_panel, 1)
+        self.side_scroll.setWidget(self.side_panel)
+        root.addWidget(self.side_scroll, 1)
 
         pair_card = _SectionCard("Stereo Pair")
         pair_row = QHBoxLayout()
@@ -508,20 +520,42 @@ class StereoPage(QWidget):
             self._active_session_name = typed
             return typed
         if not self._active_session_name:
-            self._active_session_name = time.strftime("%Y%m%d-%H%M%S")
+            self._active_session_name = self._new_session_name()
             self.session_edit.setText(self._active_session_name)
         return self._active_session_name
+
+    def _new_session_name(self) -> str:
+        base = time.strftime("%Y%m%d-%H%M%S") + f"-{int((time.time() % 1.0) * 1000):03d}"
+        if base == self._last_generated_session_base:
+            self._generated_session_suffix += 1
+        else:
+            self._last_generated_session_base = base
+            self._generated_session_suffix = 0
+        if self._generated_session_suffix:
+            return f"{base}-{self._generated_session_suffix:02d}"
+        return base
+
+    def _clear_capture_session(self, *, clear_table: bool = True) -> None:
+        self._active_session_name = ""
+        self._active_output_root = None
+        self.session_edit.clear()
+        if clear_table:
+            self.frames_table.setRowCount(0)
+            self.output_lbl.setText("-")
 
     def _new_capture_session(self) -> None:
         if self._capture_worker is not None and self._capture_worker.isRunning():
             self.statusMessage.emit("Stereo capture already running", 3000)
             return
-        self._active_session_name = ""
-        self._active_output_root = None
-        self.session_edit.clear()
-        self.frames_table.setRowCount(0)
-        self.output_lbl.setText("-")
+        self._next_still_new_session = False
+        self._clear_capture_session(clear_table=True)
         self.statusMessage.emit("Ready for a new stereo capture session", 3000)
+
+    def prepare_next_still_session(self) -> None:
+        if self._capture_worker is not None and self._capture_worker.isRunning():
+            self._next_still_new_session = True
+            return
+        self._next_still_new_session = True
 
     def _choose_resume_session(self) -> None:
         try:
@@ -590,6 +624,9 @@ class StereoPage(QWidget):
         return True
 
     def capture_pair(self) -> None:
+        if self._next_still_new_session:
+            self._clear_capture_session(clear_table=True)
+            self._next_still_new_session = False
         self._start_capture(count=1, mode="single")
 
     def toggle_recording(self) -> None:
@@ -601,7 +638,18 @@ class StereoPage(QWidget):
             return
         self._start_recording()
 
+    def start_recording(self) -> None:
+        if self._capture_worker is not None and self._capture_worker.isRunning():
+            self.statusMessage.emit("Stereo capture already running", 3000)
+            return
+        self._start_recording()
+
+    def stop_recording(self) -> None:
+        self._stop_recording()
+
     def _start_recording(self) -> None:
+        self._clear_capture_session(clear_table=True)
+        self._next_still_new_session = True
         fps = max(0.1, float(self.record_fps_spin.value()))
         self._start_capture(count=None, mode="recording", interval_s=1.0 / fps)
 

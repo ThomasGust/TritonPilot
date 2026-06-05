@@ -39,6 +39,8 @@ Four 1080p streams can take a few seconds to settle:
 ```powershell
 $env:TRITON_VIDEO_STALL_TIMEOUT_S="8.0"
 $env:TRITON_VIDEO_FIRST_FRAME_TIMEOUT_S="14.0"
+$env:TRITON_VIDEO_DEFAULT_LAYOUT_COUNT="4"
+$env:TRITON_VIDEO_STOP_HIDDEN_STREAMS="0"
 ```
 
 Increase these values only after confirming the network and GStreamer runtime
@@ -61,6 +63,16 @@ define:
 - `latency_ms`
 - `port`
 - `enabled`
+
+For native H.264 cameras, TritonOS applies `h264_bitrate` and `h264_gop` as
+V4L2 camera encoder controls when the camera exposes matching controls. The
+current deployment target is `12000000` bps per 1080p30 stream.
+
+Top-level stream layout knobs:
+
+- `default_layout_count`: initial visible camera count for this deployment
+- `stop_hidden_streams`: stop ROV-side streams when they are no longer visible;
+  set false to keep already-started streams warm for fast camera/layout changes
 
 The current default streams are:
 

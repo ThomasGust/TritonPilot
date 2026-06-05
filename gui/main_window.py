@@ -67,7 +67,7 @@ from recording.save_location import DEFAULT_RECORDINGS_DIR, SaveLocation, is_ava
 from recording.capture_paths import timestamped_camera_stem, unique_capture_path
 from gui.video_tabs import VideoTabs
 from gui.sensor_panel import SensorPanel
-from gui.instruments import InstrumentPanel, HoldTestPanel
+from gui.instruments import InstrumentPanel, HoldTestPanel, PilotTelemetryColumn
 from gui.raw_sensor_page import RawSensorPage
 from gui.management_page import ManagementPage
 from gui.stereo_page import StereoPage
@@ -218,6 +218,75 @@ class MainWindow(QMainWindow):
 
     def _on_video_tab_changed(self, *_args) -> None:
         self._refresh_video_status()
+
+    def _capture_should_use_stereo(self) -> bool:
+        return getattr(self, "_capture_route_mode", "camera") == "stereo" or (
+            getattr(self, "_active_page_name", "") == "stereo" and getattr(self, "_stereo_page", None) is not None
+        )
+
+    def _set_capture_route_mode(self, mode: str, *, announce: bool = True) -> None:
+        mode_key = "stereo" if str(mode or "").strip().lower() == "stereo" else "camera"
+        if mode_key == getattr(self, "_capture_route_mode", "camera"):
+            return
+        previous = getattr(self, "_capture_route_mode", "camera")
+        self._capture_route_mode = mode_key
+        try:
+            self.pilot_telemetry_column.set_capture_mode(mode_key)
+        except Exception:
+            pass
+        stereo_page = getattr(self, "_stereo_page", None)
+        if stereo_page is not None and previous != mode_key:
+            try:
+                stereo_page.prepare_next_still_session()
+            except Exception:
+                pass
+        if announce:
+            label = "stereo pairs" if mode_key == "stereo" else "active camera"
+            self.statusBar().showMessage(f"Capture mode: {label}", 3000)
+
+    def _toggle_capture_route_mode(self) -> None:
+        next_mode = "stereo" if getattr(self, "_capture_route_mode", "camera") != "stereo" else "camera"
+        self._set_capture_route_mode(next_mode)
+
+    def _capture_still(self) -> None:
+        if self._capture_should_use_stereo():
+            stereo_page = getattr(self, "_stereo_page", None)
+            if stereo_page is not None:
+                stereo_page.capture_pair()
+            else:
+                self.statusBar().showMessage("Stereo capture is unavailable", 3000)
+            return
+        self._save_snapshot()
+
+    def _start_capture_recording(self) -> None:
+        if self._capture_should_use_stereo():
+            stereo_page = getattr(self, "_stereo_page", None)
+            if stereo_page is not None:
+                stereo_page.start_recording()
+            else:
+                self.statusBar().showMessage("Stereo recording is unavailable", 3000)
+            return
+        self._start_video_recording()
+
+    def _stop_capture_recording(self) -> None:
+        if self._capture_should_use_stereo():
+            stereo_page = getattr(self, "_stereo_page", None)
+            if stereo_page is not None:
+                stereo_page.stop_recording()
+            else:
+                self.statusBar().showMessage("Stereo recording is unavailable", 3000)
+            return
+        self._stop_video_recording()
+
+    def _toggle_capture_recording(self) -> None:
+        if self._capture_should_use_stereo():
+            stereo_page = getattr(self, "_stereo_page", None)
+            if stereo_page is not None:
+                stereo_page.toggle_recording()
+            else:
+                self.statusBar().showMessage("Stereo recording is unavailable", 3000)
+            return
+        self._toggle_video_recording()
 
     def _make_center_placeholder(self, text: str) -> QLabel:
         lbl = QLabel(text)
@@ -487,8 +556,8 @@ class MainWindow(QMainWindow):
         self._ctrl_lbl = QLabel("Controller: (starting)")
         self.statusBar().addPermanentWidget(self._ctrl_lbl)
 
-        self._depth_lbl = QLabel("Depth: -")
-        self.statusBar().addPermanentWidget(self._depth_lbl)
+        self._depth_lbl = QLabel("Depth: -", self)
+        self._depth_lbl.hide()
 
         self._gain_lbl = QLabel("Max Gain: 100%")
         self.statusBar().addPermanentWidget(self._gain_lbl)
@@ -496,9 +565,9 @@ class MainWindow(QMainWindow):
         self._mode_lbl = QLabel("Mode: FORWARD | Depth Hold: OFF")
         self.statusBar().addPermanentWidget(self._mode_lbl, 1)
 
-        self._analysis_transfer_lbl = QLabel("Analysis Share: starting")
-        self.statusBar().addPermanentWidget(self._analysis_transfer_lbl)
-        self._analysis_transfer_line = QLabel("Analysis Share: starting")
+        self._analysis_transfer_lbl = QLabel("Analysis Share: starting", self)
+        self._analysis_transfer_lbl.hide()
+        self._analysis_transfer_line = QLabel("Analysis Share: starting", self)
         self._analysis_transfer_line.setObjectName("analysisTransferLine")
         self._analysis_transfer_line.setWordWrap(True)
         self._analysis_transfer_line.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
@@ -526,6 +595,7 @@ class MainWindow(QMainWindow):
             }
             """
         )
+        self._analysis_transfer_line.hide()
 
         self._video_lbl = QLabel("Camera: -")
         self._power_lbl = QLabel("Power: -")
@@ -571,10 +641,8 @@ class MainWindow(QMainWindow):
         for _lbl, _w in [
             (self._link_lbl, 230),
             (self._ctrl_lbl, 220),
-            (self._depth_lbl, 190),
-            (self._gain_lbl, 150),
-            (self._mode_lbl, 520),
-            (self._analysis_transfer_lbl, 320),
+            (self._gain_lbl, 125),
+            (self._mode_lbl, 430),
         ]:
             try:
                 _lbl.setMinimumWidth(int(_w))
@@ -606,10 +674,10 @@ class MainWindow(QMainWindow):
         # with the ROV-side controller until that side is renamed too.
         self._servo_wrist_keys_down: set[str] = set()
         self._servo_wrist_keymap = {
-            Qt.Key.Key_W: ("gripper_pitch", +1.0, "W"),
-            Qt.Key.Key_S: ("gripper_pitch", -1.0, "S"),
-            Qt.Key.Key_D: ("gripper_yaw", +1.0, "D"),
-            Qt.Key.Key_A: ("gripper_yaw", -1.0, "A"),
+            Qt.Key.Key_W: ("gripper_yaw", +1.0, "W"),
+            Qt.Key.Key_S: ("gripper_yaw", -1.0, "S"),
+            Qt.Key.Key_D: ("gripper_pitch", +1.0, "D"),
+            Qt.Key.Key_A: ("gripper_pitch", -1.0, "A"),
         }
         self._servo_wrist_pitch = 0.0
         self._servo_wrist_yaw = 0.0
@@ -645,9 +713,14 @@ class MainWindow(QMainWindow):
         # optional stream recorder (pilot + sensors + heartbeat)
         self._stream_recorder: StreamRecorder | None = None
         self._record_dir: str | None = None
+        self._app_session_dir: Path | None = None
+        self._app_session_location: SaveLocation | None = None
+        self._capture_route_mode: str = "camera"
         # 2) sensor subscriber (ROV -> topside)
         self.sensor_panel = SensorPanel()
         self.instrument_panel = InstrumentPanel()
+        self.pilot_telemetry_column = PilotTelemetryColumn()
+        self.pilot_telemetry_column.set_capture_mode(self._capture_route_mode)
         self.hold_test_panel = HoldTestPanel(pilot_svc=self.pilot_svc, endpoint=MANAGEMENT_RPC_ENDPOINT)
         self.raw_sensor_page = RawSensorPage(
             recording_session_provider=lambda: self._make_recording_session_dir()[0]
@@ -682,7 +755,6 @@ class MainWindow(QMainWindow):
                 stream_names = self.cam_mgr.list_available()
                 if stream_names:
                     self.video_panel = VideoTabs(self.cam_mgr, stream_names=stream_names)
-                    self.video_panel.set_layout_count(4)
                     self._reverse_camera_name = self._select_reverse_stream_name(stream_names)
                     self.video_panel.selectionChanged.connect(self._on_video_tab_changed)
                 else:
@@ -702,8 +774,8 @@ class MainWindow(QMainWindow):
         # layout
         central = QWidget()
         root = QVBoxLayout(central)
-        root.setContentsMargins(8, 8, 8, 8)
-        root.setSpacing(8)
+        root.setContentsMargins(4, 4, 4, 4)
+        root.setSpacing(4)
 
         self._page_tabs = QTabBar()
         self._page_tabs.setDocumentMode(True)
@@ -719,7 +791,7 @@ class MainWindow(QMainWindow):
         top_bar = QWidget()
         top_bar_lay = QHBoxLayout(top_bar)
         top_bar_lay.setContentsMargins(0, 0, 0, 0)
-        top_bar_lay.setSpacing(8)
+        top_bar_lay.setSpacing(6)
         top_bar_lay.addWidget(self._page_tabs, 0)
         top_bar_lay.addStretch(1)
         self._arm_disarm_btn = QPushButton()
@@ -728,7 +800,6 @@ class MainWindow(QMainWindow):
         self._arm_disarm_btn.clicked.connect(self._toggle_arm_disarm_from_ui)
         top_bar_lay.addWidget(self._arm_disarm_btn, 0)
         root.addWidget(top_bar, 0)
-        root.addWidget(self._analysis_transfer_line, 0)
 
         self._page_stack = QStackedWidget()
         root.addWidget(self._page_stack, 1)
@@ -736,13 +807,14 @@ class MainWindow(QMainWindow):
         self._pilot_page = QWidget()
         pilot_outer = QHBoxLayout(self._pilot_page)
         pilot_outer.setContentsMargins(0, 0, 0, 0)
-        pilot_outer.setSpacing(8)
+        pilot_outer.setSpacing(2)
         self._pilot_video_host = QWidget()
         self._pilot_video_host_layout = QVBoxLayout(self._pilot_video_host)
         self._pilot_video_host_layout.setContentsMargins(0, 0, 0, 0)
         self._pilot_video_host_layout.setSpacing(0)
         if self.video_panel is not None:
             pilot_outer.addWidget(self._pilot_video_host, 1)
+            pilot_outer.addWidget(self.pilot_telemetry_column, 0)
         else:
             # Keep the sensor/instrument widgets alive for data processing, but
             # only surface them when video is unavailable so the main piloting
@@ -774,7 +846,7 @@ class MainWindow(QMainWindow):
         self._stereo_page = StereoPage(
             streams_path=streams_path,
             manager=self.cam_mgr,
-            output_root_provider=lambda: self._recordings_output_dir()[0],
+            output_root_provider=lambda: self._app_session_output_dir()[0],
             packet_provider=self._latest_camera_packet,
         )
         self._stereo_page.pairSelectionChanged.connect(self._on_stereo_pair_changed)
@@ -842,13 +914,13 @@ class MainWindow(QMainWindow):
         # from the current commanded value.
         pitch = self._servo_wrist_pitch
         yaw = self._servo_wrist_yaw
-        if "W" in self._servo_wrist_keys_down and "S" not in self._servo_wrist_keys_down:
-            pitch = 1.0
-        elif "S" in self._servo_wrist_keys_down and "W" not in self._servo_wrist_keys_down:
-            pitch = -1.0
         if "D" in self._servo_wrist_keys_down and "A" not in self._servo_wrist_keys_down:
-            yaw = 1.0
+            pitch = 1.0
         elif "A" in self._servo_wrist_keys_down and "D" not in self._servo_wrist_keys_down:
+            pitch = -1.0
+        if "W" in self._servo_wrist_keys_down and "S" not in self._servo_wrist_keys_down:
+            yaw = 1.0
+        elif "S" in self._servo_wrist_keys_down and "W" not in self._servo_wrist_keys_down:
             yaw = -1.0
         return pitch, yaw
 
@@ -960,6 +1032,9 @@ class MainWindow(QMainWindow):
                     self._update_servo_wrist_keyboard_axes()
                     return False
                 if et == QEvent.Type.KeyPress:
+                    if event.key() == Qt.Key.Key_R:
+                        self._toggle_capture_route_mode()
+                        return False
                     try:
                         shortcut_text = self._lights_toggle_shortcut_text.upper()
                     except Exception:
@@ -1140,18 +1215,10 @@ class MainWindow(QMainWindow):
         #   B -> start/stop active-camera or stereo recording
         try:
             edges = (msg or {}).get("edges", {}) or {}
-            stereo_page = getattr(self, "_stereo_page", None)
-            in_stereo_view = getattr(self, "_active_page_name", "") == "stereo" and stereo_page is not None
             if edges.get("x") == "down":
-                if in_stereo_view:
-                    stereo_page.capture_pair()
-                else:
-                    self._save_snapshot()
+                self._capture_still()
             if edges.get("b") == "down":
-                if in_stereo_view:
-                    stereo_page.toggle_recording()
-                else:
-                    self._toggle_video_recording()
+                self._toggle_capture_recording()
         except Exception:
             pass
 
@@ -1405,6 +1472,10 @@ class MainWindow(QMainWindow):
                 msg = self._sensor_ui_pending.pop(key, None)
                 if not isinstance(msg, dict):
                     continue
+                try:
+                    self.pilot_telemetry_column.update_from_sensor(msg)
+                except Exception:
+                    pass
                 try:
                     self.instrument_panel.update_from_sensor(msg)
                 except Exception:
@@ -1853,6 +1924,10 @@ class MainWindow(QMainWindow):
         self._set_status_tone(self._analysis_transfer_lbl, tone)
         self._set_status(self._analysis_transfer_line, text)
         self._set_status_tone(self._analysis_transfer_line, tone)
+        try:
+            self.pilot_telemetry_column.set_analysis_share(text, tone)
+        except Exception:
+            pass
         self._refresh_analysis_transfer_actions()
 
     def _refresh_analysis_transfer_actions(self) -> None:
@@ -2016,17 +2091,20 @@ class MainWindow(QMainWindow):
             reason = f"Could not use save directory {location.path}: {exc}"
             return fallback.path, SaveLocation(fallback.path, used_fallback=True, reason=reason)
 
+    def _app_session_output_dir(self) -> tuple[Path, SaveLocation]:
+        session_dir = self._app_session_dir
+        session_location = self._app_session_location
+        if session_dir is not None and session_location is not None and is_available_directory(session_dir):
+            return session_dir, session_location
+
+        root, location = self._recordings_output_dir()
+        session_dir = StreamRecorder.make_session_dir(root)
+        self._app_session_dir = session_dir
+        self._app_session_location = location
+        return session_dir, location
+
     def _make_recording_session_dir(self) -> tuple[Path, SaveLocation]:
-        location = self._recordings_location()
-        try:
-            return StreamRecorder.make_session_dir(location.path), location
-        except Exception as exc:
-            fallback = resolve_recordings_dir(None)
-            if location.path == fallback.path:
-                raise
-            session_dir = StreamRecorder.make_session_dir(fallback.path)
-            reason = f"Could not use save directory {location.path}: {exc}"
-            return session_dir, SaveLocation(fallback.path, used_fallback=True, reason=reason)
+        return self._app_session_output_dir()
 
     def _capture_output_dir(self) -> tuple[Path, SaveLocation | None]:
         if self._record_dir and self._stream_recorder is not None and is_available_directory(self._record_dir):
@@ -2035,7 +2113,7 @@ class MainWindow(QMainWindow):
         if self._record_dir and self._stream_recorder is None:
             self._record_dir = None
 
-        return self._recordings_output_dir()
+        return self._app_session_output_dir()
 
     def _save_location_note(self, location: SaveLocation | None) -> str:
         if location is not None and location.used_fallback and self._preferred_save_dir:
@@ -2071,6 +2149,8 @@ class MainWindow(QMainWindow):
         self._settings.setValue(self.SAVE_DIR_SETTINGS_KEY, self._preferred_save_dir)
         if self._stream_recorder is None:
             self._record_dir = None
+            self._app_session_dir = None
+            self._app_session_location = None
         self._refresh_save_directory_actions()
 
         location = self._recordings_location()
@@ -2090,6 +2170,8 @@ class MainWindow(QMainWindow):
         self._settings.remove(self.SAVE_DIR_SETTINGS_KEY)
         if self._stream_recorder is None:
             self._record_dir = None
+            self._app_session_dir = None
+            self._app_session_location = None
         self._refresh_save_directory_actions()
         self.statusBar().showMessage(f"Save directory reset: {DEFAULT_RECORDINGS_DIR}", 5000)
         if not os.environ.get("TRITON_PILOT_TRANSFER_ROOT", "").strip():
@@ -2130,7 +2212,8 @@ class MainWindow(QMainWindow):
         self._reverse_act = QAction("Reverse Drive", self)
         self._reverse_act.setCheckable(True)
         self._reverse_act.setChecked(bool(self._reverse_enabled))
-        self._reverse_act.setShortcut(REVERSE_TOGGLE_SHORTCUT)
+        if str(REVERSE_TOGGLE_SHORTCUT or "").strip().upper() != "R":
+            self._reverse_act.setShortcut(REVERSE_TOGGLE_SHORTCUT)
         self._reverse_act.setToolTip(
             "Swap to reverse driving mode: flips surge/sway while keeping yaw and the video layout unchanged."
         )
@@ -2165,16 +2248,16 @@ class MainWindow(QMainWindow):
 
         rec_menu.addSeparator()
 
-        snap_act = QAction("Save Snapshot", self)
-        snap_act.triggered.connect(self._save_snapshot)
+        snap_act = QAction("Capture Still", self)
+        snap_act.triggered.connect(self._capture_still)
         rec_menu.addAction(snap_act)
 
-        start_vid = QAction("Start Video Recording", self)
-        start_vid.triggered.connect(self._start_video_recording)
+        start_vid = QAction("Start Recording", self)
+        start_vid.triggered.connect(self._start_capture_recording)
         rec_menu.addAction(start_vid)
 
-        stop_vid = QAction("Stop Video Recording", self)
-        stop_vid.triggered.connect(self._stop_video_recording)
+        stop_vid = QAction("Stop Recording", self)
+        stop_vid.triggered.connect(self._stop_capture_recording)
         rec_menu.addAction(stop_vid)
 
         self._refresh_save_directory_actions()
@@ -2185,6 +2268,19 @@ class MainWindow(QMainWindow):
         file_menu.addAction(quit_act)
 
     def closeEvent(self, event):
+        try:
+            app = QApplication.instance()
+            if app is not None:
+                app.removeEventFilter(self)
+        except Exception:
+            pass
+        for timer_name in ("_link_timer", "_analysis_transfer_timer", "_sensor_ui_timer"):
+            try:
+                timer = getattr(self, timer_name, None)
+                if timer is not None:
+                    timer.stop()
+            except Exception:
+                pass
         try:
             if self.video_panel is not None:
                 self.video_panel.stop_all()

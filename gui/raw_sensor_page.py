@@ -621,13 +621,13 @@ class RawSensorPage(QWidget):
         self.mmc_plot = RollingVectorPlot("MMC5983 Magnetometer", ["x", "y", "z", "norm"], window_s=20.0)
         self.depth_plot = RollingVectorPlot("Depth", ["depth", "sensor"], window_s=60.0, max_update_hz=10.0)
 
-        attitude_card = _Card("Attitude Display")
+        self.attitude_card = _Card("Attitude Display")
         attitude_row = QHBoxLayout()
         attitude_row.setContentsMargins(0, 0, 0, 0)
         attitude_row.setSpacing(8)
         attitude_row.addWidget(self.attitude_view, 1)
         attitude_row.addWidget(self.attitude_plot, 1)
-        attitude_card.body.addLayout(attitude_row)
+        self.attitude_card.body.addLayout(attitude_row)
 
         plot_card = _Card("Rolling Raw Vectors")
         plot_card.body.addWidget(self.depth_plot)
@@ -643,8 +643,8 @@ class RawSensorPage(QWidget):
         content_lay.setSpacing(10)
         content_lay.addWidget(title)
         content_lay.addWidget(self.record_card)
+        content_lay.addWidget(self.attitude_card)
         content_lay.addWidget(self.summary_card)
-        content_lay.addWidget(attitude_card)
         content_lay.addWidget(plot_card)
         content_lay.addStretch(1)
 

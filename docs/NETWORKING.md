@@ -129,6 +129,12 @@ TritonPilot asks TritonOS to start a named stream through the video RPC
 endpoint. TritonOS then sends RTP/UDP video to the pilot computer on the port
 listed in `data/streams.json`.
 
+The default ROV deployment starts all four camera panes at boot and keeps
+already-started streams warm when a pane is hidden, so switching layouts does
+not ask TritonOS to create duplicate streams. Set `stop_hidden_streams: true`
+or `TRITON_VIDEO_STOP_HIDDEN_STREAMS=1` when reducing live network load is more
+important than fast camera/layout changes.
+
 The local receive address is selected by `network/net_select.py`. It chooses a
 local interface that can reach the ROV and is suitable for receiving the stream.
 If the pilot has multiple adapters active, validate the selected route before
