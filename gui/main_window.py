@@ -1984,6 +1984,7 @@ class MainWindow(QMainWindow):
         except Exception:
             snapshot = {}
         last_request_ts = float(snapshot.get("last_request_ts") or 0.0)
+        last_request_path = str(snapshot.get("last_request_path") or "")
         active_file_transfers = int(snapshot.get("active_file_transfers") or 0)
         active_file_paths = list(snapshot.get("active_file_paths") or [])
         last_file_path = str(snapshot.get("last_file_path") or "")
@@ -2011,8 +2012,16 @@ class MainWindow(QMainWindow):
             tone = "ok"
         elif last_request_ts > 0:
             age = max(0.0, time.time() - last_request_ts)
-            pull_text = f"last pull {age:.0f}s" if age < 60.0 else f"last pull {age / 60.0:.0f}m"
-            tone = "ok" if age < 20.0 else "warn"
+            if last_request_path in {"/events", "/api/events"}:
+                if age < 65.0:
+                    pull_text = f"Analysis listening {age:.0f}s"
+                    tone = "ok"
+                else:
+                    pull_text = f"last Analysis contact {age / 60.0:.0f}m"
+                    tone = "warn"
+            else:
+                pull_text = f"last Analysis check {age:.0f}s" if age < 60.0 else f"last Analysis check {age / 60.0:.0f}m"
+                tone = "ok" if age < 20.0 else "warn"
         else:
             pull_text = "waiting for Analysis"
             tone = ""

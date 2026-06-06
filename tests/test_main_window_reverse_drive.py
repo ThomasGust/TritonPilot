@@ -284,7 +284,7 @@ def test_analysis_transfer_status_bar_shows_served_root(monkeypatch, tmp_path):
             self.shutdown_called = False
 
         def request_snapshot(self):
-            return {"request_count": 1, "last_request_ts": main_window.time.time(), "last_request_path": "/index.json"}
+            return {"request_count": 1, "last_request_ts": main_window.time.time(), "last_request_path": "/events"}
 
         def shutdown(self):
             self.shutdown_called = True
@@ -328,6 +328,7 @@ def test_analysis_transfer_status_bar_shows_served_root(monkeypatch, tmp_path):
         assert "Analysis Share: ON http://127.0.0.1:49123" in text
         assert "recordings" in text
         assert "3 files/5.0 MB" in text
+        assert "Analysis listening" in text
         assert win._analysis_transfer_line.text() == text
         assert win._analysis_transfer_line.isHidden() is True
         assert win._analysis_transfer_line.wordWrap() is True
