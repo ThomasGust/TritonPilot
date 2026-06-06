@@ -13,13 +13,15 @@ from dataclasses import asdict, dataclass
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path, PurePosixPath
-from urllib.parse import quote, unquote, urlparse
+from urllib.parse import parse_qs, quote, unquote, urlparse
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_ROOT = REPO_ROOT / "recordings"
 DEFAULT_HOST = "0.0.0.0"
 DEFAULT_PORT = 8765
+DEFAULT_STABLE_SECONDS = 0.75
+DEFAULT_EVENT_TIMEOUT = 20.0
 SERVER_VERSION = 1
 
 
@@ -62,7 +64,7 @@ def resolve_transfer_path(root: Path, raw_path: str) -> Path:
 def iter_transfer_files(
     root: Path,
     *,
-    stable_seconds: float = 2.0,
+    stable_seconds: float = DEFAULT_STABLE_SECONDS,
     include_hidden: bool = False,
 ) -> list[TransferFile]:
     """Return files under *root* that are safe to copy."""
@@ -91,7 +93,7 @@ def iter_transfer_files(
     return files
 
 
-def build_index(root: Path, *, stable_seconds: float = 2.0, include_hidden: bool = False) -> dict:
+def build_index(root: Path, *, stable_seconds: float = DEFAULT_STABLE_SECONDS, include_hidden: bool = False) -> dict:
     """Build the JSON transfer index."""
     root = Path(root).expanduser().resolve()
     files = iter_transfer_files(root, stable_seconds=stable_seconds, include_hidden=include_hidden)
@@ -116,7 +118,7 @@ class AnalysisTransferServer(ThreadingHTTPServer):
         server_address: tuple[str, int],
         *,
         root: Path,
-        stable_seconds: float = 2.0,
+        stable_seconds: float = DEFAULT_STABLE_SECONDS,
         include_hidden: bool = False,
     ):
         super().__init__(server_address, AnalysisTransferRequestHandler)
@@ -132,6 +134,12 @@ class AnalysisTransferServer(ThreadingHTTPServer):
         self.last_file_bytes_sent = 0
         self.last_file_completed_ts = 0.0
         self._request_lock = threading.Lock()
+        self._event_condition = threading.Condition()
+        self._event_id = 0
+        self._event_fingerprint: tuple[tuple[str, int, int], ...] | None = None
+        self._event_file_count = 0
+        self._event_total_bytes = 0
+        self._event_generated_at = 0.0
 
     def note_request(self, path: str) -> None:
         """Record a lightweight heartbeat from the analysis computer."""
@@ -174,8 +182,76 @@ class AnalysisTransferServer(ThreadingHTTPServer):
                 "active_file_paths": list(self.active_file_paths),
                 "last_file_path": str(self.last_file_path),
                 "last_file_bytes_sent": int(self.last_file_bytes_sent),
-                "last_file_completed_ts": float(self.last_file_completed_ts),
+            "last_file_completed_ts": float(self.last_file_completed_ts),
+        }
+
+    @staticmethod
+    def _index_fingerprint(index: dict) -> tuple[tuple[str, int, int], ...]:
+        files = index.get("files") if isinstance(index, dict) else []
+        out: list[tuple[str, int, int]] = []
+        for item in files or []:
+            if not isinstance(item, dict):
+                continue
+            out.append(
+                (
+                    str(item.get("path") or ""),
+                    int(item.get("size") or 0),
+                    int(item.get("mtime_ns") or 0),
+                )
+            )
+        return tuple(out)
+
+    def _note_index(self, index: dict) -> None:
+        fingerprint = self._index_fingerprint(index)
+        with self._event_condition:
+            if self._event_fingerprint != fingerprint:
+                self._event_fingerprint = fingerprint
+                self._event_id += 1
+                self._event_file_count = int(index.get("file_count") or 0)
+                self._event_total_bytes = int(index.get("total_bytes") or 0)
+                self._event_generated_at = float(index.get("generated_at") or time.time())
+                self._event_condition.notify_all()
+            else:
+                self._event_file_count = int(index.get("file_count") or 0)
+                self._event_total_bytes = int(index.get("total_bytes") or 0)
+                self._event_generated_at = float(index.get("generated_at") or time.time())
+
+    def index_snapshot(self) -> dict:
+        """Build the visible file index and update transfer-change state."""
+        index = build_index(
+            self.root,
+            stable_seconds=self.stable_seconds,
+            include_hidden=self.include_hidden,
+        )
+        self._note_index(index)
+        return index
+
+    def _event_payload(self, *, changed: bool) -> dict:
+        with self._event_condition:
+            return {
+                "type": "triton-analysis-transfer-event",
+                "version": SERVER_VERSION,
+                "event_id": int(self._event_id),
+                "changed": bool(changed),
+                "generated_at": float(self._event_generated_at or time.time()),
+                "file_count": int(self._event_file_count),
+                "total_bytes": int(self._event_total_bytes),
+                "stable_seconds": float(self.stable_seconds),
             }
+
+    def wait_for_change(self, *, since_event_id: int = 0, timeout_s: float = DEFAULT_EVENT_TIMEOUT) -> dict:
+        """Return when the visible transfer index changes or the timeout expires."""
+        since_event_id = int(since_event_id or 0)
+        deadline = time.time() + max(0.0, float(timeout_s))
+        while True:
+            self.index_snapshot()
+            with self._event_condition:
+                if self._event_id != since_event_id:
+                    return self._event_payload(changed=True)
+                remaining = deadline - time.time()
+                if remaining <= 0.0:
+                    return self._event_payload(changed=False)
+                self._event_condition.wait(timeout=min(0.25, remaining))
 
 
 class AnalysisTransferRequestHandler(BaseHTTPRequestHandler):
@@ -204,18 +280,28 @@ class AnalysisTransferRequestHandler(BaseHTTPRequestHandler):
             )
             return
         if parsed.path in {"/index.json", "/api/index"}:
-            self._send_json(
-                build_index(
-                    self.transfer_server.root,
-                    stable_seconds=self.transfer_server.stable_seconds,
-                    include_hidden=self.transfer_server.include_hidden,
-                )
-            )
+            self._send_json(self.transfer_server.index_snapshot())
+            return
+        if parsed.path in {"/events", "/api/events"}:
+            self._send_events(parsed)
             return
         if parsed.path.startswith("/files/"):
             self._send_file(parsed.path[len("/files/") :])
             return
         self.send_error(HTTPStatus.NOT_FOUND)
+
+    def _send_events(self, parsed) -> None:
+        query = parse_qs(str(parsed.query or ""), keep_blank_values=False)
+        try:
+            since = int((query.get("since") or ["0"])[0] or "0")
+        except (TypeError, ValueError):
+            since = 0
+        try:
+            timeout_s = float((query.get("timeout") or [str(DEFAULT_EVENT_TIMEOUT)])[0] or DEFAULT_EVENT_TIMEOUT)
+        except (TypeError, ValueError):
+            timeout_s = DEFAULT_EVENT_TIMEOUT
+        timeout_s = min(60.0, max(0.0, timeout_s))
+        self._send_json(self.transfer_server.wait_for_change(since_event_id=since, timeout_s=timeout_s))
 
     def _send_json(self, payload: dict) -> None:
         body = json.dumps(payload, indent=2, sort_keys=True).encode("utf-8")
@@ -275,7 +361,7 @@ def create_server(
     root: Path,
     host: str = DEFAULT_HOST,
     port: int = DEFAULT_PORT,
-    stable_seconds: float = 2.0,
+    stable_seconds: float = DEFAULT_STABLE_SECONDS,
     include_hidden: bool = False,
 ) -> AnalysisTransferServer:
     """Create but do not start the transfer server."""
@@ -302,7 +388,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--stable-seconds",
         type=float,
-        default=2.0,
+        default=DEFAULT_STABLE_SECONDS,
         help="Skip files modified more recently than this many seconds.",
     )
     parser.add_argument("--include-hidden", action="store_true", help="Include dotfiles and dot folders.")

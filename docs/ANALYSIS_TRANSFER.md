@@ -87,6 +87,7 @@ $env:TRITON_PILOT_TRANSFER_HOST="0.0.0.0"
 $env:TRITON_PILOT_TRANSFER_ADVERTISE_HOST="10.77.0.1"
 $env:TRITON_PILOT_TRANSFER_PORT="8765"
 $env:TRITON_PILOT_TRANSFER_ROOT="C:\TritonRecordings"
+$env:TRITON_PILOT_TRANSFER_STABLE_SECONDS="0.75"
 ```
 
 ## Backup CLI Server
@@ -101,9 +102,10 @@ The server is read-only. It publishes:
 
 - `http://10.77.0.1:8765/health`
 - `http://10.77.0.1:8765/index.json`
+- `http://10.77.0.1:8765/events?since=<event-id>&timeout=20`
 - `http://10.77.0.1:8765/files/<relative-path>`
 
-Files modified in the last two seconds are skipped by default so an active
+Files modified in the last 0.75 seconds are skipped by default so an active
 recording is less likely to be copied mid-write. For bench simulation only, you
 can lower that:
 
@@ -114,7 +116,10 @@ python -m tools.analysis_transfer_server --root recordings --host 127.0.0.1 --po
 ## Pull From TritonAnalysis
 
 The unified TritonAnalysis app pulls automatically and shows its destination in
-the top `Pilot Sync` panel. From the TritonAnalysis repository root on the
+the top `Pilot Sync` panel. Current TritonAnalysis builds use the `/events`
+endpoint to wait for Pilot-side changes and sync immediately when a new stable
+file appears. If the event endpoint is not available, TritonAnalysis falls back
+to periodic index checks. From the TritonAnalysis repository root on the
 analysis computer, this CLI command is still available as a backup:
 
 ```powershell

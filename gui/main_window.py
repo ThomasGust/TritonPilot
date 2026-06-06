@@ -65,7 +65,7 @@ from gui.instruments import InstrumentPanel, HoldTestPanel, PilotTelemetryColumn
 from gui.raw_sensor_page import RawSensorPage
 from gui.management_page import ManagementPage
 from gui.stereo_page import StereoPage
-from tools.analysis_transfer_server import build_index, create_server, start_server_in_thread
+from tools.analysis_transfer_server import DEFAULT_STABLE_SECONDS, build_index, create_server, start_server_in_thread
 
 
 class MainWindow(QMainWindow):
@@ -547,7 +547,8 @@ class MainWindow(QMainWindow):
         )
         self._analysis_transfer_port = int(os.environ.get("TRITON_PILOT_TRANSFER_PORT", "8765") or "8765")
         self._analysis_transfer_stable_seconds = float(
-            os.environ.get("TRITON_PILOT_TRANSFER_STABLE_SECONDS", "2.0") or "2.0"
+            os.environ.get("TRITON_PILOT_TRANSFER_STABLE_SECONDS", str(DEFAULT_STABLE_SECONDS))
+            or str(DEFAULT_STABLE_SECONDS)
         )
         self._analysis_transfer_include_hidden = (
             os.environ.get("TRITON_PILOT_TRANSFER_INCLUDE_HIDDEN", "").strip().lower() in {"1", "true", "yes", "on"}

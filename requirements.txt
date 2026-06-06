@@ -1,4 +1,6 @@
 PyQt6
+imageio
+imageio-ffmpeg
 matplotlib
 numpy
 opencv-python

@@ -34,7 +34,8 @@ def _normalize_bgr(frame: np.ndarray) -> np.ndarray:
 class VideoRecorder:
     """Frame-based video recorder.
 
-    Writes an .mp4 via imageio/ffmpeg when available; otherwise saves a PNG sequence.
+    Writes an .mp4 via imageio/ffmpeg when available, then OpenCV when needed;
+    otherwise saves a PNG sequence.
 
     Notes:
       - `out_path` is a FILE path (e.g. recordings/session/main_camera.mp4).
@@ -55,6 +56,8 @@ class VideoRecorder:
         self._started = False
 
         self._writer = None
+        self._writer_backend: str | None = None  # "imageio" or "opencv"
+        self._cv2 = None
         self._mode: str | None = None  # "mp4" or "frames"
         self._frame_dir: Path | None = None
         self._frame_idx = 0
@@ -62,6 +65,92 @@ class VideoRecorder:
 
         # set during start()
         self._target: Path | None = None
+
+    def _start_imageio_writer(self) -> Exception | None:
+        """Start the preferred imageio/ffmpeg MP4 writer."""
+        try:
+            import imageio.v2 as imageio  # type: ignore
+        except Exception as exc:
+            return exc
+
+        try:
+            # Widest compatibility for common players:
+            # - H.264 (libx264) + yuv420p pixel format
+            # - macro_block_size=None avoids unexpected resizing
+            self._writer = imageio.get_writer(
+                str(self.out_path),
+                fps=self.fps,
+                codec="libx264",
+                format="FFMPEG",
+                pixelformat="yuv420p",
+                macro_block_size=None,
+            )
+        except Exception as exc:
+            self._writer = None
+            return exc
+
+        self._writer_backend = "imageio"
+        self._mode = "mp4"
+        self._target = self.out_path
+        return None
+
+    def _prepare_opencv_writer(self) -> Exception | None:
+        """Prepare the OpenCV MP4 fallback.
+
+        OpenCV needs the frame size before opening the writer, so the actual
+        VideoWriter is created lazily when the first frame arrives.
+        """
+        try:
+            import cv2  # type: ignore
+        except Exception as exc:
+            return exc
+
+        self._cv2 = cv2
+        self._writer = None
+        self._writer_backend = "opencv"
+        self._mode = "mp4"
+        self._target = self.out_path
+        return None
+
+    def _prepare_frame_fallback(self) -> None:
+        """Prepare the final PNG-frame fallback."""
+        self._writer = None
+        self._writer_backend = None
+        self._mode = "frames"
+        self._frame_dir = self.out_path.parent / f"{self.out_path.stem}_frames"
+        self._frame_dir.mkdir(parents=True, exist_ok=True)
+        self._target = self._frame_dir
+
+    def _ensure_opencv_writer(self, frame_shape: tuple[int, ...]) -> bool:
+        """Open an OpenCV MP4 writer once the frame geometry is known."""
+        if self._writer is not None:
+            return True
+        if self._cv2 is None or len(frame_shape) < 2:
+            return False
+
+        h, w = int(frame_shape[0]), int(frame_shape[1])
+        last_error: Exception | None = None
+        for codec in ("mp4v", "avc1", "H264"):
+            try:
+                fourcc = self._cv2.VideoWriter_fourcc(*codec)
+                writer = self._cv2.VideoWriter(str(self.out_path), fourcc, self.fps, (w, h))
+                if writer is not None and writer.isOpened():
+                    self._writer = writer
+                    return True
+                try:
+                    writer.release()
+                except Exception:
+                    pass
+            except Exception as exc:
+                last_error = exc
+
+        logger.warning(
+            "OpenCV MP4 writer could not open %s%s; falling back to PNG frame sequence.",
+            self.out_path,
+            f" ({last_error})" if last_error is not None else "",
+        )
+        self._prepare_frame_fallback()
+        return False
 
     @property
     def target(self) -> Path | None:
@@ -74,30 +163,22 @@ class VideoRecorder:
 
         self.out_path.parent.mkdir(parents=True, exist_ok=True)
 
-        # Try MP4 via imageio/ffmpeg
-        try:
-            import imageio.v2 as imageio  # type: ignore
-
-            # Widest compatibility for common players:
-            # - H.264 (libx264) + yuv420p pixel format
-            # - macro_block_size=None avoids unexpected resizing
-            self._writer = imageio.get_writer(
-                str(self.out_path),
-                fps=self.fps,
-                codec="libx264",
-                format="FFMPEG",
-                pixelformat="yuv420p",
-                macro_block_size=None,
-            )
-            self._mode = "mp4"
-            self._target = self.out_path
-        except Exception as e:
-            logger.warning("MP4 writer unavailable (%s). Falling back to PNG frame sequence.", e)
-            self._writer = None
-            self._mode = "frames"
-            self._frame_dir = self.out_path.parent / f"{self.out_path.stem}_frames"
-            self._frame_dir.mkdir(parents=True, exist_ok=True)
-            self._target = self._frame_dir
+        imageio_error = self._start_imageio_writer()
+        if imageio_error is not None:
+            opencv_error = self._prepare_opencv_writer()
+            if opencv_error is None:
+                logger.warning(
+                    "imageio/ffmpeg MP4 writer unavailable (%s). Using OpenCV MP4 writer.",
+                    imageio_error,
+                )
+            else:
+                logger.warning(
+                    "MP4 writers unavailable (imageio/ffmpeg: %s; OpenCV: %s). "
+                    "Falling back to PNG frame sequence.",
+                    imageio_error,
+                    opencv_error,
+                )
+                self._prepare_frame_fallback()
 
         self._started = True
         self._thread.start()
@@ -198,10 +279,17 @@ class VideoRecorder:
                         except Exception:
                             continue
 
-                    if self._mode == "mp4" and self._writer is not None:
+                    wrote = False
+                    if self._mode == "mp4" and self._writer_backend == "imageio" and self._writer is not None:
                         rgb = frame[:, :, ::-1]
                         self._writer.append_data(rgb)
-                    elif self._mode == "frames" and self._frame_dir is not None:
+                        wrote = True
+                    elif self._mode == "mp4" and self._writer_backend == "opencv":
+                        if self._ensure_opencv_writer(frame.shape) and self._writer is not None:
+                            self._writer.write(frame)
+                            wrote = True
+
+                    if not wrote and self._mode == "frames" and self._frame_dir is not None:
                         p = self._frame_dir / f"{self._frame_idx:06d}.png"
                         self._frame_idx += 1
                         self._save_png(frame, p)
@@ -211,7 +299,10 @@ class VideoRecorder:
         finally:
             if self._writer is not None:
                 try:
-                    self._writer.close()
+                    if self._writer_backend == "opencv":
+                        self._writer.release()
+                    else:
+                        self._writer.close()
                 except Exception:
                     pass
                 self._writer = None
