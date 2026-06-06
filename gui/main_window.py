@@ -9,6 +9,7 @@ thread.
 from __future__ import annotations
 
 import os
+import ipaddress
 import math
 import socket
 import threading
@@ -72,6 +73,8 @@ from gui.raw_sensor_page import RawSensorPage
 from gui.management_page import ManagementPage
 from gui.stereo_page import StereoPage
 from gui.ssh_page import SshConsolePage, default_pilot_ssh_presets
+from gui.responsive import resize_to_available_screen, vertical_scroll_area
+from network.net_select import LocalAddr, list_local_ipv4_addrs
 from tools.analysis_transfer_server import DEFAULT_STABLE_SECONDS, build_index, create_server, start_server_in_thread
 
 
@@ -102,6 +105,48 @@ class MainWindow(QMainWindow):
             lbl.update()
         except Exception:
             pass
+
+    @staticmethod
+    def _analysis_transfer_host_score(addr: LocalAddr) -> tuple[int, str]:
+        ip_text = str(getattr(addr, "ip", "") or "").strip()
+        try:
+            ip_obj = ipaddress.ip_address(ip_text)
+        except ValueError:
+            return (-1, ip_text)
+        if ip_obj.version != 4 or ip_obj.is_loopback or ip_obj.is_unspecified:
+            return (-1, ip_text)
+
+        score = 0
+        if ip_text == "10.77.0.1":
+            score += 120
+        elif ip_text.startswith("10.77.0."):
+            score += 110
+        elif ip_text.startswith("192.168.1."):
+            score += 85
+        elif ip_obj.is_private:
+            score += 70
+        elif ip_obj.is_link_local:
+            score += 25
+
+        is_wifi = getattr(addr, "is_wifi", None)
+        if is_wifi is False:
+            score += 5
+        elif is_wifi is True:
+            score -= 4
+        return (score, ip_text)
+
+    @classmethod
+    def _default_analysis_transfer_advertise_host(cls) -> str:
+        try:
+            candidates = list_local_ipv4_addrs()
+        except Exception:
+            candidates = []
+        scored = [cls._analysis_transfer_host_score(candidate) for candidate in candidates]
+        scored = [item for item in scored if item[0] >= 0 and item[1]]
+        if not scored:
+            return "127.0.0.1"
+        scored.sort(reverse=True)
+        return scored[0][1]
 
     @staticmethod
     def _stream_name_matches(name: str | None, tokens: list[str]) -> bool:
@@ -564,9 +609,8 @@ class MainWindow(QMainWindow):
         self._analysis_transfer_root: Path | None = None
         self._analysis_transfer_error = ""
         self._analysis_transfer_host = os.environ.get("TRITON_PILOT_TRANSFER_HOST", "0.0.0.0").strip() or "0.0.0.0"
-        self._analysis_transfer_advertise_host = (
-            os.environ.get("TRITON_PILOT_TRANSFER_ADVERTISE_HOST", "10.77.0.1").strip() or "10.77.0.1"
-        )
+        self._analysis_transfer_advertise_host = os.environ.get("TRITON_PILOT_TRANSFER_ADVERTISE_HOST", "").strip()
+        self._analysis_transfer_resolved_advertise_host = ""
         self._analysis_transfer_port = int(os.environ.get("TRITON_PILOT_TRANSFER_PORT", "8765") or "8765")
         self._analysis_transfer_stable_seconds = float(
             os.environ.get("TRITON_PILOT_TRANSFER_STABLE_SECONDS", str(DEFAULT_STABLE_SECONDS))
@@ -773,6 +817,13 @@ class MainWindow(QMainWindow):
         self.instrument_panel = InstrumentPanel()
         self.pilot_telemetry_column = PilotTelemetryColumn()
         self.pilot_telemetry_column.set_capture_mode(self._capture_route_mode)
+        self.pilot_telemetry_scroll = vertical_scroll_area(
+            self.pilot_telemetry_column,
+            object_name="pilotTelemetryScroll",
+        )
+        self.pilot_telemetry_scroll.setMinimumWidth(236)
+        self.pilot_telemetry_scroll.setMaximumWidth(280)
+        self.pilot_telemetry_scroll.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Expanding)
         try:
             self._refresh_gain_indicators_from_modes(self.pilot_svc.current_modes())
         except Exception:
@@ -871,7 +922,7 @@ class MainWindow(QMainWindow):
         self._pilot_video_host_layout.setSpacing(0)
         if self.video_panel is not None:
             pilot_outer.addWidget(self._pilot_video_host, 1)
-            pilot_outer.addWidget(self.pilot_telemetry_column, 0)
+            pilot_outer.addWidget(self.pilot_telemetry_scroll, 0)
         else:
             # Keep the sensor/instrument widgets alive for data processing, but
             # only surface them when video is unavailable so the main piloting
@@ -965,7 +1016,7 @@ class MainWindow(QMainWindow):
         except Exception:
             pass
 
-        self.resize(1440, 860)
+        resize_to_available_screen(self, 1440, 860, min_width=980, min_height=620, height_ratio=0.96)
 
 
     def _servo_wrist_keyboard_targets(self) -> tuple[float, float]:
@@ -1157,11 +1208,17 @@ class MainWindow(QMainWindow):
 
     @staticmethod
     def _widget_or_parent_is_text_entry(widget) -> bool:
-        text_entry_types = (QLineEdit, QPlainTextEdit, QTextEdit, QAbstractSpinBox, QComboBox)
+        text_entry_types = (QLineEdit, QPlainTextEdit, QTextEdit, QAbstractSpinBox)
         current = widget if isinstance(widget, QWidget) else None
         while current is not None:
             if isinstance(current, text_entry_types):
                 return True
+            if isinstance(current, QComboBox):
+                try:
+                    if current.isEditable():
+                        return True
+                except Exception:
+                    return True
             try:
                 current = current.parentWidget()
             except Exception:
@@ -1201,11 +1258,11 @@ class MainWindow(QMainWindow):
                         self._servo_wrist_keys_down.discard(label)
                     self._servo_wrist_last_update = time.monotonic()
                     self._update_servo_wrist_keyboard_axes()
-                    return False
+                    return True
                 if et == QEvent.Type.KeyPress:
                     if event.key() == Qt.Key.Key_R:
                         self._toggle_capture_route_mode()
-                        return False
+                        return True
                     try:
                         shortcut_text = self._lights_toggle_shortcut_text.upper()
                     except Exception:
@@ -1216,18 +1273,18 @@ class MainWindow(QMainWindow):
                         arm_shortcut_text = "O"
                     if event.text().upper() == arm_shortcut_text:
                         self._toggle_arm_disarm_from_ui()
-                        return False
+                        return True
                     if event.text().upper() == shortcut_text:
                         self._toggle_lights_from_keyboard()
-                        return False
+                        return True
                     direction = self._back_gripper_gain_shortcuts.get(event.key())
                     if direction is not None:
                         self._adjust_back_gripper_gain_from_keyboard(direction)
-                        return False
+                        return True
                     direction = self._arm_gain_shortcuts.get(event.key())
                     if direction is not None:
                         self._adjust_arm_gain_from_keyboard(direction)
-                        return False
+                        return True
                     direction = self._rov_gain_shortcuts.get(event.key())
                     if direction is not None:
                         text = str(event.text() or "")
@@ -1236,7 +1293,7 @@ class MainWindow(QMainWindow):
                         if direction < 0 and text not in ("", "-"):
                             return False
                         self._adjust_rov_gain_from_keyboard(direction)
-                        return False
+                        return True
                     return False
         except Exception:
             pass
@@ -2027,9 +2084,14 @@ class MainWindow(QMainWindow):
             port = self._analysis_transfer_port
         else:
             _bound_host, port = self._analysis_transfer_server.server_address
-        host = self._analysis_transfer_advertise_host
-        if self._analysis_transfer_host not in {"0.0.0.0", "::"}:
+        host = self._analysis_transfer_advertise_host.strip()
+        if not host and self._analysis_transfer_host not in {"0.0.0.0", "::"}:
             host = self._analysis_transfer_host
+        if not host:
+            host = self._analysis_transfer_resolved_advertise_host.strip()
+        if not host:
+            host = self._default_analysis_transfer_advertise_host()
+            self._analysis_transfer_resolved_advertise_host = host
         return f"http://{host}:{int(port)}"
 
     @staticmethod
@@ -2064,6 +2126,7 @@ class MainWindow(QMainWindow):
             self._refresh_analysis_transfer_status()
             return
         try:
+            self._analysis_transfer_resolved_advertise_host = ""
             root = self._analysis_transfer_configured_root()
             server = create_server(
                 root=root,

@@ -1,0 +1,8 @@
+[2026-06-06 08:39:05,737] INFO gst_receiver_subproc: Starting receiver 'Arm Camera' port=5001 codec=h264 mode=raw 1920x1080 latency=60ms udp_buffer=4194304
+[2026-06-06 08:39:05,737] INFO gst_receiver_subproc: Starting receiver 'Back Gripper Camera' port=5003 codec=h264 mode=raw 1920x1080 latency=60ms udp_buffer=4194304
+[2026-06-06 08:39:05,737] INFO gst_receiver_subproc: Starting receiver 'Aux Camera' port=5002 codec=h264 mode=raw 1920x1080 latency=60ms udp_buffer=4194304
+[2026-06-06 08:39:05,775] INFO gst_receiver_subproc: Starting receiver 'Primary Camera' port=5000 codec=h264 mode=raw 1920x1080 latency=60ms udp_buffer=4194304
+[2026-06-06 08:40:49,516] INFO gst_receiver_subproc: Stopping receiver 'Primary Camera'
+[2026-06-06 08:40:49,549] INFO gst_receiver_subproc: Stopping receiver 'Aux Camera'
+[2026-06-06 08:40:49,584] INFO gst_receiver_subproc: Stopping receiver 'Arm Camera'
+[2026-06-06 08:40:49,616] INFO gst_receiver_subproc: Stopping receiver 'Back Gripper Camera'

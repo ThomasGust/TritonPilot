@@ -10,7 +10,7 @@ pytest.importorskip("PyQt6")
 
 from PyQt6.QtCore import QEvent, Qt, pyqtSignal
 from PyQt6.QtGui import QKeyEvent
-from PyQt6.QtWidgets import QApplication, QLabel, QWidget
+from PyQt6.QtWidgets import QApplication, QLabel, QComboBox, QWidget
 
 import gui.main_window as main_window
 
@@ -385,6 +385,41 @@ def test_analysis_transfer_status_bar_shows_served_root(monkeypatch, tmp_path):
         assert servers[0][0].shutdown_called is True
 
 
+def test_analysis_transfer_advertise_host_prefers_configured_link(monkeypatch):
+    monkeypatch.setattr(
+        main_window,
+        "list_local_ipv4_addrs",
+        lambda: [
+            main_window.LocalAddr(ip="172.16.111.159", iface="Wi-Fi", is_wifi=True),
+            main_window.LocalAddr(ip="192.168.1.1", iface="Ethernet 8", is_wifi=False),
+            main_window.LocalAddr(ip="10.77.0.1", iface="Ethernet 8", is_wifi=False),
+        ],
+    )
+
+    assert main_window.MainWindow._default_analysis_transfer_advertise_host() == "10.77.0.1"
+
+
+def test_analysis_transfer_display_url_caches_auto_host(monkeypatch):
+    calls = []
+
+    def _fake_default_host():
+        calls.append("called")
+        return "10.77.0.1"
+
+    monkeypatch.setattr(main_window.MainWindow, "_default_analysis_transfer_advertise_host", staticmethod(_fake_default_host))
+
+    win = main_window.MainWindow.__new__(main_window.MainWindow)
+    win._analysis_transfer_server = None
+    win._analysis_transfer_port = 8765
+    win._analysis_transfer_advertise_host = ""
+    win._analysis_transfer_host = "0.0.0.0"
+    win._analysis_transfer_resolved_advertise_host = ""
+
+    assert win._analysis_transfer_display_url() == "http://10.77.0.1:8765"
+    assert win._analysis_transfer_display_url() == "http://10.77.0.1:8765"
+    assert calls == ["called"]
+
+
 def test_pilot_page_adds_compact_telemetry_column_and_frees_status_bar(monkeypatch, tmp_path):
     app = _app()
     streams_path = tmp_path / "streams.json"
@@ -403,8 +438,9 @@ def test_pilot_page_adds_compact_telemetry_column_and_frees_status_bar(monkeypat
     try:
         app.processEvents()
         pilot_layout = win._pilot_page.layout()
-        assert pilot_layout.indexOf(win._pilot_video_host) < pilot_layout.indexOf(win.pilot_telemetry_column)
+        assert pilot_layout.indexOf(win._pilot_video_host) < pilot_layout.indexOf(win.pilot_telemetry_scroll)
         assert win.pilot_telemetry_column.minimumWidth() >= 200
+        assert win.pilot_telemetry_scroll.widget() is win.pilot_telemetry_column
         assert win._analysis_transfer_lbl.parent() is win
         assert win._depth_lbl.parent() is win
         assert win._analysis_transfer_line.isHidden() is True
@@ -557,9 +593,14 @@ def test_stereo_page_controller_x_b_route_to_stereo_capture(monkeypatch, tmp_pat
         assert stereo_actions == ["pair", "record"]
         assert camera_actions == ["snapshot", "record"]
 
+        before_size = win.size()
+        before_video_rect = win._pilot_video_host.geometry()
         key_event = QKeyEvent(QEvent.Type.KeyPress, Qt.Key.Key_R, Qt.KeyboardModifier.NoModifier, "r")
-        win.eventFilter(win, key_event)
+        assert win.eventFilter(win, key_event) is True
+        app.processEvents()
         assert win._capture_route_mode == "stereo"
+        assert win.size() == before_size
+        assert win._pilot_video_host.geometry() == before_video_rect
         assert "Stereo pairs" in win.pilot_telemetry_column.capture_mode_text.text()
         assert win.pilot_telemetry_column.capture_activity_text.text() == "STEREO READY"
 
@@ -571,6 +612,17 @@ def test_stereo_page_controller_x_b_route_to_stereo_capture(monkeypatch, tmp_pat
 
         assert stereo_actions == ["pair", "record", "pair", "record"]
         assert camera_actions == ["snapshot", "record"]
+
+        focused_combo = QComboBox(win)
+        focused_combo.addItems(["Camera", "Reverse"])
+        focused_combo.setCurrentIndex(0)
+        focused_combo.show()
+        focused_combo.setFocus()
+        app.processEvents()
+        combo_key_event = QKeyEvent(QEvent.Type.KeyPress, Qt.Key.Key_R, Qt.KeyboardModifier.NoModifier, "r")
+        assert win.eventFilter(focused_combo, combo_key_event) is True
+        assert win._capture_route_mode == "camera"
+        assert focused_combo.currentIndex() == 0
     finally:
         win.close()
         app.processEvents()

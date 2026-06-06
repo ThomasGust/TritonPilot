@@ -1,0 +1,48 @@
+----------------------------------------
+Exception occurred during processing of request from ('10.77.0.2', 58479)
+Traceback (most recent call last):
+  File "C:\Users\TritonRobotics\AppData\Local\Programs\Python\Python311\Lib\socketserver.py", line 691, in process_request_thread
+    self.finish_request(request, client_address)
+  File "C:\Users\TritonRobotics\AppData\Local\Programs\Python\Python311\Lib\socketserver.py", line 361, in finish_request
+    self.RequestHandlerClass(request, client_address, self)
+  File "C:\Users\TritonRobotics\AppData\Local\Programs\Python\Python311\Lib\socketserver.py", line 755, in __init__
+    self.handle()
+  File "C:\Users\TritonRobotics\AppData\Local\Programs\Python\Python311\Lib\http\server.py", line 436, in handle
+    self.handle_one_request()
+  File "C:\Users\TritonRobotics\AppData\Local\Programs\Python\Python311\Lib\http\server.py", line 424, in handle_one_request
+    method()
+  File "C:\Users\TritonRobotics\Documents\GitHub\TritonPilot\tools\analysis_transfer_server.py", line 289, in do_GET
+    self._send_file(parsed.path[len("/files/") :])
+  File "C:\Users\TritonRobotics\Documents\GitHub\TritonPilot\tools\analysis_transfer_server.py", line 345, in _send_file
+    self.wfile.write(chunk)
+  File "C:\Users\TritonRobotics\AppData\Local\Programs\Python\Python311\Lib\socketserver.py", line 834, in write
+    self._sock.sendall(b)
+ConnectionResetError: [WinError 10054] An existing connection was forcibly closed by the remote host
+----------------------------------------
+----------------------------------------
+Exception occurred during processing of request from ('10.77.0.2', 62665)
+Traceback (most recent call last):
+  File "C:\Users\TritonRobotics\AppData\Local\Programs\Python\Python311\Lib\socketserver.py", line 691, in process_request_thread
+    self.finish_request(request, client_address)
+  File "C:\Users\TritonRobotics\AppData\Local\Programs\Python\Python311\Lib\socketserver.py", line 361, in finish_request
+    self.RequestHandlerClass(request, client_address, self)
+  File "C:\Users\TritonRobotics\AppData\Local\Programs\Python\Python311\Lib\socketserver.py", line 755, in __init__
+    self.handle()
+  File "C:\Users\TritonRobotics\AppData\Local\Programs\Python\Python311\Lib\http\server.py", line 436, in handle
+    self.handle_one_request()
+  File "C:\Users\TritonRobotics\AppData\Local\Programs\Python\Python311\Lib\http\server.py", line 424, in handle_one_request
+    method()
+  File "C:\Users\TritonRobotics\Documents\GitHub\TritonPilot\tools\analysis_transfer_server.py", line 286, in do_GET
+    self._send_events(parsed)
+  File "C:\Users\TritonRobotics\Documents\GitHub\TritonPilot\tools\analysis_transfer_server.py", line 304, in _send_events
+    self._send_json(self.transfer_server.wait_for_change(since_event_id=since, timeout_s=timeout_s))
+  File "C:\Users\TritonRobotics\Documents\GitHub\TritonPilot\tools\analysis_transfer_server.py", line 312, in _send_json
+    self.end_headers()
+  File "C:\Users\TritonRobotics\AppData\Local\Programs\Python\Python311\Lib\http\server.py", line 538, in end_headers
+    self.flush_headers()
+  File "C:\Users\TritonRobotics\AppData\Local\Programs\Python\Python311\Lib\http\server.py", line 542, in flush_headers
+    self.wfile.write(b"".join(self._headers_buffer))
+  File "C:\Users\TritonRobotics\AppData\Local\Programs\Python\Python311\Lib\socketserver.py", line 834, in write
+    self._sock.sendall(b)
+ConnectionResetError: [WinError 10054] An existing connection was forcibly closed by the remote host
+----------------------------------------

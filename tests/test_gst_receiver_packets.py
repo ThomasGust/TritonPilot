@@ -88,3 +88,22 @@ def test_receiver_pipeline_uses_configured_udp_buffer_and_jitter(monkeypatch):
     assert "buffer-size=1234567" in cmd
     assert "latency=60" in cmd
     assert "drop-on-latency=false" in cmd
+
+
+def test_receiver_read_exact_handles_short_pipe_reads(monkeypatch):
+    receiver = _receiver(monkeypatch)
+
+    class _ChunkedStream:
+        def __init__(self):
+            self.chunks = [b"ab", b"c", b"def"]
+
+        def readinto(self, view):
+            if not self.chunks:
+                return 0
+            chunk = self.chunks.pop(0)
+            view[: len(chunk)] = chunk
+            return len(chunk)
+
+    data = receiver._read_exact(_ChunkedStream(), 6)
+
+    assert data == b"abcdef"

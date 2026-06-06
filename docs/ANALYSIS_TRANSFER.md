@@ -71,6 +71,11 @@ shows:
 Analysis Share: ON http://10.77.0.1:8765 | recordings | 12 files/840.0 MB | last pull 3s
 ```
 
+When `TRITON_PILOT_TRANSFER_ADVERTISE_HOST` is not set, the app advertises the
+best assigned local IPv4 address it can find. A configured `10.77.0.1` analysis
+link is preferred; otherwise the displayed URL may use the active tether or
+Wi-Fi address. Use the URL shown in the Pilot app on the TritonAnalysis side.
+
 While TritonAnalysis is downloading a file, the final field changes to a
 `sending ...` message. After a file finishes, it briefly shows the last sent
 filename and byte count before returning to the normal last-pull age.
@@ -84,7 +89,7 @@ Useful environment overrides:
 ```powershell
 $env:TRITON_PILOT_TRANSFER_AUTOSTART="0"
 $env:TRITON_PILOT_TRANSFER_HOST="0.0.0.0"
-$env:TRITON_PILOT_TRANSFER_ADVERTISE_HOST="10.77.0.1"
+$env:TRITON_PILOT_TRANSFER_ADVERTISE_HOST="10.77.0.1"  # optional: force displayed URL
 $env:TRITON_PILOT_TRANSFER_PORT="8765"
 $env:TRITON_PILOT_TRANSFER_ROOT="C:\TritonRecordings"
 $env:TRITON_PILOT_TRANSFER_STABLE_SECONDS="0.75"
