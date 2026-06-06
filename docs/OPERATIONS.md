@@ -49,9 +49,13 @@ Default controls include:
 - Keyboard `R` toggles reverse drive.
 - Keyboard `L` sends the lights edge.
 - Keyboard `O` sends the arm/disarm edge.
-- `Y` and `A` adjust the main pilot max gain.
-- `[` and `]` adjust the T200 wrist gain.
-- `W`, `S`, `A`, and `D` provide keyboard backup manipulator controls.
+- `Y`/`A` on the controller and keyboard `+`/`-` adjust the main ROV motion gain.
+- Keyboard `1`/`2` adjust the back rotating gripper gain.
+- Keyboard `6`/`7` adjust the arm gain.
+- `W`, `S`, `A`, and `D` provide trigger-like keyboard backup manipulator controls.
+
+The pilot-side telemetry column shows three live gain indicators: `BACK`,
+`ROV`, and `ARM`.
 
 Controller mappings can vary by operating system and driver. Use
 `tools/controller_probe.py` when the observed behavior does not match the

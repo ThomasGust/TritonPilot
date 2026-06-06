@@ -91,6 +91,14 @@ class PilotPublisherService:
 
         # --- modes / toggles ----------------------------------------------
         from config import (
+            ARM_GAIN_DEFAULT,
+            ARM_GAIN_MAX,
+            ARM_GAIN_MIN,
+            ARM_GAIN_STEP,
+            BACK_GRIPPER_GAIN_DEFAULT,
+            BACK_GRIPPER_GAIN_MAX,
+            BACK_GRIPPER_GAIN_MIN,
+            BACK_GRIPPER_GAIN_STEP,
             DEPTH_HOLD_TOGGLE_BUTTON,
             DEPTH_HOLD_DEFAULT,
             LIGHTS_TOGGLE_BUTTON,
@@ -103,10 +111,6 @@ class PilotPublisherService:
             REVERSE_TOGGLE_BUTTON,
             ROLL_PITCH_LEVEL_DEFAULT,
             ROLL_PITCH_LEVEL_TOGGLE_BUTTON,
-            T200_WRIST_GAIN_DEFAULT,
-            T200_WRIST_GAIN_MIN,
-            T200_WRIST_GAIN_MAX,
-            T200_WRIST_GAIN_STEP,
             YAW_HOLD_DEFAULT,
             YAW_HOLD_TOGGLE_BUTTON,
         )
@@ -129,14 +133,24 @@ class PilotPublisherService:
         self._max_gain_step = max(0.0, float(PILOT_MAX_GAIN_STEP))
         self._max_gain = max(self._max_gain_min, min(self._max_gain_max, float(PILOT_MAX_GAIN_DEFAULT)))
 
-        self._t200_wrist_gain_min = float(T200_WRIST_GAIN_MIN)
-        self._t200_wrist_gain_max = float(T200_WRIST_GAIN_MAX)
-        if self._t200_wrist_gain_max < self._t200_wrist_gain_min:
-            self._t200_wrist_gain_min, self._t200_wrist_gain_max = self._t200_wrist_gain_max, self._t200_wrist_gain_min
-        self._t200_wrist_gain_step = max(0.0, float(T200_WRIST_GAIN_STEP))
-        self._t200_wrist_gain = max(
-            self._t200_wrist_gain_min,
-            min(self._t200_wrist_gain_max, float(T200_WRIST_GAIN_DEFAULT)),
+        self._back_gripper_gain_min = float(BACK_GRIPPER_GAIN_MIN)
+        self._back_gripper_gain_max = float(BACK_GRIPPER_GAIN_MAX)
+        if self._back_gripper_gain_max < self._back_gripper_gain_min:
+            self._back_gripper_gain_min, self._back_gripper_gain_max = self._back_gripper_gain_max, self._back_gripper_gain_min
+        self._back_gripper_gain_step = max(0.0, float(BACK_GRIPPER_GAIN_STEP))
+        self._back_gripper_gain = max(
+            self._back_gripper_gain_min,
+            min(self._back_gripper_gain_max, float(BACK_GRIPPER_GAIN_DEFAULT)),
+        )
+
+        self._arm_gain_min = float(ARM_GAIN_MIN)
+        self._arm_gain_max = float(ARM_GAIN_MAX)
+        if self._arm_gain_max < self._arm_gain_min:
+            self._arm_gain_min, self._arm_gain_max = self._arm_gain_max, self._arm_gain_min
+        self._arm_gain_step = max(0.0, float(ARM_GAIN_STEP))
+        self._arm_gain = max(
+            self._arm_gain_min,
+            min(self._arm_gain_max, float(ARM_GAIN_DEFAULT)),
         )
 
         self._modes = {
@@ -152,7 +166,10 @@ class PilotPublisherService:
                 "yaw": "hold" if bool(YAW_HOLD_DEFAULT) else "off",
                 "targets": {},
             },
-            "t200_wrist_gain": float(self._t200_wrist_gain),
+            "back_gripper_gain": float(self._back_gripper_gain),
+            # Compatibility alias for older TritonOS builds and recordings.
+            "t200_wrist_gain": float(self._back_gripper_gain),
+            "arm_gain": float(self._arm_gain),
         }
         self._prev_buttons: Optional[PilotButtons] = None
 
@@ -205,8 +222,21 @@ class PilotPublisherService:
             self._modes["max_gain"] = float(self._max_gain)
         return changed
 
-    def _adjust_t200_wrist_gain(self, delta: float) -> bool:
-        """Adjust the pilot-side T200 wrist gain cap."""
+    def current_max_gain(self) -> float:
+        with self._mode_lock:
+            return float(self._max_gain)
+
+    def max_gain_step(self) -> float:
+        return float(self._max_gain_step)
+
+    def adjust_max_gain(self, delta: float) -> bool:
+        changed = self._adjust_max_gain(delta)
+        if changed:
+            self._emit_status(self._status_payload(controller="connected"))
+        return changed
+
+    def _adjust_back_gripper_gain(self, delta: float) -> bool:
+        """Adjust the pilot-side back rotating gripper gain cap."""
         try:
             step = float(delta)
         except Exception:
@@ -214,24 +244,68 @@ class PilotPublisherService:
         if step == 0.0:
             return False
         with self._mode_lock:
-            prev = float(self._t200_wrist_gain)
+            prev = float(self._back_gripper_gain)
             new_val = prev + step
-            new_val = max(float(self._t200_wrist_gain_min), min(float(self._t200_wrist_gain_max), float(new_val)))
+            new_val = max(float(self._back_gripper_gain_min), min(float(self._back_gripper_gain_max), float(new_val)))
             new_val = round(new_val, 2)
             changed = abs(new_val - prev) > 1e-9
-            self._t200_wrist_gain = float(new_val)
-            self._modes["t200_wrist_gain"] = float(self._t200_wrist_gain)
+            self._back_gripper_gain = float(new_val)
+            self._modes["back_gripper_gain"] = float(self._back_gripper_gain)
+            self._modes["t200_wrist_gain"] = float(self._back_gripper_gain)
+        return changed
+
+    def current_back_gripper_gain(self) -> float:
+        with self._mode_lock:
+            return float(self._back_gripper_gain)
+
+    def back_gripper_gain_step(self) -> float:
+        return float(self._back_gripper_gain_step)
+
+    def adjust_back_gripper_gain(self, delta: float) -> bool:
+        changed = self._adjust_back_gripper_gain(delta)
+        if changed:
+            self._emit_status(self._status_payload(controller="connected"))
         return changed
 
     def current_t200_wrist_gain(self) -> float:
-        with self._mode_lock:
-            return float(self._t200_wrist_gain)
+        return self.current_back_gripper_gain()
 
     def t200_wrist_gain_step(self) -> float:
-        return float(self._t200_wrist_gain_step)
+        return self.back_gripper_gain_step()
 
     def adjust_t200_wrist_gain(self, delta: float) -> bool:
-        changed = self._adjust_t200_wrist_gain(delta)
+        changed = self._adjust_back_gripper_gain(delta)
+        if changed:
+            self._emit_status(self._status_payload(controller="connected"))
+        return changed
+
+    def _adjust_arm_gain(self, delta: float) -> bool:
+        """Adjust the pilot-side arm/gripper-head gain cap."""
+        try:
+            step = float(delta)
+        except Exception:
+            step = 0.0
+        if step == 0.0:
+            return False
+        with self._mode_lock:
+            prev = float(self._arm_gain)
+            new_val = prev + step
+            new_val = max(float(self._arm_gain_min), min(float(self._arm_gain_max), float(new_val)))
+            new_val = round(new_val, 2)
+            changed = abs(new_val - prev) > 1e-9
+            self._arm_gain = float(new_val)
+            self._modes["arm_gain"] = float(self._arm_gain)
+        return changed
+
+    def current_arm_gain(self) -> float:
+        with self._mode_lock:
+            return float(self._arm_gain)
+
+    def arm_gain_step(self) -> float:
+        return float(self._arm_gain_step)
+
+    def adjust_arm_gain(self, delta: float) -> bool:
+        changed = self._adjust_arm_gain(delta)
         if changed:
             self._emit_status(self._status_payload(controller="connected"))
         return changed

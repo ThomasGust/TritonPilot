@@ -164,14 +164,29 @@ $env:TRITON_PILOT_MAX_GAIN_MAX="1.0"
 $env:TRITON_PILOT_MAX_GAIN_STEP="0.05"
 ```
 
-T200 wrist gain:
+Back rotating gripper gain:
 
 ```powershell
-$env:TRITON_T200_WRIST_GAIN_DEFAULT="0.50"
-$env:TRITON_T200_WRIST_GAIN_MIN="0.10"
-$env:TRITON_T200_WRIST_GAIN_MAX="1.0"
-$env:TRITON_T200_WRIST_GAIN_STEP="0.05"
+$env:TRITON_BACK_GRIPPER_GAIN_DEFAULT="0.50"
+$env:TRITON_BACK_GRIPPER_GAIN_MIN="0.10"
+$env:TRITON_BACK_GRIPPER_GAIN_MAX="1.0"
+$env:TRITON_BACK_GRIPPER_GAIN_STEP="0.05"
 ```
+
+The older `TRITON_T200_WRIST_GAIN_*` names are still accepted as fallbacks.
+
+Keyboard arm gain:
+
+```powershell
+$env:TRITON_ARM_GAIN_DEFAULT="0.50"
+$env:TRITON_ARM_GAIN_MIN="0.10"
+$env:TRITON_ARM_GAIN_MAX="1.0"
+$env:TRITON_ARM_GAIN_STEP="0.05"
+$env:TRITON_ARM_KEYBOARD_RAMP_RATE="0.35"
+```
+
+`TRITON_ARM_KEYBOARD_RAMP_RATE` controls how quickly WASD walks the arm target
+while a key is held, in normalized command units per second at 100% ARM gain.
 
 These values are transmitted in `PilotFrame.modes`. TritonOS decides how they
 map to actuator output.

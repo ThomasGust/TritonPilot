@@ -299,14 +299,70 @@ class AttitudeIndicatorWidget(QWidget):
         p.drawLine(int(center_x), int(tape.top() + 3), int(center_x), int(tape.bottom() - 3))
 
 
+class GainPillarWidget(QWidget):
+    """Small vertical fill indicator for pilot-adjustable gains."""
+
+    def __init__(self, label: str, value: float = 1.0, parent=None):
+        super().__init__(parent)
+        self.label = str(label or "-").upper()
+        self.value = 0.0
+        self.setMinimumSize(54, 104)
+        self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        self.set_gain(value)
+
+    def set_gain(self, value) -> None:
+        numeric = _finite_float(value)
+        if numeric is None:
+            numeric = 0.0
+        self.value = max(0.0, min(1.0, float(numeric)))
+        pct = int(round(self.value * 100.0))
+        self.setToolTip(f"{self.label} gain: {pct}%")
+        self.update()
+
+    @staticmethod
+    def _fill_color(frac: float) -> QColor:
+        frac = max(0.0, min(1.0, float(frac)))
+        if frac < 0.34:
+            return QColor(210, 82, 76)
+        if frac < 0.67:
+            return QColor(226, 170, 72)
+        return QColor(93, 190, 122)
+
+    def paintEvent(self, _event):  # noqa: N802
+        p = QPainter(self)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        r = self.rect().adjusted(3, 3, -3, -3)
+        tube = QRectF(r.left() + r.width() * 0.28, r.top(), r.width() * 0.44, max(36.0, r.height() - 36.0))
+
+        p.setPen(QPen(QColor(58, 62, 76), 1))
+        p.setBrush(QColor(12, 13, 18))
+        p.drawRoundedRect(tube, 5.0, 5.0)
+
+        fill_h = tube.height() * self.value
+        if fill_h > 1.0:
+            fill = QRectF(tube.left() + 2, tube.bottom() - fill_h + 2, tube.width() - 4, max(0.0, fill_h - 4))
+            p.setPen(Qt.PenStyle.NoPen)
+            p.setBrush(self._fill_color(self.value))
+            p.drawRoundedRect(fill, 4.0, 4.0)
+
+        p.setPen(QColor(230, 234, 246))
+        pct = int(round(self.value * 100.0))
+        text = f"{self.label}\n{pct}%"
+        p.drawText(
+            QRectF(r.left(), tube.bottom() + 2, r.width(), max(28.0, r.bottom() - tube.bottom())),
+            Qt.AlignmentFlag.AlignCenter,
+            text,
+        )
+
+
 class PilotTelemetryColumn(QWidget):
     """Right-side pilot instruments kept compact enough for quad video."""
 
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setObjectName("pilotTelemetryColumn")
-        self.setMinimumWidth(210)
-        self.setMaximumWidth(245)
+        self.setMinimumWidth(220)
+        self.setMaximumWidth(260)
         self.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Expanding)
 
         self.attitude_card = _Card("Attitude")
@@ -325,6 +381,18 @@ class PilotTelemetryColumn(QWidget):
         self.depth_text.setWordWrap(True)
         self.depth_card.body.addWidget(self.depth_gauge)
         self.depth_card.body.addWidget(self.depth_text)
+
+        self.gain_card = _Card("Gains")
+        gain_row = QHBoxLayout()
+        gain_row.setContentsMargins(0, 0, 0, 0)
+        gain_row.setSpacing(4)
+        self.back_gain_indicator = GainPillarWidget("BACK", 0.50)
+        self.rov_gain_indicator = GainPillarWidget("ROV", 1.0)
+        self.arm_gain_indicator = GainPillarWidget("ARM", 0.50)
+        gain_row.addWidget(self.back_gain_indicator, 1)
+        gain_row.addWidget(self.rov_gain_indicator, 1)
+        gain_row.addWidget(self.arm_gain_indicator, 1)
+        self.gain_card.body.addLayout(gain_row)
 
         self.analysis_card = _Card("Capture / Analysis")
         self.capture_mode_text = QLabel("Capture: Camera  |  R toggles")
@@ -354,6 +422,7 @@ class PilotTelemetryColumn(QWidget):
         layout.setSpacing(4)
         layout.addWidget(self.attitude_card, 0)
         layout.addWidget(self.depth_card, 0)
+        layout.addWidget(self.gain_card, 0)
         layout.addWidget(self.analysis_card, 1)
 
     def update_from_sensor(self, msg: dict) -> None:
@@ -399,6 +468,14 @@ class PilotTelemetryColumn(QWidget):
             self.analysis_text.setStyleSheet("color: #ffe6ae; font-weight: 700;")
         else:
             self.analysis_text.setStyleSheet("color: #f0f4ff; font-weight: 600;")
+
+    def set_gains(self, *, back=None, rov=None, arm=None) -> None:
+        if back is not None:
+            self.back_gain_indicator.set_gain(back)
+        if rov is not None:
+            self.rov_gain_indicator.set_gain(rov)
+        if arm is not None:
+            self.arm_gain_indicator.set_gain(arm)
 
     def set_capture_mode(self, mode: str) -> None:
         mode_key = str(mode or "camera").strip().lower()

@@ -152,6 +152,6 @@ manipulator commands. The ROV-side TritonOS service remains responsible for
 arming checks, command freshness, output limits, and hardware safety, but the
 pilot computer is still part of the live control chain.
 
-Before water tests, verify the controller mapping, gain setting, telemetry
-freshness, video orientation, and save location. During bench tests, keep the
+Before water tests, verify the controller mapping, BACK/ROV/ARM gain settings,
+telemetry freshness, video orientation, and save location. During bench tests, keep the
 vehicle secured and remove props whenever thrusters may spin unexpectedly.

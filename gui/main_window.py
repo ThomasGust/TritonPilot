@@ -56,6 +56,7 @@ from config import (
     LIGHTS_TOGGLE_SHORTCUT,
     REVERSE_TOGGLE_BUTTON,
     REVERSE_TOGGLE_SHORTCUT,
+    ARM_KEYBOARD_RAMP_RATE,
 )
 
 from input.pilot_service import PilotPublisherService
@@ -710,7 +711,8 @@ class MainWindow(QMainWindow):
         # 1) pilot publisher (xbox -> ROV)
         # These keyboard controls drive the two-axis servo wrist. We keep the
         # legacy wire keys ("gripper_pitch"/"gripper_yaw") for compatibility
-        # with the ROV-side controller until that side is renamed too.
+        # with the ROV-side controller until that side is renamed too. The keys
+        # behave like discrete triggers: held = command, released = neutral.
         self._servo_wrist_keys_down: set[str] = set()
         self._servo_wrist_keymap = {
             Qt.Key.Key_W: ("gripper_yaw", +1.0, "W"),
@@ -720,12 +722,23 @@ class MainWindow(QMainWindow):
         }
         self._servo_wrist_pitch = 0.0
         self._servo_wrist_yaw = 0.0
-        self._servo_wrist_ramp_rate = 1.25
-        self._servo_wrist_release_rate = 2.0
         self._servo_wrist_last_update = time.monotonic()
-        self._t200_wrist_gain_shortcuts = {
+        self._servo_wrist_ramp_rate = max(0.01, float(ARM_KEYBOARD_RAMP_RATE))
+        self._back_gripper_gain_shortcuts = {
+            Qt.Key.Key_1: -1.0,
+            Qt.Key.Key_2: +1.0,
             Qt.Key.Key_BracketLeft: -1.0,
             Qt.Key.Key_BracketRight: +1.0,
+        }
+        self._arm_gain_shortcuts = {
+            Qt.Key.Key_6: -1.0,
+            Qt.Key.Key_7: +1.0,
+        }
+        self._rov_gain_shortcuts = {
+            Qt.Key.Key_Minus: -1.0,
+            Qt.Key.Key_Underscore: -1.0,
+            Qt.Key.Key_Plus: +1.0,
+            Qt.Key.Key_Equal: +1.0,
         }
         self._lights_toggle_shortcut_text = str(LIGHTS_TOGGLE_SHORTCUT or "L").strip() or "L"
         self._lights_toggle_edge = str(LIGHTS_TOGGLE_EDGE or "lights").strip().lower() or "lights"
@@ -760,6 +773,10 @@ class MainWindow(QMainWindow):
         self.instrument_panel = InstrumentPanel()
         self.pilot_telemetry_column = PilotTelemetryColumn()
         self.pilot_telemetry_column.set_capture_mode(self._capture_route_mode)
+        try:
+            self._refresh_gain_indicators_from_modes(self.pilot_svc.current_modes())
+        except Exception:
+            pass
         self.hold_test_panel = HoldTestPanel(pilot_svc=self.pilot_svc, endpoint=MANAGEMENT_RPC_ENDPOINT)
         self.raw_sensor_page = RawSensorPage(
             recording_session_provider=lambda: self._make_recording_session_dir()[0]
@@ -952,21 +969,20 @@ class MainWindow(QMainWindow):
 
 
     def _servo_wrist_keyboard_targets(self) -> tuple[float, float]:
-        # Latch the keyboard-commanded servo wrist position when no key is held,
-        # so releasing W/A/S/D keeps the wrist where it is instead of
-        # springing back toward center. Holding a key again continues ramping
-        # from the current commanded value.
-        pitch = self._servo_wrist_pitch
-        yaw = self._servo_wrist_yaw
+        # Trigger-like semantics for a position-controlled servo pair: a held
+        # key contributes direction/speed; release stops commanding movement
+        # while the ROV-side gripper hold keeps the physical pose.
+        pitch_dir = 0.0
+        yaw_dir = 0.0
         if "D" in self._servo_wrist_keys_down and "A" not in self._servo_wrist_keys_down:
-            pitch = 1.0
+            pitch_dir = 1.0
         elif "A" in self._servo_wrist_keys_down and "D" not in self._servo_wrist_keys_down:
-            pitch = -1.0
+            pitch_dir = -1.0
         if "W" in self._servo_wrist_keys_down and "S" not in self._servo_wrist_keys_down:
-            yaw = 1.0
+            yaw_dir = 1.0
         elif "S" in self._servo_wrist_keys_down and "W" not in self._servo_wrist_keys_down:
-            yaw = -1.0
-        return pitch, yaw
+            yaw_dir = -1.0
+        return pitch_dir, yaw_dir
 
     @staticmethod
     def _approach_axis(current: float, target: float, max_step: float) -> float:
@@ -977,38 +993,104 @@ class MainWindow(QMainWindow):
         return current
 
     def _update_servo_wrist_keyboard_axes(self) -> None:
-        target_pitch, target_yaw = self._servo_wrist_keyboard_targets()
+        pitch_dir, yaw_dir = self._servo_wrist_keyboard_targets()
         now = time.monotonic()
         dt = max(0.0, min(0.1, now - self._servo_wrist_last_update))
         self._servo_wrist_last_update = now
 
-        pitch_rate = self._servo_wrist_ramp_rate if abs(target_pitch) > abs(self._servo_wrist_pitch) else self._servo_wrist_release_rate
-        yaw_rate = self._servo_wrist_ramp_rate if abs(target_yaw) > abs(self._servo_wrist_yaw) else self._servo_wrist_release_rate
+        try:
+            arm_gain = float(self.pilot_svc.current_arm_gain())
+        except Exception:
+            arm_gain = 1.0
+        arm_gain = max(0.0, min(1.0, arm_gain))
+        step = float(self._servo_wrist_ramp_rate) * arm_gain * dt
 
-        self._servo_wrist_pitch = self._approach_axis(self._servo_wrist_pitch, target_pitch, pitch_rate * dt)
-        self._servo_wrist_yaw = self._approach_axis(self._servo_wrist_yaw, target_yaw, yaw_rate * dt)
+        if pitch_dir != 0.0 and step > 0.0:
+            self._servo_wrist_pitch = self._approach_axis(
+                self._servo_wrist_pitch,
+                float(pitch_dir),
+                step,
+            )
+        if yaw_dir != 0.0 and step > 0.0:
+            self._servo_wrist_yaw = self._approach_axis(
+                self._servo_wrist_yaw,
+                float(yaw_dir),
+                step,
+            )
+
+        pitch_cmd = self._servo_wrist_pitch if pitch_dir != 0.0 else 0.0
+        yaw_cmd = self._servo_wrist_yaw if yaw_dir != 0.0 else 0.0
 
         try:
-            self.pilot_svc.set_aux_axis("gripper_pitch", self._servo_wrist_pitch)
-            self.pilot_svc.set_aux_axis("gripper_yaw", self._servo_wrist_yaw)
+            self.pilot_svc.set_aux_axis("gripper_pitch", pitch_cmd)
+            self.pilot_svc.set_aux_axis("gripper_yaw", yaw_cmd)
         except Exception:
             pass
 
-    def _adjust_t200_wrist_gain_from_keyboard(self, direction: float) -> None:
+    def _refresh_gain_indicators_from_modes(self, modes: dict) -> None:
+        column = getattr(self, "pilot_telemetry_column", None)
+        if column is None:
+            return
         try:
-            step = float(self.pilot_svc.t200_wrist_gain_step()) * float(direction)
+            column.set_gains(
+                back=(modes or {}).get("back_gripper_gain", (modes or {}).get("t200_wrist_gain")),
+                rov=(modes or {}).get("max_gain"),
+                arm=(modes or {}).get("arm_gain"),
+            )
+        except Exception:
+            pass
+
+    def _adjust_back_gripper_gain_from_keyboard(self, direction: float) -> None:
+        try:
+            step = float(self.pilot_svc.back_gripper_gain_step()) * float(direction)
         except Exception:
             step = 0.0
         if step == 0.0:
             return
         try:
-            changed = bool(self.pilot_svc.adjust_t200_wrist_gain(step))
-            gain = float(self.pilot_svc.current_t200_wrist_gain())
+            changed = bool(self.pilot_svc.adjust_back_gripper_gain(step))
+            gain = float(self.pilot_svc.current_back_gripper_gain())
         except Exception:
             return
         if changed:
             pct = int(round(max(0.0, min(1.0, gain)) * 100.0))
-            self.statusBar().showMessage(f"T200 wrist gain: {pct}%  |  keys: [ / ]", 3000)
+            self._refresh_gain_indicators_from_modes(self.pilot_svc.current_modes())
+            self.statusBar().showMessage(f"Back gripper gain: {pct}%  |  keys: 1 / 2", 3000)
+
+    def _adjust_arm_gain_from_keyboard(self, direction: float) -> None:
+        try:
+            step = float(self.pilot_svc.arm_gain_step()) * float(direction)
+        except Exception:
+            step = 0.0
+        if step == 0.0:
+            return
+        try:
+            changed = bool(self.pilot_svc.adjust_arm_gain(step))
+            gain = float(self.pilot_svc.current_arm_gain())
+        except Exception:
+            return
+        if changed:
+            pct = int(round(max(0.0, min(1.0, gain)) * 100.0))
+            self._refresh_gain_indicators_from_modes(self.pilot_svc.current_modes())
+            self.statusBar().showMessage(f"Arm gain: {pct}%  |  keys: 6 / 7", 3000)
+
+    def _adjust_rov_gain_from_keyboard(self, direction: float) -> None:
+        try:
+            step = float(self.pilot_svc.max_gain_step()) * float(direction)
+        except Exception:
+            step = 0.0
+        if step == 0.0:
+            return
+        try:
+            changed = bool(self.pilot_svc.adjust_max_gain(step))
+            gain = float(self.pilot_svc.current_max_gain())
+        except Exception:
+            return
+        if changed:
+            pct = int(round(max(0.0, min(1.0, gain)) * 100.0))
+            self._refresh_gain_indicators_from_modes(self.pilot_svc.current_modes())
+            self._set_status(self._gain_lbl, f"Max Gain: {pct}%")
+            self.statusBar().showMessage(f"ROV motion gain: {pct}%  |  keys: - / +", 3000)
 
     def _toggle_lights_from_keyboard(self) -> None:
         try:
@@ -1138,9 +1220,23 @@ class MainWindow(QMainWindow):
                     if event.text().upper() == shortcut_text:
                         self._toggle_lights_from_keyboard()
                         return False
-                    direction = self._t200_wrist_gain_shortcuts.get(event.key())
+                    direction = self._back_gripper_gain_shortcuts.get(event.key())
                     if direction is not None:
-                        self._adjust_t200_wrist_gain_from_keyboard(direction)
+                        self._adjust_back_gripper_gain_from_keyboard(direction)
+                        return False
+                    direction = self._arm_gain_shortcuts.get(event.key())
+                    if direction is not None:
+                        self._adjust_arm_gain_from_keyboard(direction)
+                        return False
+                    direction = self._rov_gain_shortcuts.get(event.key())
+                    if direction is not None:
+                        text = str(event.text() or "")
+                        if direction > 0 and text not in ("", "+"):
+                            return False
+                        if direction < 0 and text not in ("", "-"):
+                            return False
+                        self._adjust_rov_gain_from_keyboard(direction)
+                        return False
                     return False
         except Exception:
             pass
@@ -1317,6 +1413,7 @@ class MainWindow(QMainWindow):
                     self._set_status(self._gain_lbl, f"Max Gain: {pct}%")
             except Exception:
                 pass
+            self._refresh_gain_indicators_from_modes(modes)
 
             self._depth_hold_status_text = self._format_depth_hold_status(msg or {}, dh)
             self._attitude_hold_status_text = "RP Level: ON" if rp_level else "RP Level: OFF"
@@ -1340,6 +1437,7 @@ class MainWindow(QMainWindow):
                 self._attitude_hold_status_text = "RP Level: ON" if bool((status or {}).get("roll_pitch_level")) else "RP Level: OFF"
             if "yaw_hold" in (status or {}):
                 self._yaw_hold_status_text = "Yaw Hold: ON" if bool((status or {}).get("yaw_hold")) else "Yaw Hold: OFF"
+            self._refresh_gain_indicators_from_modes(status or {})
         except Exception:
             pass
         self._sync_reverse_action()

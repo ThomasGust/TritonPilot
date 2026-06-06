@@ -189,11 +189,29 @@ def test_t200_wrist_gain_is_exposed_in_modes(monkeypatch):
     monkeypatch.setattr("input.pilot_service.time.sleep", lambda *_args, **_kwargs: None)
 
     svc = PilotPublisherService(endpoint="inproc://t200_gain_test", rate_hz=30.0, deadzone=0.0, debug=False)
-    start_gain = svc.current_t200_wrist_gain()
+    start_gain = svc.current_back_gripper_gain()
 
+    assert "back_gripper_gain" in svc.current_modes()
     assert "t200_wrist_gain" in svc.current_modes()
-    assert svc.adjust_t200_wrist_gain(-svc.t200_wrist_gain_step()) is True
-    assert svc.current_t200_wrist_gain() < start_gain
+    assert svc.adjust_back_gripper_gain(-svc.back_gripper_gain_step()) is True
+    assert svc.current_back_gripper_gain() < start_gain
+    assert svc.current_t200_wrist_gain() == svc.current_back_gripper_gain()
+    assert svc.current_modes()["t200_wrist_gain"] == svc.current_modes()["back_gripper_gain"]
+
+
+def test_arm_and_max_gains_are_exposed_in_modes(monkeypatch):
+    monkeypatch.setattr("input.pilot_service.time.sleep", lambda *_args, **_kwargs: None)
+
+    svc = PilotPublisherService(endpoint="inproc://arm_gain_test", rate_hz=30.0, deadzone=0.0, debug=False)
+    start_arm = svc.current_arm_gain()
+    start_max = svc.current_max_gain()
+
+    assert "arm_gain" in svc.current_modes()
+    assert "max_gain" in svc.current_modes()
+    assert svc.adjust_arm_gain(-svc.arm_gain_step()) is True
+    assert svc.current_arm_gain() < start_arm
+    assert svc.adjust_max_gain(-svc.max_gain_step()) is True
+    assert svc.current_max_gain() < start_max
 
 
 def test_hold_modes_are_exposed_and_toggleable(monkeypatch):

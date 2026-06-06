@@ -51,3 +51,20 @@ def test_pilot_telemetry_column_shows_stereo_capture_activity(monkeypatch):
         column.close()
         column.deleteLater()
         app.processEvents()
+
+
+def test_pilot_telemetry_column_updates_gain_indicators():
+    app = _app()
+    column = PilotTelemetryColumn()
+    column.show()
+    try:
+        app.processEvents()
+        column.set_gains(back=0.25, rov=0.8, arm=0.45)
+        assert column.back_gain_indicator.value == pytest.approx(0.25)
+        assert column.rov_gain_indicator.value == pytest.approx(0.8)
+        assert column.arm_gain_indicator.value == pytest.approx(0.45)
+        assert "25%" in column.back_gain_indicator.toolTip()
+    finally:
+        column.close()
+        column.deleteLater()
+        app.processEvents()

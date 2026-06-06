@@ -36,6 +36,9 @@ class _FakePilotService:
         self.axis_target_calls = []
         self.aux_axis_calls = []
         self.aux_axes = {}
+        self.max_gain = 1.0
+        self.back_gripper_gain = 0.5
+        self.arm_gain = 0.5
 
     def start(self):
         return None
@@ -66,14 +69,56 @@ class _FakePilotService:
         self.axis_target_calls.append((axis, float(target_deg), mode))
         return True
 
-    def t200_wrist_gain_step(self):
+    def current_modes(self):
+        return {
+            "max_gain": self.max_gain,
+            "back_gripper_gain": self.back_gripper_gain,
+            "t200_wrist_gain": self.back_gripper_gain,
+            "arm_gain": self.arm_gain,
+            "reverse": self._reverse,
+        }
+
+    def max_gain_step(self):
         return 0.05
 
-    def adjust_t200_wrist_gain(self, *_args, **_kwargs):
-        return False
+    def adjust_max_gain(self, delta):
+        prev = self.max_gain
+        self.max_gain = max(0.05, min(1.0, round(self.max_gain + float(delta), 2)))
+        return self.max_gain != prev
+
+    def current_max_gain(self):
+        return self.max_gain
+
+    def back_gripper_gain_step(self):
+        return 0.05
+
+    def adjust_back_gripper_gain(self, delta):
+        prev = self.back_gripper_gain
+        self.back_gripper_gain = max(0.1, min(1.0, round(self.back_gripper_gain + float(delta), 2)))
+        return self.back_gripper_gain != prev
+
+    def current_back_gripper_gain(self):
+        return self.back_gripper_gain
+
+    def arm_gain_step(self):
+        return 0.05
+
+    def adjust_arm_gain(self, delta):
+        prev = self.arm_gain
+        self.arm_gain = max(0.1, min(1.0, round(self.arm_gain + float(delta), 2)))
+        return self.arm_gain != prev
+
+    def current_arm_gain(self):
+        return self.arm_gain
+
+    def t200_wrist_gain_step(self):
+        return self.back_gripper_gain_step()
+
+    def adjust_t200_wrist_gain(self, delta):
+        return self.adjust_back_gripper_gain(delta)
 
     def current_t200_wrist_gain(self):
-        return 1.0
+        return self.current_back_gripper_gain()
 
 
 class _FakeSensorService:
@@ -912,6 +957,7 @@ def test_keyboard_wrist_controls_swap_ws_and_ad_axes(monkeypatch, tmp_path):
         win._update_servo_wrist_keyboard_axes()
         assert win.pilot_svc.aux_axes["gripper_pitch"] == pytest.approx(0.0)
         assert win.pilot_svc.aux_axes["gripper_yaw"] > 0.0
+        assert win.pilot_svc.aux_axes["gripper_yaw"] < 0.05
 
         win._servo_wrist_pitch = 0.0
         win._servo_wrist_yaw = 0.0
@@ -919,12 +965,54 @@ def test_keyboard_wrist_controls_swap_ws_and_ad_axes(monkeypatch, tmp_path):
         win._servo_wrist_last_update = main_window.time.monotonic() - 0.1
         win._update_servo_wrist_keyboard_axes()
         assert win.pilot_svc.aux_axes["gripper_pitch"] > 0.0
+        assert win.pilot_svc.aux_axes["gripper_pitch"] < 0.05
         assert win.pilot_svc.aux_axes["gripper_yaw"] == pytest.approx(0.0)
 
         win._servo_wrist_keys_down = {"S"}
         assert win._servo_wrist_keyboard_targets()[1] == pytest.approx(-1.0)
         win._servo_wrist_keys_down = {"A"}
         assert win._servo_wrist_keyboard_targets()[0] == pytest.approx(-1.0)
+        win._servo_wrist_keys_down = set()
+        win._update_servo_wrist_keyboard_axes()
+        assert win.pilot_svc.aux_axes["gripper_pitch"] == pytest.approx(0.0)
+        assert win.pilot_svc.aux_axes["gripper_yaw"] == pytest.approx(0.0)
+    finally:
+        win.close()
+        app.processEvents()
+
+
+def test_keyboard_gain_shortcuts_update_pilot_modes_and_indicators(monkeypatch, tmp_path):
+    app = _app()
+    streams_path = tmp_path / "streams.json"
+    streams_path.write_text("{}", encoding="utf-8")
+
+    monkeypatch.setattr(main_window, "QSettings", lambda *args, **kwargs: _FakeSettings())
+    monkeypatch.setattr(main_window, "PilotPublisherService", _FakePilotService)
+    monkeypatch.setattr(main_window, "SensorSubscriberService", _FakeSensorService)
+    monkeypatch.setattr(main_window, "RemoteCameraManager", _FakeRemoteCameraManager)
+    monkeypatch.setattr(main_window, "VideoTabs", _FakeVideoPanel)
+    monkeypatch.setattr(main_window, "HoldTestPanel", _SimplePage)
+    monkeypatch.setattr(main_window, "ManagementPage", _SimplePage)
+    monkeypatch.setattr(main_window.threading, "Thread", _NoopThread)
+
+    win = main_window.MainWindow(str(streams_path))
+    try:
+        app.processEvents()
+
+        win.eventFilter(win, QKeyEvent(QEvent.Type.KeyPress, Qt.Key.Key_2, Qt.KeyboardModifier.NoModifier, "2"))
+        assert win.pilot_svc.back_gripper_gain == pytest.approx(0.55)
+        assert win.pilot_svc.back_gripper_gain - 0.50 == pytest.approx(0.05)
+        assert win.pilot_telemetry_column.back_gain_indicator.value == pytest.approx(0.55)
+
+        win.eventFilter(win, QKeyEvent(QEvent.Type.KeyPress, Qt.Key.Key_6, Qt.KeyboardModifier.NoModifier, "6"))
+        assert win.pilot_svc.arm_gain == pytest.approx(0.45)
+        assert 0.50 - win.pilot_svc.arm_gain == pytest.approx(0.05)
+        assert win.pilot_telemetry_column.arm_gain_indicator.value == pytest.approx(0.45)
+
+        win.eventFilter(win, QKeyEvent(QEvent.Type.KeyPress, Qt.Key.Key_Minus, Qt.KeyboardModifier.NoModifier, "-"))
+        assert win.pilot_svc.max_gain == pytest.approx(0.95)
+        assert 1.0 - win.pilot_svc.max_gain == pytest.approx(0.05)
+        assert win.pilot_telemetry_column.rov_gain_indicator.value == pytest.approx(0.95)
     finally:
         win.close()
         app.processEvents()

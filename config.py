@@ -270,13 +270,52 @@ PILOT_MAX_GAIN_MIN = float(os.environ.get("TRITON_PILOT_MAX_GAIN_MIN", "0.05"))
 PILOT_MAX_GAIN_MAX = float(os.environ.get("TRITON_PILOT_MAX_GAIN_MAX", "1.0"))
 PILOT_MAX_GAIN_STEP = float(os.environ.get("TRITON_PILOT_MAX_GAIN_STEP", "0.05"))
 
-# Pilot-adjustable gain for the T200-powered wrist motor. This is transmitted
-# separately from the main vehicle max gain so the manipulator can be tuned
-# independently by TritonOS.
-T200_WRIST_GAIN_DEFAULT = float(os.environ.get("TRITON_T200_WRIST_GAIN_DEFAULT", "0.50"))
-T200_WRIST_GAIN_MIN = float(os.environ.get("TRITON_T200_WRIST_GAIN_MIN", "0.10"))
-T200_WRIST_GAIN_MAX = float(os.environ.get("TRITON_T200_WRIST_GAIN_MAX", "1.0"))
-T200_WRIST_GAIN_STEP = float(os.environ.get("TRITON_T200_WRIST_GAIN_STEP", "0.05"))
+# Pilot-adjustable gain for the back rotating gripper / T200 wrist motor. This
+# is transmitted separately from the main vehicle max gain so the manipulator
+# can be tuned independently by TritonOS. The older TRITON_T200_* environment
+# names remain accepted as fallbacks.
+BACK_GRIPPER_GAIN_DEFAULT = float(
+    os.environ.get(
+        "TRITON_BACK_GRIPPER_GAIN_DEFAULT",
+        os.environ.get("TRITON_T200_WRIST_GAIN_DEFAULT", "0.50"),
+    )
+)
+BACK_GRIPPER_GAIN_MIN = float(
+    os.environ.get(
+        "TRITON_BACK_GRIPPER_GAIN_MIN",
+        os.environ.get("TRITON_T200_WRIST_GAIN_MIN", "0.10"),
+    )
+)
+BACK_GRIPPER_GAIN_MAX = float(
+    os.environ.get(
+        "TRITON_BACK_GRIPPER_GAIN_MAX",
+        os.environ.get("TRITON_T200_WRIST_GAIN_MAX", "1.0"),
+    )
+)
+BACK_GRIPPER_GAIN_STEP = float(
+    os.environ.get(
+        "TRITON_BACK_GRIPPER_GAIN_STEP",
+        os.environ.get("TRITON_T200_WRIST_GAIN_STEP", "0.05"),
+    )
+)
+
+# Backwards-compatible names used by older Pilot code/tests/docs.
+T200_WRIST_GAIN_DEFAULT = BACK_GRIPPER_GAIN_DEFAULT
+T200_WRIST_GAIN_MIN = BACK_GRIPPER_GAIN_MIN
+T200_WRIST_GAIN_MAX = BACK_GRIPPER_GAIN_MAX
+T200_WRIST_GAIN_STEP = BACK_GRIPPER_GAIN_STEP
+
+# Pilot-adjustable gain for the keyboard-driven arm/gripper-head movement.
+ARM_GAIN_DEFAULT = float(os.environ.get("TRITON_ARM_GAIN_DEFAULT", "0.50"))
+ARM_GAIN_MIN = float(os.environ.get("TRITON_ARM_GAIN_MIN", "0.10"))
+ARM_GAIN_MAX = float(os.environ.get("TRITON_ARM_GAIN_MAX", "1.0"))
+ARM_GAIN_STEP = float(os.environ.get("TRITON_ARM_GAIN_STEP", "0.05"))
+
+# Keyboard WASD arm motion rate in normalized command units per second at 100%
+# ARM gain. Lower values make the servo target walk more slowly while a key is
+# held. The default takes about 3 seconds to cross the full normalized range at
+# 100% gain, and about 6 seconds at the default 50% ARM gain.
+ARM_KEYBOARD_RAMP_RATE = float(os.environ.get("TRITON_ARM_KEYBOARD_RAMP_RATE", "0.35"))
 
 
 # Legacy topside walk-target display settings. Current depth-hold manual
