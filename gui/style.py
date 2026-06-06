@@ -226,6 +226,34 @@ def apply_modern_style(app: QApplication) -> None:
         padding: 8px 10px;
         font-weight: 700;
     }
+    QFrame#sshHeader {
+        border: 1px solid #2a2a32;
+        border-radius: 8px;
+        background: #16161b;
+    }
+    QLabel#sshStatus {
+        color: #d7dbe8;
+        padding: 2px 4px;
+        font-weight: 700;
+    }
+    QLabel#sshStatus[tone="ok"] {
+        color: #9be7b0;
+    }
+    QLabel#sshStatus[tone="warn"] {
+        color: #f4cf7a;
+    }
+    QLabel#sshStatus[tone="alert"] {
+        color: #ffaaa5;
+    }
+    QPlainTextEdit#sshOutput {
+        font-family: Consolas, "Cascadia Mono", monospace;
+        font-size: 12px;
+        background: #090a0f;
+        color: #d9f2e0;
+        border: 1px solid #2a2a32;
+        border-radius: 8px;
+        padding: 8px;
+    }
     QTableWidget { border: 1px solid #2a2a32; border-radius: 10px; gridline-color: #2a2a32; }
     QHeaderView::section { background: #202028; padding: 6px 8px; border: none; border-bottom: 1px solid #2a2a32; }
     QLabel { color: #ebebeb; }

@@ -28,9 +28,14 @@ from PyQt6.QtWidgets import (
     QLabel,
     QMessageBox,
     QPushButton,
+    QAbstractSpinBox,
+    QComboBox,
+    QLineEdit,
+    QPlainTextEdit,
     QSizePolicy,
     QStackedWidget,
     QTabBar,
+    QTextEdit,
 )
 from config import (
     ARM_DISARM_TOGGLE_EDGE,
@@ -65,6 +70,7 @@ from gui.instruments import InstrumentPanel, HoldTestPanel, PilotTelemetryColumn
 from gui.raw_sensor_page import RawSensorPage
 from gui.management_page import ManagementPage
 from gui.stereo_page import StereoPage
+from gui.ssh_page import SshConsolePage, default_pilot_ssh_presets
 from tools.analysis_transfer_server import DEFAULT_STABLE_SECONDS, build_index, create_server, start_server_in_thread
 
 
@@ -372,12 +378,14 @@ class MainWindow(QMainWindow):
             self._set_center_page("raw_sensors")
         elif index == 5:
             self._set_center_page("management")
+        elif index == 6:
+            self._set_center_page("ssh")
         else:
             self._set_center_page("pilot")
 
     def _set_center_page(self, page_name: str, *, announce: bool = True) -> None:
         page_name = str(page_name)
-        if page_name not in {"pilot", "stereo", "reverse_drive", "hold_test", "raw_sensors", "management"}:
+        if page_name not in {"pilot", "stereo", "reverse_drive", "hold_test", "raw_sensors", "management", "ssh"}:
             page_name = "pilot"
         if page_name == getattr(self, "_active_page_name", "pilot"):
             return
@@ -463,6 +471,17 @@ class MainWindow(QMainWindow):
                 except Exception:
                     pass
             self._page_stack.setCurrentWidget(self._raw_sensor_page)
+        elif page_name == "ssh":
+            self._release_keyboard_vehicle_controls()
+            if self.video_panel is not None:
+                if self._active_page_name == "pilot":
+                    self._pilot_layout_count_restore = int(self.video_panel.layout_count())
+                try:
+                    self.video_panel.set_layout_controls_visible(True)
+                    self.video_panel.setParent(None)
+                except Exception:
+                    pass
+            self._page_stack.setCurrentWidget(self._ssh_page)
         else:
             if self.video_panel is not None:
                 self.video_panel.set_layout_controls_visible(True)
@@ -486,6 +505,7 @@ class MainWindow(QMainWindow):
                 "hold_test": 3,
                 "raw_sensors": 4,
                 "management": 5,
+                "ssh": 6,
             }.get(page_name, 0)
             self._page_tabs.setCurrentIndex(tab_index)
         finally:
@@ -503,6 +523,7 @@ class MainWindow(QMainWindow):
                 "hold_test": "Hold Test",
                 "raw_sensors": "Raw Sensors",
                 "management": "Vehicle Setup",
+                "ssh": "SSH",
             }.get(page_name, "Pilot")
             self.statusBar().showMessage(f"Switched to {label} page", 3000)
 
@@ -804,6 +825,7 @@ class MainWindow(QMainWindow):
         self._page_tabs.addTab("Hold Test")
         self._page_tabs.addTab("Raw Sensors")
         self._page_tabs.addTab("Vehicle Setup")
+        self._page_tabs.addTab("SSH")
         self._page_tabs.currentChanged.connect(self._on_page_tab_changed)
 
         top_bar = QWidget()
@@ -898,6 +920,9 @@ class MainWindow(QMainWindow):
 
         self._raw_sensor_page = self.raw_sensor_page
         self._page_stack.addWidget(self._raw_sensor_page)
+
+        self._ssh_page = SshConsolePage(presets=default_pilot_ssh_presets(str(ROV_HOST)))
+        self._page_stack.addWidget(self._ssh_page)
 
         if self.video_panel is not None:
             self._attach_shared_video_panel(self._pilot_video_host_layout)
@@ -1034,11 +1059,56 @@ class MainWindow(QMainWindow):
             3000,
         )
 
+    def _release_keyboard_vehicle_controls(self) -> None:
+        """Neutralize keyboard-only vehicle controls when focus belongs to text input."""
+        if not self._servo_wrist_keys_down and self._servo_wrist_pitch == 0.0 and self._servo_wrist_yaw == 0.0:
+            return
+        self._servo_wrist_keys_down.clear()
+        self._servo_wrist_pitch = 0.0
+        self._servo_wrist_yaw = 0.0
+        self._servo_wrist_last_update = time.monotonic()
+        try:
+            self.pilot_svc.set_aux_axis("gripper_pitch", 0.0)
+            self.pilot_svc.set_aux_axis("gripper_yaw", 0.0)
+        except Exception:
+            pass
+
+    @staticmethod
+    def _widget_or_parent_is_text_entry(widget) -> bool:
+        text_entry_types = (QLineEdit, QPlainTextEdit, QTextEdit, QAbstractSpinBox, QComboBox)
+        current = widget if isinstance(widget, QWidget) else None
+        while current is not None:
+            if isinstance(current, text_entry_types):
+                return True
+            try:
+                current = current.parentWidget()
+            except Exception:
+                return False
+        return False
+
+    def _keyboard_vehicle_shortcuts_suppressed(self, obj=None) -> bool:
+        if getattr(self, "_active_page_name", "") == "ssh":
+            return True
+        try:
+            if self._widget_or_parent_is_text_entry(obj):
+                return True
+        except Exception:
+            pass
+        try:
+            if self._widget_or_parent_is_text_entry(QApplication.focusWidget()):
+                return True
+        except Exception:
+            pass
+        return False
+
     def eventFilter(self, obj, event):
         try:
             et = event.type()
             if et in (QEvent.Type.KeyPress, QEvent.Type.KeyRelease):
                 if hasattr(event, "isAutoRepeat") and event.isAutoRepeat():
+                    return False
+                if self._keyboard_vehicle_shortcuts_suppressed(obj):
+                    self._release_keyboard_vehicle_controls()
                     return False
                 entry = self._servo_wrist_keymap.get(event.key())
                 if entry is not None:
@@ -2284,6 +2354,10 @@ class MainWindow(QMainWindow):
             pass
         try:
             self.raw_sensor_page.shutdown()
+        except Exception:
+            pass
+        try:
+            self._ssh_page.shutdown()
         except Exception:
             pass
         if self.video_panel is not None:

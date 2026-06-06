@@ -4,5 +4,6 @@ imageio-ffmpeg
 matplotlib
 numpy
 opencv-python
+paramiko
 pyzmq
 pygame

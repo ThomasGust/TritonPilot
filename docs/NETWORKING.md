@@ -30,6 +30,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\tools\setup_pilot_tether_a
 | Sensor telemetry | ROV -> Pilot subscriber | `tcp://192.168.1.4:6001` |
 | Video RPC control | Pilot -> ROV | `tcp://192.168.1.4:5555` |
 | Management RPC | Pilot -> ROV | `tcp://192.168.1.4:5556` |
+| SSH diagnostics | Pilot -> ROV | TCP `22` |
 | Network diagnostics | Pilot -> ROV | UDP/TCP `7700` |
 | Primary camera video | ROV -> Pilot | UDP `5000` |
 | Arm camera video | ROV -> Pilot | UDP `5001` |
@@ -143,6 +144,11 @@ competition.
 Firewall rules must allow inbound UDP traffic on the configured camera ports.
 
 ## Diagnostics
+
+The TritonPilot GUI includes an `SSH` tab for shell diagnostics. The default
+preset is `triton@<ROV_HOST>:22`, usually `triton@192.168.1.4`. It also has
+presets for the analysis laptop on `10.77.0.2` and localhost. This uses the
+same SSH service and credentials as an external PuTTY or OpenSSH session.
 
 Check telemetry without the full GUI:
 

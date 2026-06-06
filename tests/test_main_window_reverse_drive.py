@@ -809,6 +809,80 @@ def test_arm_disarm_backup_controls_queue_menu_edge(monkeypatch, tmp_path):
         app.processEvents()
 
 
+def test_keyboard_vehicle_shortcuts_are_suppressed_for_ssh_and_text_input(monkeypatch, tmp_path):
+    app = _app()
+    streams_path = tmp_path / "streams.json"
+    streams_path.write_text("{}", encoding="utf-8")
+
+    monkeypatch.setattr(main_window, "QSettings", lambda *args, **kwargs: _FakeSettings())
+    monkeypatch.setattr(main_window, "PilotPublisherService", _FakePilotService)
+    monkeypatch.setattr(main_window, "SensorSubscriberService", _FakeSensorService)
+    monkeypatch.setattr(main_window, "RemoteCameraManager", _FakeRemoteCameraManager)
+    monkeypatch.setattr(main_window, "VideoTabs", _FakeVideoPanel)
+    monkeypatch.setattr(main_window, "HoldTestPanel", _SimplePage)
+    monkeypatch.setattr(main_window, "ManagementPage", _SimplePage)
+    monkeypatch.setattr(main_window.threading, "Thread", _NoopThread)
+
+    win = main_window.MainWindow(str(streams_path))
+    try:
+        app.processEvents()
+
+        win._set_center_page("ssh", announce=False)
+        assert win._active_page_name == "ssh"
+
+        ssh_input = win._ssh_page.command_edit
+        win.eventFilter(ssh_input, QKeyEvent(QEvent.Type.KeyPress, Qt.Key.Key_O, Qt.KeyboardModifier.NoModifier, "o"))
+        win.eventFilter(ssh_input, QKeyEvent(QEvent.Type.KeyPress, Qt.Key.Key_L, Qt.KeyboardModifier.NoModifier, "l"))
+        win.eventFilter(ssh_input, QKeyEvent(QEvent.Type.KeyPress, Qt.Key.Key_W, Qt.KeyboardModifier.NoModifier, "w"))
+
+        assert win.pilot_svc.queued_edges == []
+        assert "W" not in win._servo_wrist_keys_down
+
+        win._set_center_page("pilot", announce=False)
+        win.eventFilter(ssh_input, QKeyEvent(QEvent.Type.KeyPress, Qt.Key.Key_O, Qt.KeyboardModifier.NoModifier, "o"))
+        assert win.pilot_svc.queued_edges == []
+
+        win.eventFilter(win, QKeyEvent(QEvent.Type.KeyPress, Qt.Key.Key_O, Qt.KeyboardModifier.NoModifier, "o"))
+        assert win.pilot_svc.queued_edges[-1] == ("menu", "down")
+    finally:
+        win.close()
+        app.processEvents()
+
+
+def test_switching_to_ssh_releases_keyboard_wrist_controls(monkeypatch, tmp_path):
+    app = _app()
+    streams_path = tmp_path / "streams.json"
+    streams_path.write_text("{}", encoding="utf-8")
+
+    monkeypatch.setattr(main_window, "QSettings", lambda *args, **kwargs: _FakeSettings())
+    monkeypatch.setattr(main_window, "PilotPublisherService", _FakePilotService)
+    monkeypatch.setattr(main_window, "SensorSubscriberService", _FakeSensorService)
+    monkeypatch.setattr(main_window, "RemoteCameraManager", _FakeRemoteCameraManager)
+    monkeypatch.setattr(main_window, "VideoTabs", _FakeVideoPanel)
+    monkeypatch.setattr(main_window, "HoldTestPanel", _SimplePage)
+    monkeypatch.setattr(main_window, "ManagementPage", _SimplePage)
+    monkeypatch.setattr(main_window.threading, "Thread", _NoopThread)
+
+    win = main_window.MainWindow(str(streams_path))
+    try:
+        app.processEvents()
+
+        win._servo_wrist_keys_down = {"W", "D"}
+        win._servo_wrist_pitch = 0.5
+        win._servo_wrist_yaw = 0.5
+
+        win._set_center_page("ssh", announce=False)
+
+        assert win._servo_wrist_keys_down == set()
+        assert win._servo_wrist_pitch == pytest.approx(0.0)
+        assert win._servo_wrist_yaw == pytest.approx(0.0)
+        assert win.pilot_svc.aux_axes["gripper_pitch"] == pytest.approx(0.0)
+        assert win.pilot_svc.aux_axes["gripper_yaw"] == pytest.approx(0.0)
+    finally:
+        win.close()
+        app.processEvents()
+
+
 def test_keyboard_wrist_controls_swap_ws_and_ad_axes(monkeypatch, tmp_path):
     app = _app()
     streams_path = tmp_path / "streams.json"
