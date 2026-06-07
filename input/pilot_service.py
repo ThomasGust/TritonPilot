@@ -857,16 +857,16 @@ class PilotPublisherService:
                 self.seq += 1
 
                 frame_dict = frame.to_dict()
-                try:
-                    self.sock.send_string(json.dumps(frame_dict, separators=(",", ":")), flags=zmq.NOBLOCK)
-                except zmq.Again:
-                    # Keep control loop real-time: drop stale frame instead of blocking.
-                    continue
                 if self.on_send:
                     try:
                         self.on_send(frame_dict)
                     except Exception:
                         pass
+                try:
+                    self.sock.send_string(json.dumps(frame_dict, separators=(",", ":")), flags=zmq.NOBLOCK)
+                except zmq.Again:
+                    # Keep control loop real-time: drop stale frame instead of blocking.
+                    continue
 
                 # periodic debug
                 if self.debug and (t0 - self._last_debug) > 1.0:

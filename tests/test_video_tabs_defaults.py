@@ -6,6 +6,7 @@ import pytest
 
 pytest.importorskip("PyQt6")
 
+from PyQt6.QtCore import pyqtSignal
 from PyQt6.QtWidgets import QApplication, QWidget
 
 from gui.video_tabs import VideoTabs
@@ -47,6 +48,10 @@ class _DummyVideoWidget(QWidget):
 
     def shutdown(self, release_only: bool = True):
         return
+
+
+class _ActivatingDummyVideoWidget(_DummyVideoWidget):
+    activated = pyqtSignal()
 
 
 def _app() -> QApplication:
@@ -114,6 +119,34 @@ def test_video_tabs_uses_tight_pane_spacing(monkeypatch):
         app.processEvents()
         assert tabs._grid.spacing() == 0
         assert tabs.layout().spacing() == 1
+    finally:
+        tabs.close()
+        tabs.deleteLater()
+        app.processEvents()
+
+
+def test_video_tabs_widget_activation_selects_matching_pane(monkeypatch):
+    app = _app()
+    monkeypatch.setattr("gui.video_tabs.QSettings", lambda *args, **kwargs: _FakeSettings())
+    monkeypatch.setattr("gui.video_tabs.VideoWidget", _ActivatingDummyVideoWidget)
+
+    tabs = VideoTabs(
+        _DummyManager(
+            default_pane_order=["Primary Camera", "Aux Camera"],
+            default_layout_count=2,
+        ),
+        stream_names=["Primary Camera", "Aux Camera"],
+    )
+    try:
+        app.processEvents()
+        assert tabs.current_stream_name() == "Primary Camera"
+
+        widget = tabs._widgets["Aux Camera"]
+        assert isinstance(widget, _ActivatingDummyVideoWidget)
+        widget.activated.emit()
+        app.processEvents()
+
+        assert tabs.current_stream_name() == "Aux Camera"
     finally:
         tabs.close()
         tabs.deleteLater()

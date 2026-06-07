@@ -2606,21 +2606,11 @@ class MainWindow(QMainWindow):
             self.statusBar().showMessage(f"Could not start stream log: {exc}", 5000)
             return
 
-        # record pilot frames via callback
-        try:
-            self.pilot_svc.on_send = lambda msg: self._stream_recorder.record("pilot", msg)  # type: ignore
-        except Exception:
-            pass
-
         self.statusBar().showMessage(f"Recording streams -> {target}{self._save_location_note(location)}", 5000)
 
     def _stop_stream_log(self):
         if self._stream_recorder is None:
             return
-        try:
-            self.pilot_svc.on_send = None  # type: ignore
-        except Exception:
-            pass
         self._stream_recorder.stop()
         self._stream_recorder = None
         self.statusBar().showMessage("Stream recording stopped", 3000)

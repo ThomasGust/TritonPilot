@@ -1,4 +1,5 @@
 {
+  "windows_host": "192.168.1.1",
   "default_layout_count": 4,
   "stop_hidden_streams": false,
   "default_pane_order": [

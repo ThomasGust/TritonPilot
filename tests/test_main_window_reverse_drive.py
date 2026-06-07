@@ -31,6 +31,7 @@ class _FakeSettings:
 
 class _FakePilotService:
     def __init__(self, *args, **kwargs):
+        self.on_send = kwargs.get("on_send")
         self._reverse = False
         self.queued_edges = []
         self.axis_target_calls = []
@@ -623,6 +624,54 @@ def test_stereo_page_controller_x_b_route_to_stereo_capture(monkeypatch, tmp_pat
         assert win.eventFilter(focused_combo, combo_key_event) is True
         assert win._capture_route_mode == "camera"
         assert focused_combo.currentIndex() == 0
+    finally:
+        win.close()
+        app.processEvents()
+
+
+def test_stream_log_preserves_controller_capture_actions(monkeypatch, tmp_path):
+    app = _app()
+    streams_path = tmp_path / "streams.json"
+    streams_path.write_text(
+        """
+        {
+          "streams": [
+            {"name": "Primary Camera"}
+          ]
+        }
+        """,
+        encoding="utf-8",
+    )
+    save_root = tmp_path / "recordings"
+
+    monkeypatch.setattr(main_window, "QSettings", lambda *args, **kwargs: _FakeSettings())
+    monkeypatch.setattr(main_window, "PilotPublisherService", _FakePilotService)
+    monkeypatch.setattr(main_window, "SensorSubscriberService", _FakeSensorService)
+    monkeypatch.setattr(main_window, "RemoteCameraManager", _FakeRemoteCameraManager)
+    monkeypatch.setattr(main_window, "VideoTabs", _FakeVideoPanel)
+    monkeypatch.setattr(main_window, "HoldTestPanel", _SimplePage)
+    monkeypatch.setattr(main_window, "ManagementPage", _SimplePage)
+    monkeypatch.setattr(main_window.threading, "Thread", _NoopThread)
+    monkeypatch.setattr(main_window, "resolve_recordings_dir", lambda _preferred: main_window.SaveLocation(save_root))
+
+    win = main_window.MainWindow(str(streams_path))
+    try:
+        app.processEvents()
+        original_on_send = win.pilot_svc.on_send
+        camera_actions = []
+        win._save_snapshot = lambda: camera_actions.append("snapshot")
+        win._toggle_video_recording = lambda: camera_actions.append("record")
+
+        win._start_stream_log()
+        app.processEvents()
+
+        assert win.pilot_svc.on_send is original_on_send
+        assert win._stream_recorder is not None
+
+        win.pilot_svc.on_send({"edges": {"x": "down", "b": "down"}, "modes": {}})
+        app.processEvents()
+
+        assert camera_actions == ["snapshot", "record"]
     finally:
         win.close()
         app.processEvents()

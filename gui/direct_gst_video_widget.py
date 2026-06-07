@@ -302,6 +302,7 @@ if os.name == "nt":
     _WS_MINIMIZEBOX = 0x00020000
     _WS_MAXIMIZEBOX = 0x00010000
     _WS_SYSMENU = 0x00080000
+    _WS_DISABLED = 0x08000000
     _SWP_NOZORDER = 0x0004
     _SWP_NOACTIVATE = 0x0010
     _SWP_FRAMECHANGED = 0x0020
@@ -377,7 +378,9 @@ def _embed_window(child_hwnd: int, parent_hwnd: int, width: int, height: int) ->
         return False
     _user32.ShowWindow(child_hwnd, _SW_HIDE)
     style = int(_get_window_long(child_hwnd, _GWL_STYLE))
-    style |= _WS_CHILD | _WS_VISIBLE
+    # Keep the renderer visible, but do not let its foreign HWND eat pane
+    # clicks that the Qt UI uses for active-camera selection.
+    style |= _WS_CHILD | _WS_VISIBLE | _WS_DISABLED
     style &= ~(_WS_POPUP | _WS_CAPTION | _WS_THICKFRAME | _WS_MINIMIZEBOX | _WS_MAXIMIZEBOX | _WS_SYSMENU)
     _set_window_long(child_hwnd, _GWL_STYLE, style)
     _user32.SetParent(child_hwnd, int(parent_hwnd))
@@ -394,8 +397,78 @@ def _embed_window(child_hwnd: int, parent_hwnd: int, width: int, height: int) ->
         )
     )
 
+
+class _CaptureBadgeOverlay(QWidget):
+    """Transparent top-level badge layer that can sit above a native video child."""
+
+    def __init__(self, owner: QWidget):
+        flags = (
+            Qt.WindowType.Tool
+            | Qt.WindowType.FramelessWindowHint
+            | Qt.WindowType.WindowDoesNotAcceptFocus
+            | Qt.WindowType.WindowStaysOnTopHint
+        )
+        super().__init__(owner, flags)
+        self._owner = owner
+        self.setObjectName("videoCaptureOverlay")
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
+        self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
+        self.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating, True)
+        self.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+
+        self.record_badge = QLabel("REC 00:00", self)
+        self.record_badge.setObjectName("videoRecordBadge")
+        self.record_badge.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
+        self.record_badge.hide()
+
+        self.snapshot_badge = QLabel("SNAP", self)
+        self.snapshot_badge.setObjectName("videoSnapshotBadge")
+        self.snapshot_badge.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
+        self.snapshot_badge.hide()
+        self.hide()
+
+    def sync(self) -> None:
+        owner = self._owner
+        if not owner.isVisible() or owner.width() <= 1 or owner.height() <= 1:
+            self.hide()
+            return
+        window = owner.window()
+        if window is not None and (window.isMinimized() or not window.isVisible()):
+            self.hide()
+            return
+
+        self.resize(owner.size())
+        self.move(owner.mapToGlobal(owner.rect().topLeft()))
+
+        margin = 10
+        visible_badges = []
+        for badge, x_mode in (
+            (self.record_badge, "left"),
+            (self.snapshot_badge, "right"),
+        ):
+            if badge.isHidden():
+                continue
+            badge.adjustSize()
+            y = margin
+            if x_mode == "left":
+                x = margin
+            else:
+                x = max(margin, self.width() - badge.width() - margin)
+            badge.move(x, y)
+            badge.raise_()
+            visible_badges.append(badge)
+
+        if visible_badges:
+            self.show()
+            self.raise_()
+        else:
+            self.hide()
+
+
 class DirectGstVideoWidget(QWidget):
     """Low-latency video widget that lets GStreamer render directly to Direct3D."""
+
+    activated = pyqtSignal()
 
     def __init__(self, manager: RemoteCameraManager, stream_name: str, parent=None):
         super().__init__(parent)
@@ -442,15 +515,9 @@ class DirectGstVideoWidget(QWidget):
         lay.setContentsMargins(0, 0, 0, 0)
         lay.setSpacing(0)
 
-        self._record_badge = QLabel("REC 00:00", self)
-        self._record_badge.setObjectName("videoRecordBadge")
-        self._record_badge.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
-        self._record_badge.hide()
-
-        self._snapshot_badge = QLabel(self._snapshot_indicator_text, self)
-        self._snapshot_badge.setObjectName("videoSnapshotBadge")
-        self._snapshot_badge.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
-        self._snapshot_badge.hide()
+        self._capture_overlay = _CaptureBadgeOverlay(self)
+        self._record_badge = self._capture_overlay.record_badge
+        self._snapshot_badge = self._capture_overlay.snapshot_badge
 
         self._tick_timer = QTimer(self)
         self._tick_timer.setInterval(250)
@@ -478,21 +545,7 @@ class DirectGstVideoWidget(QWidget):
         return f"{minutes:02d}:{seconds:02d}"
 
     def _layout_capture_badges(self) -> None:
-        margin = 10
-        for badge, x_mode in (
-            (self._record_badge, "left"),
-            (self._snapshot_badge, "right"),
-        ):
-            if not badge.isVisible():
-                continue
-            badge.adjustSize()
-            y = margin
-            if x_mode == "left":
-                x = margin
-            else:
-                x = max(margin, self.width() - badge.width() - margin)
-            badge.move(x, y)
-            badge.raise_()
+        self._capture_overlay.sync()
 
     def _refresh_capture_indicators(self) -> None:
         now = time.time()
@@ -922,6 +975,10 @@ class DirectGstVideoWidget(QWidget):
             self._embed_timer.stop()
         except Exception:
             pass
+        try:
+            self._capture_overlay.hide()
+        except Exception:
+            pass
         if proc is not None:
             _stop_process(proc)
         try:
@@ -936,6 +993,21 @@ class DirectGstVideoWidget(QWidget):
         self._resize_embedded()
         self._layout_capture_badges()
 
+    def moveEvent(self, event) -> None:
+        super().moveEvent(event)
+        self._layout_capture_badges()
+
+    def showEvent(self, event) -> None:
+        super().showEvent(event)
+        self._layout_capture_badges()
+
+    def hideEvent(self, event) -> None:
+        try:
+            self._capture_overlay.hide()
+        except Exception:
+            pass
+        super().hideEvent(event)
+
     def closeEvent(self, event) -> None:
         try:
             self._tick_timer.stop()
@@ -946,7 +1018,16 @@ class DirectGstVideoWidget(QWidget):
         except Exception:
             pass
         self.shutdown(release_only=True)
+        try:
+            self._capture_overlay.close()
+        except Exception:
+            pass
         super().closeEvent(event)
+
+    def mousePressEvent(self, event) -> None:
+        if event.button() == Qt.MouseButton.LeftButton:
+            self.activated.emit()
+        super().mousePressEvent(event)
 
     def mouseDoubleClickEvent(self, event) -> None:
         try:

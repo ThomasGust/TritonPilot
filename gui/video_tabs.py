@@ -470,6 +470,13 @@ class VideoTabs(QWidget):
                 setter(self._display_fps_for_visible_count())
             except Exception:
                 pass
+        activated = getattr(vw, "activated", None)
+        connect = getattr(activated, "connect", None)
+        if callable(connect):
+            try:
+                connect(lambda name=name: self.set_current_stream(name, save=True, emit=True))
+            except Exception:
+                pass
 
     def _widget_class_for_stream(self, name: str):
         try:

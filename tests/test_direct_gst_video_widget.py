@@ -154,6 +154,10 @@ def test_direct_widget_snapshot_and_recording_use_capture_receiver(monkeypatch, 
 
         assert snap_path is not None
         assert Path(snap_path).exists()
+        assert widget._snapshot_badge.parent() is widget._capture_overlay
+        assert widget._record_badge.parent() is widget._capture_overlay
+        assert widget._capture_overlay.isWindow() is True
+        assert widget._capture_overlay.isVisible() is True
         assert widget._snapshot_badge.isVisible() is True
 
         widget.stop_recording()
