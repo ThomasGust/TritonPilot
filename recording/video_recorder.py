@@ -12,6 +12,8 @@ from typing import Optional
 
 import numpy as np
 
+from recording.capture_trace import trace_event
+
 logger = logging.getLogger(__name__)
 
 
@@ -61,6 +63,7 @@ class VideoRecorder:
         self._mode: str | None = None  # "mp4" or "frames"
         self._frame_dir: Path | None = None
         self._frame_idx = 0
+        self._written_frames = 0
         self._shape: tuple[int, int, int] | None = None
 
         # set during start()
@@ -161,6 +164,7 @@ class VideoRecorder:
         if self._started:
             return self._target or self.out_path
 
+        trace_event("video_recorder_start_request", path=self.out_path, fps=self.fps)
         self.out_path.parent.mkdir(parents=True, exist_ok=True)
 
         imageio_error = self._start_imageio_writer()
@@ -182,13 +186,35 @@ class VideoRecorder:
 
         self._started = True
         self._thread.start()
+        trace_event(
+            "video_recorder_started",
+            path=self.out_path,
+            target=self._target or self.out_path,
+            backend=self._writer_backend,
+            mode=self._mode,
+            fps=self.fps,
+        )
         return self._target or self.out_path
 
-    def stop(self, timeout_s: float = 5.0) -> None:
+    def stop(self, timeout_s: float = 5.0, *, drain_pending: bool = True) -> None:
         if not self._started:
             return
 
+        trace_event(
+            "video_recorder_stop_request",
+            path=self.out_path,
+            timeout_s=timeout_s,
+            drain_pending=drain_pending,
+            queue_size=self.queue_size(),
+            written_frames=self._written_frames,
+        )
         self._stop_requested.set()
+        if not drain_pending:
+            while True:
+                try:
+                    self._q.get_nowait()
+                except queue.Empty:
+                    break
         # Try to wake the worker even if queue is full.
         try:
             self._q.put(None, timeout=0.5)
@@ -200,21 +226,44 @@ class VideoRecorder:
             logger.warning("VideoRecorder thread did not stop within %.1fs; output may be incomplete.", timeout_s)
 
         self._started = False
+        trace_event(
+            "video_recorder_stopped",
+            path=self.out_path,
+            alive=self._thread.is_alive(),
+            queue_size=self.queue_size(),
+            written_frames=self._written_frames,
+        )
 
-    def add_frame(self, frame_bgr: np.ndarray) -> None:
+    def queue_size(self) -> int:
+        try:
+            return int(self._q.qsize())
+        except Exception:
+            return -1
+
+    def add_frame(self, frame_bgr: np.ndarray) -> bool:
         if not self._started or self._stop_requested.is_set():
-            return
+            trace_event("video_recorder_add_frame_skipped", path=self.out_path, reason="not_started_or_stopping")
+            return False
         try:
             frame = _normalize_bgr(frame_bgr)
         except Exception:
             # Bad frame; drop it
-            return
+            trace_event("video_recorder_add_frame_skipped", path=self.out_path, reason="bad_frame")
+            return False
 
         try:
             self._q.put_nowait(frame)
+            trace_event(
+                "video_recorder_frame_queued",
+                path=self.out_path,
+                queue_size=self.queue_size(),
+                shape=list(frame.shape),
+            )
+            return True
         except queue.Full:
             # Drop if overwhelmed (keeps UI responsive)
-            pass
+            trace_event("video_recorder_add_frame_skipped", path=self.out_path, reason="queue_full")
+            return False
 
     def _save_png(self, frame_bgr: np.ndarray, path: Path) -> None:
         """Best-effort PNG write without pulling in OpenCV."""
@@ -263,6 +312,7 @@ class VideoRecorder:
                     break
 
                 frame = item
+                write_start_s = time.monotonic()
                 try:
                     # Keep a fixed geometry; if it changes, resize to the first frame.
                     if self._shape is None:
@@ -293,8 +343,28 @@ class VideoRecorder:
                         p = self._frame_dir / f"{self._frame_idx:06d}.png"
                         self._frame_idx += 1
                         self._save_png(frame, p)
+                        wrote = True
+                    if wrote:
+                        self._written_frames += 1
+                    trace_event(
+                        "video_recorder_frame_written",
+                        path=self.out_path,
+                        backend=self._writer_backend,
+                        mode=self._mode,
+                        wrote=wrote,
+                        written_frames=self._written_frames,
+                        queue_size=self.queue_size(),
+                        dt_ms=(time.monotonic() - write_start_s) * 1000.0,
+                    )
                 except Exception:
                     # Don't crash the app mid-mission; keep recording best-effort.
+                    trace_event(
+                        "video_recorder_frame_write_failed",
+                        path=self.out_path,
+                        backend=self._writer_backend,
+                        mode=self._mode,
+                        queue_size=self.queue_size(),
+                    )
                     continue
         finally:
             if self._writer is not None:

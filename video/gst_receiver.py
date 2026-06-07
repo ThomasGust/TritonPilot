@@ -18,6 +18,7 @@ from collections import deque
 from dataclasses import dataclass, asdict, field
 from typing import Dict, Optional, Any, List
 
+from recording.capture_trace import trace_event
 from video.gst_runtime import bootstrap_gstreamer_env
 
 logger = logging.getLogger("gst_receiver_subproc")
@@ -260,6 +261,17 @@ class ReceiverProcess:
 
             cmd = self._build_cmd(self.cfg)
             _log_receiver_start(self.cfg, cmd)
+            trace_event(
+                "gst_receiver_start",
+                name=self.cfg.name,
+                codec=self.cfg.codec,
+                mode=self.cfg.mode,
+                port=self.cfg.port,
+                bind_address=self.cfg.bind_address,
+                width=self.cfg.width,
+                height=self.cfg.height,
+                latency_ms=self.cfg.latency_ms,
+            )
             creationflags = 0
             if os.name == "nt":
                 creationflags = subprocess.CREATE_NEW_PROCESS_GROUP
@@ -304,6 +316,14 @@ class ReceiverProcess:
                 return
             if self.proc.poll() is None:
                 logger.info("Stopping receiver '%s'", self.cfg.name)
+                trace_event(
+                    "gst_receiver_stop_request",
+                    name=self.cfg.name,
+                    mode=self.cfg.mode,
+                    port=self.cfg.port,
+                    grace_s=grace_s,
+                    latest_seq=self._latest_seq,
+                )
                 try:
                     if os.name == "nt":
                         self.proc.send_signal(signal.CTRL_BREAK_EVENT)
@@ -317,6 +337,13 @@ class ReceiverProcess:
                     pass
             self.proc = None
             self._stop_reader.set()
+            trace_event(
+                "gst_receiver_stopped",
+                name=self.cfg.name,
+                mode=self.cfg.mode,
+                port=self.cfg.port,
+                latest_seq=self._latest_seq,
+            )
 
     def restart(self):
         self.stop()
@@ -352,6 +379,14 @@ class ReceiverProcess:
         if stream is None:
             logger.error("No stdout to read for raw mode")
             return
+        trace_event(
+            "raw_reader_started",
+            name=self.cfg.name,
+            port=self.cfg.port,
+            width=self.cfg.width,
+            height=self.cfg.height,
+            frame_size=self._frame_size,
+        )
 
         def read_exact(n: int) -> Optional[bytes]:
             chunks: list[bytes] = []
@@ -378,16 +413,33 @@ class ReceiverProcess:
             with self._raw_buffer_lock:
                 self._latest_frame = frame
                 self._latest_seq += 1
+                seq = self._latest_seq
                 self._latest_frame_ts = now_wall
                 self._latest_frame_monotonic_ts = now_monotonic
                 self._frame_history.append(
                     _StoredRawFrame(
                         data=frame,
-                        seq=self._latest_seq,
+                        seq=seq,
                         monotonic_ts=now_monotonic,
                         wall_ts=now_wall,
                     )
                 )
+                history_len = len(self._frame_history)
+            trace_event(
+                "raw_frame_arrived",
+                name=self.cfg.name,
+                port=self.cfg.port,
+                seq=seq,
+                history_len=history_len,
+                monotonic_ts=now_monotonic,
+                wall_ts=now_wall,
+            )
+        trace_event(
+            "raw_reader_stopped",
+            name=self.cfg.name,
+            port=self.cfg.port,
+            latest_seq=self._latest_seq,
+        )
 
     def _ordered_frame_bytes(self, frame: bytes) -> bytes:
         """Return frame bytes after applying configured channel order."""

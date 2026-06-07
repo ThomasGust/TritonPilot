@@ -4,6 +4,7 @@ __pycache__/
 .pytest-tmp*/
 .pytest_cache/
 .pytest-work*/
+.runtime-logs/
 .coverage
 .coverage.*
 coverage.xml

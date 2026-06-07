@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import threading
 import time
+from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import asdict
 from pathlib import Path
 from typing import Any, Callable
@@ -12,6 +13,7 @@ from typing import Any, Callable
 import numpy as np
 
 from recording.capture_paths import safe_filename_component
+from recording.capture_trace import trace_event
 from recording.save_location import DEFAULT_RECORDINGS_DIR
 from recording.video_recorder import save_snapshot
 from stereo.pairs import StereoPairConfig
@@ -61,6 +63,9 @@ class StereoCaptureSession:
         self._last_manifest_write_ts = 0.0
         self._manifest_flush_interval_s = 1.0
         self._using_capture_receivers = False
+        self._save_executor: ThreadPoolExecutor | None = None
+        self._save_futures: list[Future] = []
+        self._save_lock = threading.Lock()
 
     @property
     def manifest_path(self) -> Path:
@@ -69,6 +74,14 @@ class StereoCaptureSession:
     def start(self) -> Path:
         """Open both streams and initialize the on-disk session."""
 
+        start_s = time.monotonic()
+        trace_event(
+            "stereo_session_start_request",
+            pair=self.pair.name,
+            left=self.pair.left,
+            right=self.pair.right,
+            session_dir=self.session_dir,
+        )
         self.left_dir.mkdir(parents=True, exist_ok=True)
         self.right_dir.mkdir(parents=True, exist_ok=True)
         self._started_wall_ts = time.time()
@@ -84,11 +97,26 @@ class StereoCaptureSession:
         self._manifest = self._load_existing_manifest() or self._base_manifest()
         self._resume_frame_state()
         self._write_manifest()
+        trace_event(
+            "stereo_session_started",
+            pair=self.pair.name,
+            session_dir=self.session_dir,
+            using_capture_receivers=self._using_capture_receivers,
+            dt_ms=(time.monotonic() - start_s) * 1000.0,
+        )
         return self.session_dir
 
     def stop(self) -> None:
         """Flush the manifest. Stream ownership remains with the camera manager."""
 
+        stop_s = time.monotonic()
+        trace_event(
+            "stereo_session_stop_request",
+            pair=self.pair.name,
+            frame_index=self._frame_index,
+            dirty=self._manifest_dirty,
+        )
+        self._drain_async_saves()
         if self._manifest:
             self._manifest["ended_wall_ts"] = time.time()
             self._manifest_dirty = True
@@ -108,6 +136,12 @@ class StereoCaptureSession:
                     self.manager.close_capture(stream_name)
                 except Exception:
                     pass
+        trace_event(
+            "stereo_session_stopped",
+            pair=self.pair.name,
+            frame_index=self._frame_index,
+            dt_ms=(time.monotonic() - stop_s) * 1000.0,
+        )
 
     def capture_once(
         self,
@@ -115,6 +149,7 @@ class StereoCaptureSession:
         wait_s: float = 2.0,
         require_fresh: bool = True,
         flush_manifest: bool = True,
+        async_save: bool = False,
         stop_requested: Callable[[], bool] | None = None,
     ) -> dict[str, Any]:
         """Capture one stereo pair whose receiver timestamps are close enough."""
@@ -124,10 +159,22 @@ class StereoCaptureSession:
 
         deadline = time.monotonic() + max(0.0, float(wait_s))
         best_delta_s: float | None = None
+        capture_start_s = time.monotonic()
+        attempts = 0
+        trace_event(
+            "stereo_capture_once_start",
+            pair=self.pair.name,
+            next_index=self._frame_index + 1,
+            wait_s=wait_s,
+            require_fresh=require_fresh,
+            flush_manifest=flush_manifest,
+            async_save=async_save,
+        )
 
         while time.monotonic() <= deadline:
             if stop_requested is not None and stop_requested():
                 raise StereoCaptureInterrupted("Stereo capture stopped")
+            attempts += 1
             match = self._best_recent_pair(require_fresh=require_fresh)
             if match is None:
                 time.sleep(0.005)
@@ -136,15 +183,38 @@ class StereoCaptureSession:
             delta_s = abs(float(left.monotonic_ts) - float(right.monotonic_ts))
             best_delta_s = delta_s if best_delta_s is None else min(best_delta_s, delta_s)
             if delta_s <= self.pair.max_pair_delta_s:
+                trace_event(
+                    "stereo_capture_pair_matched",
+                    pair=self.pair.name,
+                    next_index=self._frame_index + 1,
+                    attempts=attempts,
+                    dt_ms=(time.monotonic() - capture_start_s) * 1000.0,
+                    pair_delta_ms=delta_s * 1000.0,
+                    left_seq=left.seq,
+                    right_seq=right.seq,
+                    left_age_ms=(time.monotonic() - float(left.monotonic_ts)) * 1000.0,
+                    right_age_ms=(time.monotonic() - float(right.monotonic_ts)) * 1000.0,
+                )
                 return self._save_pair(
                     left,
                     right,
                     delta_s,
                     flush_manifest=flush_manifest,
+                    async_save=async_save,
                 )
             time.sleep(0.002)
 
         detail = "no frames received" if best_delta_s is None else f"best delta {best_delta_s * 1000.0:.1f} ms"
+        trace_event(
+            "stereo_capture_once_failed",
+            pair=self.pair.name,
+            next_index=self._frame_index + 1,
+            attempts=attempts,
+            wait_s=wait_s,
+            best_delta_ms=None if best_delta_s is None else best_delta_s * 1000.0,
+            dt_ms=(time.monotonic() - capture_start_s) * 1000.0,
+            detail=detail,
+        )
         raise StereoCaptureError(
             f"Could not capture stereo pair '{self.pair.name}' within "
             f"{self.pair.max_pair_delta_ms:.1f} ms ({detail})"
@@ -288,6 +358,15 @@ class StereoCaptureSession:
 
     def _save_images(self, left_frame: np.ndarray, left_path: Path, right_frame: np.ndarray, right_path: Path) -> None:
         errors: list[str] = []
+        save_s = time.monotonic()
+        trace_event(
+            "stereo_save_images_start",
+            pair=self.pair.name,
+            left_path=left_path,
+            right_path=right_path,
+            left_shape=list(left_frame.shape),
+            right_shape=list(right_frame.shape),
+        )
 
         def _write_one(frame: np.ndarray, path: Path) -> None:
             try:
@@ -305,6 +384,73 @@ class StereoCaptureSession:
             thread.join()
         if errors:
             raise StereoCaptureError("Failed to write stereo images: " + "; ".join(errors))
+        trace_event(
+            "stereo_save_images_done",
+            pair=self.pair.name,
+            left_path=left_path,
+            right_path=right_path,
+            dt_ms=(time.monotonic() - save_s) * 1000.0,
+        )
+
+    def _async_save_executor(self) -> ThreadPoolExecutor:
+        with self._save_lock:
+            if self._save_executor is None:
+                self._save_executor = ThreadPoolExecutor(max_workers=2, thread_name_prefix="stereo-save")
+            return self._save_executor
+
+    def _queue_save_images(
+        self,
+        left_frame: np.ndarray,
+        left_path: Path,
+        right_frame: np.ndarray,
+        right_path: Path,
+    ) -> None:
+        executor = self._async_save_executor()
+        future = executor.submit(self._save_images, left_frame, left_path, right_frame, right_path)
+        with self._save_lock:
+            self._save_futures.append(future)
+            pending = len(self._save_futures)
+        trace_event(
+            "stereo_save_images_queued",
+            pair=self.pair.name,
+            left_path=left_path,
+            right_path=right_path,
+            pending_saves=pending,
+        )
+
+    def _drain_async_saves(self) -> None:
+        with self._save_lock:
+            futures = list(self._save_futures)
+            self._save_futures.clear()
+            executor = self._save_executor
+            self._save_executor = None
+        if not futures:
+            if executor is not None:
+                executor.shutdown(wait=True)
+            return
+        drain_s = time.monotonic()
+        trace_event("stereo_async_save_drain_start", pair=self.pair.name, pending_saves=len(futures))
+        errors: list[str] = []
+        for future in futures:
+            try:
+                future.result()
+            except Exception as exc:
+                errors.append(str(exc))
+        if executor is not None:
+            executor.shutdown(wait=True)
+        trace_event(
+            "stereo_async_save_drain_done",
+            pair=self.pair.name,
+            pending_saves=len(futures),
+            errors=errors,
+            dt_ms=(time.monotonic() - drain_s) * 1000.0,
+        )
+        if errors:
+            raise StereoCaptureError("Failed to write stereo images: " + "; ".join(errors))
+        for frame in self._manifest.get("frames") or []:
+            if isinstance(frame, dict) and frame.get("save_pending"):
+                frame["save_pending"] = False
+                self._manifest_dirty = True
 
     def _save_pair(
         self,
@@ -313,6 +459,7 @@ class StereoCaptureSession:
         delta_s: float,
         *,
         flush_manifest: bool = True,
+        async_save: bool = False,
     ) -> dict[str, Any]:
         self._frame_index += 1
         stem = f"pair_{self._frame_index:06d}"
@@ -321,9 +468,26 @@ class StereoCaptureSession:
 
         left_frame = self._prepared_frame(left, self.pair.left)
         right_frame = self._prepared_frame(right, self.pair.right)
-        self._save_images(left_frame, left_path, right_frame, right_path)
-        if not left_path.exists() or not right_path.exists():
-            raise StereoCaptureError("Failed to write one or both stereo images")
+        if async_save:
+            left_frame = np.array(left_frame, copy=True)
+            right_frame = np.array(right_frame, copy=True)
+        save_pair_s = time.monotonic()
+        trace_event(
+            "stereo_save_pair_start",
+            pair=self.pair.name,
+            index=self._frame_index,
+            stem=stem,
+            left_seq=left.seq,
+            right_seq=right.seq,
+            pair_delta_ms=delta_s * 1000.0,
+            async_save=async_save,
+        )
+        if async_save:
+            self._queue_save_images(left_frame, left_path, right_frame, right_path)
+        else:
+            self._save_images(left_frame, left_path, right_frame, right_path)
+            if not left_path.exists() or not right_path.exists():
+                raise StereoCaptureError("Failed to write one or both stereo images")
 
         self._last_left_seq = int(left.seq)
         self._last_right_seq = int(right.seq)
@@ -334,6 +498,7 @@ class StereoCaptureSession:
             "left_path": str(left_path.relative_to(self.session_dir)),
             "right_path": str(right_path.relative_to(self.session_dir)),
             "pair_delta_ms": float(delta_s * 1000.0),
+            "save_pending": bool(async_save),
             "left": {
                 "stream": self.pair.left,
                 "seq": int(left.seq),
@@ -351,5 +516,17 @@ class StereoCaptureSession:
         }
         self._manifest.setdefault("frames", []).append(record)
         self._manifest_dirty = True
+        if async_save and flush_manifest:
+            self._drain_async_saves()
         self._flush_manifest_if_needed(force=flush_manifest)
+        trace_event(
+            "stereo_save_pair_done",
+            pair=self.pair.name,
+            index=self._frame_index,
+            stem=stem,
+            flush_manifest=flush_manifest,
+            async_save=async_save,
+            dt_ms=(time.monotonic() - save_pair_s) * 1000.0,
+            manifest_dirty=self._manifest_dirty,
+        )
         return record

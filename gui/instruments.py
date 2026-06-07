@@ -22,6 +22,8 @@ from PyQt6.QtWidgets import (
     QSizePolicy,
 )
 
+from recording.capture_trace import trace_event
+
 from network.management_rpc import ManagementRpcService
 
 
@@ -497,11 +499,25 @@ class PilotTelemetryColumn(QWidget):
         self._capture_activity = dict(activity or {"state": "idle"})
         self._refresh_capture_activity_text()
 
-    def _format_elapsed(self, started_ts: object) -> str:
-        try:
-            elapsed = max(0, int(time.time() - float(started_ts)))
-        except Exception:
-            elapsed = 0
+    def _format_elapsed(self, activity: dict | None = None) -> str:
+        activity = dict(activity or {})
+        elapsed = None
+        started_monotonic_s = activity.get("started_monotonic_s")
+        if started_monotonic_s is not None:
+            try:
+                elapsed = max(0, int(time.monotonic() - float(started_monotonic_s)))
+            except Exception:
+                elapsed = None
+        if elapsed is None and activity.get("elapsed_s") is not None:
+            try:
+                elapsed = max(0, int(float(activity.get("elapsed_s"))))
+            except Exception:
+                elapsed = None
+        if elapsed is None:
+            try:
+                elapsed = max(0, int(time.time() - float(activity.get("started_ts"))))
+            except Exception:
+                elapsed = 0
         minutes, seconds = divmod(elapsed, 60)
         hours, minutes = divmod(minutes, 60)
         if hours:
@@ -536,7 +552,7 @@ class PilotTelemetryColumn(QWidget):
             style = "color: #fff2cc; background: #5a4020; border: 1px solid #c8953e;"
             tip = "Stereo pair recording is stopping."
         elif state == "recording" or capture_mode == "recording":
-            text = f"STEREO REC {self._format_elapsed(activity.get('started_ts'))} | {count} {pair_word}"
+            text = f"STEREO REC {self._format_elapsed(activity)} | {count} {pair_word}"
             style = "color: #fff4f4; background: #8e2020; border: 1px solid #e66f6f;"
             tip = "Stereo pair recording is active."
         elif state in {"single", "burst", "capturing"} or capture_mode in {"single", "burst"}:
@@ -548,12 +564,24 @@ class PilotTelemetryColumn(QWidget):
             style = "color: #d9ecff; background: #22364d; border: 1px solid #4576a8;"
             tip = "Stereo capture is selected."
 
+        previous_text = self.capture_activity_text.text()
         self.capture_activity_text.setText(text)
         self.capture_activity_text.setToolTip(tip)
         self.capture_activity_text.setStyleSheet(
             f"{style} border-radius: 10px; padding: 4px 10px; font-weight: 800;"
         )
         self.capture_activity_text.show()
+        if text != previous_text:
+            trace_event(
+                "stereo_activity_label_update",
+                text=text,
+                state=state,
+                mode=capture_mode,
+                count=count,
+                started_ts=activity.get("started_ts"),
+                started_monotonic_s=activity.get("started_monotonic_s"),
+                elapsed_s=activity.get("elapsed_s"),
+            )
 
 
 class InstrumentPanel(QWidget):

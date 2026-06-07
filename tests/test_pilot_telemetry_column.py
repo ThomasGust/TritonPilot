@@ -53,6 +53,37 @@ def test_pilot_telemetry_column_shows_stereo_capture_activity(monkeypatch):
         app.processEvents()
 
 
+def test_pilot_telemetry_column_prefers_monotonic_stereo_elapsed(monkeypatch):
+    app = _app()
+    now = {"monotonic": 250.0}
+    monkeypatch.setattr(instruments.time, "time", lambda: 10_000.0)
+    monkeypatch.setattr(instruments.time, "monotonic", lambda: now["monotonic"])
+    column = PilotTelemetryColumn()
+    column.show()
+    try:
+        app.processEvents()
+
+        column.set_capture_mode("stereo")
+        column.set_capture_activity(
+            {
+                "state": "recording",
+                "mode": "recording",
+                "count": 1,
+                "started_ts": 1.0,
+                "started_monotonic_s": 215.0,
+            }
+        )
+        assert column.capture_activity_text.text() == "STEREO REC 00:35 | 1 pair"
+
+        now["monotonic"] = 251.0
+        column._refresh_capture_activity_text()
+        assert column.capture_activity_text.text() == "STEREO REC 00:36 | 1 pair"
+    finally:
+        column.close()
+        column.deleteLater()
+        app.processEvents()
+
+
 def test_pilot_telemetry_column_updates_gain_indicators():
     app = _app()
     column = PilotTelemetryColumn()

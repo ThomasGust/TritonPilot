@@ -374,9 +374,41 @@ class VideoTabs(QWidget):
             self._pane_controls[idx].setVisible(False)
             self._panes[idx].set_active(False)
 
+        self._finish_selection_refresh(save=save, emit=emit, apply_display_fps=True)
+
+    def _refresh_active_markers(self, *, save: bool, emit: bool) -> None:
+        visible_count = self._visible_pane_count()
+        if visible_count <= 0:
+            self._active_pane_index = 0
+        else:
+            self._active_pane_index = max(0, min(self._active_pane_index, visible_count - 1))
+
+        for idx, pane in enumerate(self._panes):
+            active = idx == self._active_pane_index and idx < visible_count
+            pane.set_active(active)
+
+            if idx >= len(self._pane_control_labels) or idx >= len(self._pane_selectors):
+                continue
+            label = self._pane_control_labels[idx]
+            selector = self._pane_selectors[idx]
+            if idx < visible_count:
+                label.setText(f"[{idx + 1}]" if active else str(idx + 1))
+            label.setProperty("active", active)
+            label.style().unpolish(label)
+            label.style().polish(label)
+            label.update()
+            selector.setProperty("active", active)
+            selector.style().unpolish(selector)
+            selector.style().polish(selector)
+            selector.update()
+
+        self._finish_selection_refresh(save=save, emit=emit, apply_display_fps=False)
+
+    def _finish_selection_refresh(self, *, save: bool, emit: bool, apply_display_fps: bool) -> None:
         if save:
             self._save_preferences()
-        self._apply_display_fps_to_widgets()
+        if apply_display_fps:
+            self._apply_display_fps_to_widgets()
         if emit:
             self.selectionChanged.emit()
 
@@ -564,10 +596,7 @@ class VideoTabs(QWidget):
         self.set_layout_count(count)
 
     def _on_pane_activated(self, pane_index: int) -> None:
-        if pane_index == self._active_pane_index:
-            return
-        self._active_pane_index = pane_index
-        self._refresh_layout(save=True, emit=True)
+        self.set_active_pane(pane_index, save=True, emit=True)
 
     def _on_pane_stream_changed(self, pane_index: int, name: str) -> None:
         if name:
@@ -586,8 +615,10 @@ class VideoTabs(QWidget):
     def set_active_pane(self, pane_index: int, *, save: bool = True, emit: bool = True) -> bool:
         if pane_index < 0 or pane_index >= self._visible_pane_count():
             return False
+        if pane_index == self._active_pane_index:
+            return True
         self._active_pane_index = pane_index
-        self._refresh_layout(save=save, emit=emit)
+        self._refresh_active_markers(save=save, emit=emit)
         return True
 
     def visible_stream_names(self) -> list[str]:

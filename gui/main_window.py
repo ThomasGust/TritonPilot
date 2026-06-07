@@ -63,6 +63,7 @@ from config import (
 from input.pilot_service import PilotPublisherService
 from telemetry.sensor_service import SensorSubscriberService
 from video.cam import RemoteCameraManager
+from recording.capture_trace import trace_event
 from recording.stream_recorder import StreamRecorder
 from recording.save_location import DEFAULT_RECORDINGS_DIR, SaveLocation, is_available_directory, resolve_recordings_dir
 from recording.capture_paths import timestamped_camera_stem, unique_capture_path
@@ -321,6 +322,11 @@ class MainWindow(QMainWindow):
             pass
 
     def _capture_still(self) -> None:
+        trace_event(
+            "capture_still_request",
+            route=getattr(self, "_capture_route_mode", "camera"),
+            use_stereo=self._capture_should_use_stereo(),
+        )
         if self._capture_should_use_stereo():
             stereo_page = getattr(self, "_stereo_page", None)
             if stereo_page is not None:
@@ -331,6 +337,11 @@ class MainWindow(QMainWindow):
         self._save_snapshot()
 
     def _start_capture_recording(self) -> None:
+        trace_event(
+            "capture_recording_start_request",
+            route=getattr(self, "_capture_route_mode", "camera"),
+            use_stereo=self._capture_should_use_stereo(),
+        )
         if self._capture_should_use_stereo():
             stereo_page = getattr(self, "_stereo_page", None)
             if stereo_page is not None:
@@ -341,6 +352,11 @@ class MainWindow(QMainWindow):
         self._start_video_recording()
 
     def _stop_capture_recording(self) -> None:
+        trace_event(
+            "capture_recording_stop_request",
+            route=getattr(self, "_capture_route_mode", "camera"),
+            use_stereo=self._capture_should_use_stereo(),
+        )
         if self._capture_should_use_stereo():
             stereo_page = getattr(self, "_stereo_page", None)
             if stereo_page is not None:
@@ -351,6 +367,11 @@ class MainWindow(QMainWindow):
         self._stop_video_recording()
 
     def _toggle_capture_recording(self) -> None:
+        trace_event(
+            "capture_recording_toggle_request",
+            route=getattr(self, "_capture_route_mode", "camera"),
+            use_stereo=self._capture_should_use_stereo(),
+        )
         if self._capture_should_use_stereo():
             stereo_page = getattr(self, "_stereo_page", None)
             if stereo_page is not None:
@@ -1481,8 +1502,20 @@ class MainWindow(QMainWindow):
         try:
             edges = (msg or {}).get("edges", {}) or {}
             if edges.get("x") == "down":
+                trace_event(
+                    "pilot_capture_edge",
+                    button="x",
+                    route=getattr(self, "_capture_route_mode", "camera"),
+                    center_page=getattr(self, "_center_page_key", ""),
+                )
                 self._capture_still()
             if edges.get("b") == "down":
+                trace_event(
+                    "pilot_capture_edge",
+                    button="b",
+                    route=getattr(self, "_capture_route_mode", "camera"),
+                    center_page=getattr(self, "_center_page_key", ""),
+                )
                 self._toggle_capture_recording()
         except Exception:
             pass
@@ -2630,7 +2663,14 @@ class MainWindow(QMainWindow):
         except Exception as exc:
             self.statusBar().showMessage(f"Could not prepare save directory: {exc}", 5000)
             return
+        current_name = ""
+        try:
+            current_name = self.video_panel.current_stream_name()
+        except Exception:
+            current_name = ""
+        trace_event("mono_snapshot_request", stream=current_name, out_dir=out_dir)
         path = self.video_panel.save_snapshot(out_dir=str(out_dir))
+        trace_event("mono_snapshot_result", stream=current_name, path=path)
         if path:
             self.statusBar().showMessage(f"Saving snapshot: {path}{self._save_location_note(location)}", 5000)
         else:
@@ -2648,7 +2688,10 @@ class MainWindow(QMainWindow):
         except Exception as exc:
             self.statusBar().showMessage(f"Could not prepare save directory: {exc}", 5000)
             return
+        stream_name = getattr(vw, "stream_name", "")
+        trace_event("mono_video_recording_start_request", stream=stream_name, out_dir=out_dir, fps=30.0)
         target = vw.start_recording(out_dir=str(out_dir), fps=30.0)
+        trace_event("mono_video_recording_start_result", stream=stream_name, target=target)
         if target:
             self.statusBar().showMessage(f"Video recording started -> {target}{self._save_location_note(location)}", 5000)
         else:
@@ -2661,6 +2704,8 @@ class MainWindow(QMainWindow):
         if hasattr(vw, "is_recording") and not vw.is_recording():
             self.statusBar().showMessage("Video recording is not active", 3000)
             return
+        stream_name = getattr(vw, "stream_name", "")
+        trace_event("mono_video_recording_stop_request", stream=stream_name)
         vw.stop_recording()
         self.statusBar().showMessage("Video recording finalizing", 3000)
 
@@ -2674,6 +2719,8 @@ class MainWindow(QMainWindow):
         except Exception:
             is_recording = False
         if is_recording:
+            trace_event("mono_video_recording_toggle_state", stream=getattr(vw, "stream_name", ""), recording=True)
             self._stop_video_recording()
         else:
+            trace_event("mono_video_recording_toggle_state", stream=getattr(vw, "stream_name", ""), recording=False)
             self._start_video_recording()

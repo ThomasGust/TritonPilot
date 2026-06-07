@@ -17,6 +17,7 @@ import numpy as np
 
 from network.net_select import parse_zmq_endpoint, choose_video_receive_ip
 from config import VIDEO_RPC_ENDPOINT
+from recording.capture_trace import trace_event
 from video.gst_receiver import ReceiverProcess, RxConfig
 from video.frame_rotation import normalize_rotation_deg
 from video.rov_streams import ROVStreams
@@ -298,6 +299,16 @@ class RemoteCaptureCamera:
                 finally:
                     s.close()
         self.windows_host = windows_host
+        trace_event(
+            "capture_camera_init",
+            stream=self.name,
+            port=self.port,
+            windows_host=self.windows_host,
+            width=self.width,
+            height=self.height,
+            fps=self.fps,
+            video_format=self.video_format,
+        )
 
         tx_is_h264 = (
             str(stream_opts.get("video_format", video_format)).lower() == "h264"
@@ -343,6 +354,13 @@ class RemoteCaptureCamera:
         )
         self.rx = ReceiverProcess(rx_cfg)
         self.rx.start()
+        trace_event(
+            "capture_camera_started",
+            stream=self.name,
+            port=self.port,
+            windows_host=self.windows_host,
+            codec=rx_cfg.codec,
+        )
 
     def read(self):
         packet = self.read_frame_packet()
@@ -377,6 +395,7 @@ class RemoteCaptureCamera:
         return [self._decode_packet(packet) for packet in packets]
 
     def release(self, rx_grace_s: float = 0.15):
+        trace_event("capture_camera_release", stream=self.name, port=self.port, rx_grace_s=rx_grace_s)
         try:
             self.rx.stop(grace_s=rx_grace_s)
         except Exception as e:
@@ -530,19 +549,123 @@ class RemoteCameraManager:
                 return int(value)
         return int(stream_opts.get("port", 5000))
 
+    def _stream_start_kwargs_for_capture(self, stream_opts: dict, capture_port: int) -> dict:
+        host = self.windows_host
+        if host is None:
+            rov_host, rov_port = parse_zmq_endpoint(VIDEO_RPC_ENDPOINT)
+            host = choose_video_receive_ip(
+                remote_host=rov_host,
+                remote_port=int(rov_port),
+                prefer_wired=bool(stream_opts.get("tether_prefer_wired", True)),
+                require_private=True,
+            )
+        kwargs = dict(
+            name=stream_opts["name"],
+            device=stream_opts["device"],
+            width=int(stream_opts["width"]),
+            height=int(stream_opts["height"]),
+            fps=int(stream_opts["fps"]),
+            video_format=stream_opts.get("video_format", "mjpeg"),
+            host=host,
+            port=int(stream_opts.get("port", 5000)),
+        )
+        for key in (
+            "encode",
+            "h264_bitrate",
+            "h264_gop",
+            "transport",
+            "rtp_pt_jpeg",
+            "rtp_pt_h264",
+            "rtp_mtu",
+            "latency_ms",
+            "sync",
+            "extra",
+        ):
+            if key in stream_opts and stream_opts[key] is not None:
+                kwargs[key] = stream_opts[key]
+
+        extra = dict(kwargs.get("extra") or {})
+        raw_ports = extra.get("udp_mirror_ports", extra.get("mirror_udp_ports", []))
+        if isinstance(raw_ports, (str, bytes)):
+            ports = [int(p.strip()) for p in str(raw_ports).split(",") if p.strip()]
+        elif isinstance(raw_ports, (list, tuple, set)):
+            ports = [int(p) for p in raw_ports]
+        elif raw_ports:
+            ports = [int(raw_ports)]
+        else:
+            ports = []
+        if int(capture_port) not in ports:
+            ports.append(int(capture_port))
+        extra["udp_mirror_ports"] = ports
+        kwargs["extra"] = extra
+        return kwargs
+
+    def _capture_stream_needs_start(self, name: str, stream_opts: dict, capture_port: int) -> bool:
+        try:
+            status = self.rov.list_stream_status()
+        except Exception as exc:
+            trace_event("camera_manager_capture_status_failed", stream=name, error=str(exc))
+            return False
+        entry = (status or {}).get(name)
+        if not entry or not bool((entry or {}).get("running", True)):
+            trace_event("camera_manager_capture_stream_missing", stream=name, status=entry)
+            return True
+        config = dict((entry or {}).get("config") or entry or {})
+        if int(config.get("port", stream_opts.get("port", 5000))) != int(stream_opts.get("port", 5000)):
+            trace_event("camera_manager_capture_stream_port_mismatch", stream=name, status=config)
+            return True
+        extra = config.get("extra") or {}
+        raw_ports = extra.get("udp_mirror_ports", extra.get("mirror_udp_ports", []))
+        if isinstance(raw_ports, (str, bytes)):
+            ports = [int(p.strip()) for p in str(raw_ports).split(",") if p.strip()]
+        elif isinstance(raw_ports, (list, tuple, set)):
+            ports = [int(p) for p in raw_ports]
+        elif raw_ports:
+            ports = [int(raw_ports)]
+        else:
+            ports = []
+        if int(capture_port) not in ports:
+            trace_event(
+                "camera_manager_capture_stream_missing_mirror",
+                stream=name,
+                capture_port=capture_port,
+                status_ports=ports,
+            )
+            return True
+        return False
+
+    def _start_rov_stream_for_capture(self, name: str, stream_opts: dict, capture_port: int) -> None:
+        kwargs = self._stream_start_kwargs_for_capture(stream_opts, capture_port)
+        trace_event(
+            "camera_manager_capture_stream_start_request",
+            stream=name,
+            port=kwargs.get("port"),
+            capture_port=capture_port,
+            host=kwargs.get("host"),
+        )
+        resp = self.rov.start_stream(**kwargs)
+        trace_event("camera_manager_capture_stream_started", stream=name, response=resp)
+
     def open_capture(self, name: str) -> RemoteCaptureCamera:
         """Open or share a capture-only receiver for a named stream."""
 
+        trace_event("camera_manager_open_capture_request", stream=name)
         name_lock = self._lock_for_name(name)
         with name_lock:
             with self._mgr_lock:
                 existing = self._capture_opened.get(name)
                 if existing is not None:
                     self._capture_refs[name] = int(self._capture_refs.get(name, 0)) + 1
+                    trace_event(
+                        "camera_manager_open_capture_reused",
+                        stream=name,
+                        refs=self._capture_refs[name],
+                    )
                     return existing
                 stream_opts = self._merged_stream_options(name)
 
             capture_port = self._capture_port_for_stream(stream_opts)
+            needs_rov_start = self._capture_stream_needs_start(name, stream_opts, capture_port)
             cam = RemoteCaptureCamera(
                 name=stream_opts["name"],
                 width=stream_opts["width"],
@@ -554,6 +677,15 @@ class RemoteCameraManager:
                 windows_host=self.windows_host,
                 stream_opts=stream_opts,
             )
+            if needs_rov_start:
+                try:
+                    self._start_rov_stream_for_capture(name, stream_opts, capture_port)
+                except Exception:
+                    try:
+                        cam.release()
+                    except Exception:
+                        pass
+                    raise
             with self._mgr_lock:
                 existing = self._capture_opened.get(name)
                 if existing is not None:
@@ -562,9 +694,20 @@ class RemoteCameraManager:
                     except Exception:
                         pass
                     self._capture_refs[name] = int(self._capture_refs.get(name, 0)) + 1
+                    trace_event(
+                        "camera_manager_open_capture_race_reused",
+                        stream=name,
+                        refs=self._capture_refs[name],
+                    )
                     return existing
                 self._capture_opened[name] = cam
                 self._capture_refs[name] = 1
+                trace_event(
+                    "camera_manager_open_capture_started",
+                    stream=name,
+                    port=capture_port,
+                    refs=1,
+                )
                 return cam
 
     def latest_capture_packet(self, name: str) -> CameraFramePacket | None:
@@ -577,20 +720,24 @@ class RemoteCameraManager:
     def close_capture(self, name: str) -> bool:
         """Release one reference to a capture-only receiver."""
 
+        trace_event("camera_manager_close_capture_request", stream=name)
         name_lock = self._lock_for_name(name)
         with name_lock:
             with self._mgr_lock:
                 cam = self._capture_opened.get(name)
                 if cam is None:
                     self._capture_refs.pop(name, None)
+                    trace_event("camera_manager_close_capture_missing", stream=name)
                     return False
                 refs = max(0, int(self._capture_refs.get(name, 1)) - 1)
                 if refs > 0:
                     self._capture_refs[name] = refs
+                    trace_event("camera_manager_close_capture_decremented", stream=name, refs=refs)
                     return False
                 self._capture_opened.pop(name, None)
                 self._capture_refs.pop(name, None)
             cam.release()
+            trace_event("camera_manager_close_capture_closed", stream=name)
             return True
 
     def close_all_capture(self) -> None:

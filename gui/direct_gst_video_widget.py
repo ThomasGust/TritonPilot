@@ -20,6 +20,7 @@ from PyQt6.QtWidgets import QLabel, QSizePolicy, QVBoxLayout, QWidget
 
 from config import VIDEO_RPC_ENDPOINT
 from network.net_select import choose_video_receive_ip, parse_zmq_endpoint
+from recording.capture_trace import trace_event
 from recording.capture_paths import timestamped_camera_stem, unique_capture_path
 from recording.save_location import DEFAULT_RECORDINGS_DIR
 from recording.video_recorder import VideoRecorder, save_snapshot
@@ -188,14 +189,26 @@ def _start_kwargs(stream_opts: dict[str, Any], *, host: str) -> dict[str, Any]:
     return kwargs
 
 class _DirectConnectWorker(QThread):
-    receiver_started = pyqtSignal(object)
-    connected = pyqtSignal(object, str)
+    receiver_started = pyqtSignal(object, object)
+    connected = pyqtSignal(object, str, object)
     failed = pyqtSignal(str)
 
-    def __init__(self, manager: RemoteCameraManager, stream_name: str, parent=None):
+    def __init__(
+        self,
+        manager: RemoteCameraManager,
+        stream_name: str,
+        *,
+        host_hwnd: int = 0,
+        host_width: int = 1,
+        host_height: int = 1,
+        parent=None,
+    ):
         super().__init__(parent)
         self.manager = manager
         self.stream_name = stream_name
+        self.host_hwnd = int(host_hwnd or 0)
+        self.host_width = max(1, int(host_width or 1))
+        self.host_height = max(1, int(host_height or 1))
         self.proc: subprocess.Popen | None = None
 
     def run(self) -> None:
@@ -240,8 +253,12 @@ class _DirectConnectWorker(QThread):
             env = dict(os.environ)
             bootstrap_gstreamer_env(env)
             creationflags = 0
+            startupinfo = None
             if os.name == "nt":
                 creationflags = subprocess.CREATE_NEW_PROCESS_GROUP
+                startupinfo = subprocess.STARTUPINFO()
+                startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+                startupinfo.wShowWindow = 0
             self.proc = subprocess.Popen(
                 cmd,
                 stdin=subprocess.DEVNULL,
@@ -249,12 +266,22 @@ class _DirectConnectWorker(QThread):
                 stderr=subprocess.PIPE,
                 env=env,
                 creationflags=creationflags,
+                startupinfo=startupinfo,
                 bufsize=0,
             )
-            self.receiver_started.emit(self.proc)
+            self.receiver_started.emit(self.proc, 0)
 
             # Start the sender after the UDP listener exists.
             resp = self.manager.rov.start_stream(**start_kwargs)
+            embedded_hwnd = 0
+            if self.host_hwnd:
+                embedded_hwnd = _wait_and_embed_window(
+                    self.proc.pid,
+                    self.host_hwnd,
+                    self.host_width,
+                    self.host_height,
+                    timeout_s=1.0,
+                )
             notice = ""
             try:
                 messages = list((resp or {}).get("messages") or [])
@@ -262,7 +289,7 @@ class _DirectConnectWorker(QThread):
                     notice = "\n".join(str(m) for m in messages[-3:])
             except Exception:
                 notice = ""
-            self.connected.emit(self.proc, notice)
+            self.connected.emit(self.proc, notice, embedded_hwnd)
         except Exception as exc:
             proc = self.proc
             self.proc = None
@@ -341,7 +368,7 @@ def _top_level_windows_for_pid(pid: int) -> list[int]:
     def _maybe_add(hwnd) -> None:
         proc_id = ctypes.c_ulong()
         _user32.GetWindowThreadProcessId(hwnd, ctypes.byref(proc_id))
-        if int(proc_id.value) == int(pid) and _user32.IsWindowVisible(hwnd) and _title(hwnd) == "Direct3D11 renderer":
+        if int(proc_id.value) == int(pid) and _title(hwnd) == "Direct3D11 renderer":
             matches.append(int(hwnd))
 
     _EnumChildProc = ctypes.WINFUNCTYPE(ctypes.c_bool, ctypes.c_void_p, ctypes.c_void_p)
@@ -396,6 +423,18 @@ def _embed_window(child_hwnd: int, parent_hwnd: int, width: int, height: int) ->
             _SWP_NOZORDER | _SWP_NOACTIVATE | _SWP_FRAMECHANGED | _SWP_SHOWWINDOW,
         )
     )
+
+
+def _wait_and_embed_window(pid: int, parent_hwnd: int, width: int, height: int, *, timeout_s: float) -> int:
+    if os.name != "nt" or not pid or not parent_hwnd:
+        return 0
+    deadline = time.monotonic() + max(0.0, float(timeout_s))
+    while time.monotonic() <= deadline:
+        for hwnd in _top_level_windows_for_pid(int(pid)):
+            if _embed_window(hwnd, parent_hwnd, width, height):
+                return int(hwnd)
+        time.sleep(0.005)
+    return 0
 
 
 class _CaptureBadgeOverlay(QWidget):
@@ -493,6 +532,8 @@ class DirectGstVideoWidget(QWidget):
         self._record_thread: threading.Thread | None = None
         self._record_stop = threading.Event()
         self._record_started_ts: float | None = None
+        self._record_started_monotonic_s: float | None = None
+        self._record_elapsed_s: int = 0
         self._snapshot_indicator_until_ts: float = 0.0
         self._snapshot_indicator_text: str = "SNAP"
         self._snapshot_indicator_duration_s: float = 1.2
@@ -524,8 +565,13 @@ class DirectGstVideoWidget(QWidget):
         self._tick_timer.timeout.connect(self._tick)
         self._tick_timer.start()
         self._embed_timer = QTimer(self)
-        self._embed_timer.setInterval(50)
+        self._embed_timer.setInterval(10)
         self._embed_timer.timeout.connect(self._try_embed)
+        self._record_label_timer = QTimer(self)
+        self._record_label_timer.setTimerType(Qt.TimerType.PreciseTimer)
+        self._record_label_timer.setSingleShot(True)
+        self._record_label_timer.setInterval(1000)
+        self._record_label_timer.timeout.connect(self._on_record_label_tick)
         self._start_connect()
 
     def _show_message(self, text: str) -> None:
@@ -547,13 +593,49 @@ class DirectGstVideoWidget(QWidget):
     def _layout_capture_badges(self) -> None:
         self._capture_overlay.sync()
 
+    def _record_elapsed_from_clock(self) -> int:
+        started = self._record_started_monotonic_s
+        if started is None:
+            return 0
+        elapsed = int(max(0.0, time.monotonic() - float(started)))
+        if elapsed < self._record_elapsed_s:
+            return int(self._record_elapsed_s)
+        self._record_elapsed_s = elapsed
+        return elapsed
+
+    def _schedule_record_label_tick(self) -> None:
+        if self._record_started_monotonic_s is None or self._rec is None:
+            self._record_label_timer.stop()
+            return
+        elapsed = max(0.0, time.monotonic() - float(self._record_started_monotonic_s))
+        next_second = int(elapsed) + 1
+        delay_ms = int(max(25.0, min(1000.0, (next_second - elapsed) * 1000.0)))
+        self._record_label_timer.start(delay_ms)
+
+    def _on_record_label_tick(self) -> None:
+        if self._record_started_ts is None or self._rec is None:
+            self._record_label_timer.stop()
+            return
+        self._set_record_badge_elapsed(self._record_elapsed_from_clock())
+        self._layout_capture_badges()
+        self._schedule_record_label_tick()
+
+    def _set_record_badge_elapsed(self, elapsed_s: int) -> None:
+        text = f"REC {self._format_elapsed(elapsed_s)}"
+        if self._record_badge.text() != text:
+            self._record_badge.setText(text)
+            trace_event(
+                "mono_record_badge_update",
+                stream=self.stream_name,
+                elapsed_s=int(elapsed_s),
+                text=text,
+            )
+        self._record_badge.show()
+
     def _refresh_capture_indicators(self) -> None:
         now = time.time()
         if self._record_started_ts is not None and self._rec is not None:
-            text = f"REC {self._format_elapsed(now - self._record_started_ts)}"
-            if self._record_badge.text() != text:
-                self._record_badge.setText(text)
-            self._record_badge.show()
+            self._set_record_badge_elapsed(self._record_elapsed_from_clock())
         else:
             self._record_badge.hide()
 
@@ -673,24 +755,37 @@ class DirectGstVideoWidget(QWidget):
         self._last_error = None
         self._embedded_hwnd = None
         self._show_message(f"{self.stream_name}\nConnecting direct renderer...")
-        self._connect_worker = _DirectConnectWorker(self.manager, self.stream_name, parent=self)
+        self._connect_worker = _DirectConnectWorker(
+            self.manager,
+            self.stream_name,
+            host_hwnd=int(self.winId()),
+            host_width=self.width(),
+            host_height=self.height(),
+            parent=self,
+        )
         self._connect_worker.receiver_started.connect(self._on_receiver_started)
         self._connect_worker.connected.connect(self._on_connected)
         self._connect_worker.failed.connect(self._on_connect_failed)
         self._connect_attempt_active = True
         self._connect_worker.start()
 
-    def _on_receiver_started(self, proc: subprocess.Popen) -> None:
+    def _on_receiver_started(self, proc: subprocess.Popen, embedded_hwnd: int = 0) -> None:
         self._proc = proc
-        self._show_message(f"{self.stream_name}\nWaiting for Direct3D window...")
-        self._try_embed()
+        if embedded_hwnd:
+            self._embedded_hwnd = int(embedded_hwnd)
+            self._hide_message()
+        else:
+            self._show_message(f"{self.stream_name}\nWaiting for Direct3D window...")
+            self._try_embed()
         if not self._embedded_hwnd and not self._embed_timer.isActive():
             self._embed_timer.start()
 
-    def _on_connected(self, proc: subprocess.Popen, notice: str) -> None:
+    def _on_connected(self, proc: subprocess.Popen, notice: str, embedded_hwnd: int = 0) -> None:
         self._connect_attempt_active = False
         self._connect_worker = None
         self._proc = proc
+        if embedded_hwnd:
+            self._embedded_hwnd = int(embedded_hwnd)
         self._state = "playing"
         self._connected_ts = time.time()
         self._retry_backoff_s = 0.5
@@ -827,44 +922,175 @@ class DirectGstVideoWidget(QWidget):
             base = Path(basename).stem or self.stream_name
         out_file = unique_capture_path(out_dir, base, ".mp4")
 
+        record_started_wall = time.time()
+        record_started_mono = time.monotonic()
+        trace_event(
+            "mono_record_start_request",
+            stream=self.stream_name,
+            out_file=out_file,
+            fps=fps,
+            record_started_wall_s=record_started_wall,
+            record_started_mono_s=record_started_mono,
+        )
+        self._record_started_ts = record_started_wall
+        self._record_started_monotonic_s = record_started_mono
+        self._record_elapsed_s = 0
+        self._set_record_badge_elapsed(0)
+        self._schedule_record_label_tick()
+
+        capture_open_s = time.monotonic()
         try:
             self._ensure_capture_camera()
         except Exception as exc:
             logger.warning("Could not open capture receiver for '%s': %s", self.stream_name, exc)
+            trace_event(
+                "mono_capture_receiver_failed",
+                stream=self.stream_name,
+                out_file=out_file,
+                dt_ms=(time.monotonic() - capture_open_s) * 1000.0,
+                error=str(exc),
+            )
+            self._record_started_ts = None
+            self._record_started_monotonic_s = None
+            self._record_elapsed_s = 0
+            self._record_label_timer.stop()
+            self._refresh_capture_indicators()
             return None
+        trace_event(
+            "mono_capture_receiver_ready",
+            stream=self.stream_name,
+            out_file=out_file,
+            dt_ms=(time.monotonic() - capture_open_s) * 1000.0,
+        )
 
         rec = VideoRecorder(out_file, fps=fps)
+        recorder_start_s = time.monotonic()
         try:
             target = rec.start()
         except Exception as exc:
             logger.warning("Could not start recorder for '%s': %s", self.stream_name, exc)
+            trace_event(
+                "mono_recorder_start_failed",
+                stream=self.stream_name,
+                out_file=out_file,
+                dt_ms=(time.monotonic() - recorder_start_s) * 1000.0,
+                error=str(exc),
+            )
+            self._record_started_ts = None
+            self._record_started_monotonic_s = None
+            self._record_elapsed_s = 0
+            self._record_label_timer.stop()
+            self._refresh_capture_indicators()
             return None
+        trace_event(
+            "mono_recorder_started",
+            stream=self.stream_name,
+            out_file=out_file,
+            target=target,
+            dt_ms=(time.monotonic() - recorder_start_s) * 1000.0,
+        )
 
         self._rec = rec
         self._record_stop.clear()
-        self._record_started_ts = time.time()
 
         def _record_loop() -> None:
             period_s = 1.0 / max(1.0, float(fps or 30.0))
-            next_ts = time.monotonic()
+            next_ts = float(record_started_mono)
+            last_frame = None
+            last_seq = None
+            frame_index = 0
+            trace_event(
+                "mono_record_loop_started",
+                stream=self.stream_name,
+                out_file=out_file,
+                fps=fps,
+                period_ms=period_s * 1000.0,
+            )
             while not self._record_stop.is_set():
-                packet = None
-                try:
-                    packet = self._capture_packet(wait_s=min(0.25, period_s), consume=True)
-                except Exception as exc:
-                    logger.warning("Capture read failed for '%s': %s", self.stream_name, exc)
-                    time.sleep(0.05)
-                if packet is not None:
+                if last_frame is None:
                     try:
-                        rec.add_frame(packet.frame_bgr)
-                    except Exception:
-                        pass
-                next_ts += period_s
+                        packet = self._capture_packet(wait_s=min(0.25, max(0.02, period_s)), consume=False)
+                    except Exception as exc:
+                        logger.warning("Capture read failed for '%s': %s", self.stream_name, exc)
+                        packet = None
+                    if packet is None:
+                        trace_event(
+                            "mono_record_waiting_first_frame",
+                            stream=self.stream_name,
+                            out_file=out_file,
+                            elapsed_ms=(time.monotonic() - record_started_mono) * 1000.0,
+                        )
+                        self._record_stop.wait(0.02)
+                        continue
+                    last_frame = packet.frame_bgr
+                    last_seq = int(getattr(packet, "seq", -1))
+                    trace_event(
+                        "mono_record_first_frame",
+                        stream=self.stream_name,
+                        out_file=out_file,
+                        seq=last_seq,
+                        frame_age_ms=(time.monotonic() - float(getattr(packet, "monotonic_ts", time.monotonic()))) * 1000.0,
+                        elapsed_ms=(time.monotonic() - record_started_mono) * 1000.0,
+                    )
+
                 sleep_s = next_ts - time.monotonic()
                 if sleep_s > 0:
                     self._record_stop.wait(min(sleep_s, 0.1))
-                else:
-                    next_ts = time.monotonic()
+                    continue
+                due_s = next_ts
+                now_s = time.monotonic()
+                packet = None
+                reused = True
+                try:
+                    packet = self._capture_packet(wait_s=0.0, consume=False)
+                    if packet is not None:
+                        last_frame = packet.frame_bgr
+                        seq = int(getattr(packet, "seq", -1))
+                        reused = seq == last_seq
+                        last_seq = seq
+                except Exception as exc:
+                    logger.warning("Capture read failed for '%s': %s", self.stream_name, exc)
+                    trace_event(
+                        "mono_record_capture_read_failed",
+                        stream=self.stream_name,
+                        out_file=out_file,
+                        frame_index=frame_index,
+                        error=str(exc),
+                    )
+                seq = last_seq
+                frame_age_ms = None
+                if packet is not None:
+                    try:
+                        frame_age_ms = (time.monotonic() - float(packet.monotonic_ts)) * 1000.0
+                    except Exception:
+                        frame_age_ms = None
+                try:
+                    accepted = bool(rec.add_frame(last_frame))
+                except Exception:
+                    accepted = False
+                frame_index += 1
+                trace_event(
+                    "mono_record_tick",
+                    stream=self.stream_name,
+                    out_file=out_file,
+                    frame_index=frame_index,
+                    seq=seq,
+                    reused=reused,
+                    accepted=accepted,
+                    queue_size=getattr(rec, "queue_size", lambda: -1)(),
+                    due_elapsed_ms=(due_s - record_started_mono) * 1000.0,
+                    lag_ms=(now_s - due_s) * 1000.0,
+                    frame_age_ms=frame_age_ms,
+                    label_elapsed_s=self._record_elapsed_s,
+                )
+                next_ts += period_s
+            trace_event(
+                "mono_record_loop_stopped",
+                stream=self.stream_name,
+                out_file=out_file,
+                frame_index=frame_index,
+                queue_size=getattr(rec, "queue_size", lambda: -1)(),
+            )
 
         self._record_thread = threading.Thread(
             target=_record_loop,
@@ -872,7 +1098,9 @@ class DirectGstVideoWidget(QWidget):
             daemon=True,
         )
         self._record_thread.start()
+        trace_event("mono_record_thread_started", stream=self.stream_name, out_file=out_file, target=target)
         self._refresh_capture_indicators()
+        self._schedule_record_label_tick()
         return str(target)
 
     def stop_recording(self) -> None:
@@ -880,22 +1108,57 @@ class DirectGstVideoWidget(QWidget):
         thread = self._record_thread
         if rec is None:
             return
+        trace_event(
+            "mono_record_stop_request",
+            stream=self.stream_name,
+            target=getattr(rec, "target", None),
+            queue_size=getattr(rec, "queue_size", lambda: -1)(),
+            elapsed_s=self._record_elapsed_s,
+        )
         self._rec = None
         self._record_thread = None
         self._record_started_ts = None
+        self._record_started_monotonic_s = None
+        self._record_elapsed_s = 0
         self._record_stop.set()
+        self._record_label_timer.stop()
         self._refresh_capture_indicators()
 
         def _finish_recording() -> None:
+            finish_s = time.monotonic()
+            trace_event(
+                "mono_record_finish_started",
+                stream=self.stream_name,
+                target=getattr(rec, "target", None),
+                queue_size=getattr(rec, "queue_size", lambda: -1)(),
+            )
             try:
                 if thread is not None:
                     thread.join(timeout=1.5)
             except Exception:
                 pass
             try:
-                rec.stop()
+                try:
+                    rec.stop(timeout_s=10.0)
+                except TypeError:
+                    rec.stop()
             except Exception as exc:
                 logger.warning("Video recording finalization failed for '%s': %s", self.stream_name, exc)
+                trace_event(
+                    "mono_record_finish_failed",
+                    stream=self.stream_name,
+                    target=getattr(rec, "target", None),
+                    dt_ms=(time.monotonic() - finish_s) * 1000.0,
+                    error=str(exc),
+                )
+                return
+            trace_event(
+                "mono_record_finished",
+                stream=self.stream_name,
+                target=getattr(rec, "target", None),
+                dt_ms=(time.monotonic() - finish_s) * 1000.0,
+                queue_size=getattr(rec, "queue_size", lambda: -1)(),
+            )
 
         try:
             threading.Thread(
@@ -1015,6 +1278,10 @@ class DirectGstVideoWidget(QWidget):
             pass
         try:
             self._embed_timer.stop()
+        except Exception:
+            pass
+        try:
+            self._record_label_timer.stop()
         except Exception:
             pass
         self.shutdown(release_only=True)

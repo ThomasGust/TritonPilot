@@ -51,3 +51,25 @@ def test_video_recorder_uses_opencv_mp4_when_imageio_is_missing(monkeypatch, tmp
     assert target.exists()
     assert target.stat().st_size > 0
     assert not (tmp_path / "opencv_fallback_frames").exists()
+
+
+def test_video_recorder_can_drop_pending_frames_on_stop(tmp_path: Path):
+    class _FakeThread:
+        def join(self, timeout=None):
+            return None
+
+        def is_alive(self):
+            return False
+
+    recorder = VideoRecorder(tmp_path / "drop_pending.mp4", fps=30.0)
+    recorder._started = True
+    recorder._thread = _FakeThread()
+    for idx in range(3):
+        recorder._q.put_nowait(_sample_frame(idx))
+
+    recorder.stop(drain_pending=False)
+
+    remaining = []
+    while not recorder._q.empty():
+        remaining.append(recorder._q.get_nowait())
+    assert remaining == [None]

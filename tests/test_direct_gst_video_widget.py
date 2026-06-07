@@ -7,6 +7,7 @@ import numpy as np
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
+from PyQt6.QtCore import Qt
 from PyQt6.QtWidgets import QApplication
 
 from gui.direct_gst_video_widget import DirectGstVideoWidget, DirectReceiverConfig, build_direct_receiver_cmd
@@ -111,6 +112,8 @@ class _FakeRecorder:
         self.target = self.out_path
         self.frames = 0
         self.stopped = False
+        self.stop_timeout_s = None
+        self.stop_drain_pending = None
 
     def start(self):
         self.out_path.parent.mkdir(parents=True, exist_ok=True)
@@ -120,7 +123,9 @@ class _FakeRecorder:
     def add_frame(self, frame):
         self.frames += 1
 
-    def stop(self):
+    def stop(self, timeout_s=5.0, *, drain_pending=True):
+        self.stop_timeout_s = timeout_s
+        self.stop_drain_pending = drain_pending
         self.stopped = True
 
 
@@ -141,10 +146,22 @@ def test_direct_widget_snapshot_and_recording_use_capture_receiver(monkeypatch, 
     widget.show()
     try:
         app.processEvents()
+        assert widget._record_label_timer.timerType() == Qt.TimerType.PreciseTimer
+        assert widget._record_label_timer.isSingleShot() is True
+
         target = widget.start_recording(out_dir=str(tmp_path), basename="primary", fps=10.0)
         assert target is not None
         assert widget.is_recording() is True
         assert manager.opened == 1
+        assert widget._record_badge.text() == "REC 00:00"
+
+        widget._record_started_monotonic_s = time.monotonic() - 34.2
+        widget._on_record_label_tick()
+        assert widget._record_badge.text() == "REC 00:34"
+
+        widget._record_started_monotonic_s = time.monotonic() - 29.0
+        widget._refresh_capture_indicators()
+        assert widget._record_badge.text() == "REC 00:34"
 
         snap_path = widget.save_snapshot(out_dir=str(tmp_path), basename="snap")
         deadline = time.monotonic() + 1.0
@@ -160,9 +177,17 @@ def test_direct_widget_snapshot_and_recording_use_capture_receiver(monkeypatch, 
         assert widget._capture_overlay.isVisible() is True
         assert widget._snapshot_badge.isVisible() is True
 
+        rec = widget._rec
         widget.stop_recording()
-        app.processEvents()
+        deadline = time.monotonic() + 1.0
+        while rec is not None and not rec.stopped and time.monotonic() < deadline:
+            app.processEvents()
+            time.sleep(0.01)
         assert widget.is_recording() is False
+        assert rec is not None
+        assert rec.stopped is True
+        assert rec.stop_timeout_s == 10.0
+        assert rec.stop_drain_pending is True
     finally:
         widget.close()
         widget.deleteLater()

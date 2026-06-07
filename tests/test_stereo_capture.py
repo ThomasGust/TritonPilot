@@ -213,6 +213,58 @@ def test_stereo_capture_can_defer_manifest_flush_until_stop(tmp_path: Path):
     assert manifest_after_stop["frames"][0]["stem"] == "pair_000001"
 
 
+def test_stereo_capture_can_save_images_asynchronously_until_stop(tmp_path: Path, monkeypatch):
+    streams_path = tmp_path / "streams.json"
+    streams_path.write_text(
+        json.dumps(
+            {
+                "streams": [{"name": "Left"}, {"name": "Right"}],
+                "stereo_pairs": [
+                    {
+                        "name": "Forward",
+                        "left": "Left",
+                        "right": "Right",
+                        "rig_id": "rig-a",
+                        "max_pair_delta_ms": 20,
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    pair = load_stereo_pairs(streams_path)[0]
+    manager = _FakeManager()
+    session = StereoCaptureSession(
+        manager,  # type: ignore[arg-type]
+        pair,
+        output_root=tmp_path,
+        session_name="async-session",
+    )
+
+    def _slow_save(left_frame, left_path, right_frame, right_path):
+        time.sleep(0.2)
+        left_path.write_bytes(b"left")
+        right_path.write_bytes(b"right")
+
+    monkeypatch.setattr(session, "_save_images", _slow_save)
+
+    session.start()
+    started = time.monotonic()
+    record = session.capture_once(wait_s=0.1, flush_manifest=False, async_save=True)
+    capture_elapsed = time.monotonic() - started
+
+    assert capture_elapsed < 0.15
+    assert record["save_pending"] is True
+    assert not (session.session_dir / record["left_path"]).exists()
+
+    session.stop()
+
+    manifest_after_stop = json.loads(session.manifest_path.read_text(encoding="utf-8"))
+    assert (session.session_dir / record["left_path"]).exists()
+    assert (session.session_dir / record["right_path"]).exists()
+    assert manifest_after_stop["frames"][0]["save_pending"] is False
+
+
 def test_stereo_capture_chooses_closest_buffered_frame_pair(tmp_path: Path):
     streams_path = tmp_path / "streams.json"
     streams_path.write_text(

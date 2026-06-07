@@ -141,12 +141,23 @@ def test_video_tabs_widget_activation_selects_matching_pane(monkeypatch):
         app.processEvents()
         assert tabs.current_stream_name() == "Primary Camera"
 
+        attach_calls = []
+        for pane in tabs._panes:
+            original = pane.attach_widget
+
+            def _spy(widget, placeholder, *, _original=original):
+                attach_calls.append((widget, placeholder))
+                return _original(widget, placeholder)
+
+            monkeypatch.setattr(pane, "attach_widget", _spy)
+
         widget = tabs._widgets["Aux Camera"]
         assert isinstance(widget, _ActivatingDummyVideoWidget)
         widget.activated.emit()
         app.processEvents()
 
         assert tabs.current_stream_name() == "Aux Camera"
+        assert attach_calls == []
     finally:
         tabs.close()
         tabs.deleteLater()
