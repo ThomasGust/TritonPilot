@@ -144,25 +144,6 @@ def test_video_widget_scales_frames_to_fill_pane_without_stretching(monkeypatch)
         app.processEvents()
 
 
-def test_video_widget_display_fps_updates_tick_timer(monkeypatch):
-    app = _app()
-    monkeypatch.setattr("gui.video_widget.VideoWidget._start_connect", lambda self: None)
-
-    widget = VideoWidget(_DummyManager(), "front")
-    try:
-        widget.set_display_fps(20.0)
-        assert widget.display_fps() == 20.0
-        assert widget._tick_timer.interval() == 50
-
-        widget.set_display_fps(0.0)
-        assert widget.display_fps() == 1.0
-        assert widget._tick_timer.interval() == 1000
-    finally:
-        widget.close()
-        widget.deleteLater()
-        app.processEvents()
-
-
 def test_video_widget_shutdown_waits_for_inflight_connect_worker(monkeypatch):
     app = _app()
     monkeypatch.setattr("gui.video_widget.VideoWidget._start_connect", lambda self: None)

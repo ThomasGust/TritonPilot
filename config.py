@@ -101,19 +101,6 @@ VIDEO_WARM_HIDDEN_STREAMS = os.environ.get("TRITON_VIDEO_WARM_HIDDEN_STREAMS", "
 VIDEO_WARMUP_INTERVAL_MS = int(os.environ.get("TRITON_VIDEO_WARMUP_INTERVAL_MS", "750"))
 
 
-def _float_env(name: str, default: float, *, min_value: float, max_value: float) -> float:
-    raw = os.environ.get(name, "").strip()
-    if not raw:
-        return float(default)
-    try:
-        value = float(raw)
-    except Exception:
-        return float(default)
-    if value < float(min_value) or value > float(max_value):
-        return float(default)
-    return value
-
-
 def _layout_count_env(name: str, default: int) -> int:
     raw = os.environ.get(name, "").strip()
     if not raw:
@@ -134,9 +121,6 @@ VIDEO_STOP_HIDDEN_STREAMS = os.environ.get("TRITON_VIDEO_STOP_HIDDEN_STREAMS", "
     "yes",
     "on",
 )
-VIDEO_DISPLAY_FPS_SINGLE = _float_env("TRITON_VIDEO_DISPLAY_FPS_SINGLE", 30.0, min_value=1.0, max_value=60.0)
-VIDEO_DISPLAY_FPS_DUAL = _float_env("TRITON_VIDEO_DISPLAY_FPS_DUAL", 30.0, min_value=1.0, max_value=60.0)
-VIDEO_DISPLAY_FPS_MULTI = _float_env("TRITON_VIDEO_DISPLAY_FPS_MULTI", 30.0, min_value=1.0, max_value=60.0)
 
 # Where your JSON with stream definitions lives
 STREAMS_FILE = Path(__file__).parent / "data" / "streams.json"

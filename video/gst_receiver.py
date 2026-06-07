@@ -341,40 +341,6 @@ class ReceiverProcess:
         self.restart()
 
     # ---------------- RAW READER (fast, old way) ---------------- #
-    def _read_exact(self, stream, n: int) -> Optional[bytes | bytearray]:
-        """Read exactly *n* bytes without repeated full-buffer copies."""
-        if n <= 0:
-            return b""
-
-        if hasattr(stream, "readinto"):
-            buf = bytearray(n)
-            view = memoryview(buf)
-            pos = 0
-            while pos < n and not self._stop_reader.is_set():
-                try:
-                    count = stream.readinto(view[pos:])
-                except (AttributeError, NotImplementedError):
-                    break
-                if not count:
-                    return None
-                pos += int(count)
-            if pos == n:
-                return buf
-
-        chunks: list[bytes] = []
-        total = 0
-        while total < n and not self._stop_reader.is_set():
-            chunk = stream.read(n - total)
-            if not chunk:
-                return None
-            chunks.append(chunk)
-            total += len(chunk)
-        if total != n:
-            return None
-        if len(chunks) == 1:
-            return chunks[0]
-        return b"".join(chunks)
-
     def _raw_reader_loop(self):
         assert self.proc is not None
         stream = self.proc.stdout
@@ -382,8 +348,17 @@ class ReceiverProcess:
             logger.error("No stdout to read for raw mode")
             return
 
+        def read_exact(n: int) -> Optional[bytes]:
+            buf = b""
+            while len(buf) < n and not self._stop_reader.is_set():
+                chunk = stream.read(n - len(buf))
+                if not chunk:
+                    return None
+                buf += chunk
+            return buf
+
         while not self._stop_reader.is_set():
-            frame = self._read_exact(stream, self._frame_size)
+            frame = read_exact(self._frame_size)
             if frame is None:
                 break
             # Just store it; no per-byte work here.

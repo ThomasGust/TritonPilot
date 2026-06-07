@@ -14,9 +14,6 @@ from PyQt6.QtWidgets import (
 )
 
 from config import (
-    VIDEO_DISPLAY_FPS_DUAL,
-    VIDEO_DISPLAY_FPS_MULTI,
-    VIDEO_DISPLAY_FPS_SINGLE,
     VIDEO_DEFAULT_LAYOUT_COUNT,
     VIDEO_STOP_HIDDEN_STREAMS,
     VIDEO_WARM_HIDDEN_STREAMS,
@@ -205,26 +202,6 @@ class VideoTabs(QWidget):
             return 0
         return min(len(self.stream_names), self._allowed_layout_count(self._pane_count))
 
-    def _display_fps_for_visible_count(self) -> float:
-        count = self._visible_pane_count()
-        if count <= 1:
-            return float(VIDEO_DISPLAY_FPS_SINGLE)
-        if count == 2:
-            return float(VIDEO_DISPLAY_FPS_DUAL)
-        return float(VIDEO_DISPLAY_FPS_MULTI)
-
-    def _apply_display_fps_to_widgets(self) -> None:
-        fps = self._display_fps_for_visible_count()
-        for widget in self._widgets.values():
-            if widget is None:
-                continue
-            setter = getattr(widget, "set_display_fps", None)
-            if callable(setter):
-                try:
-                    setter(fps)
-                except Exception:
-                    pass
-
     def _find_layout_combo_index(self, count: int) -> int:
         for idx in range(self._layout_combo.count()):
             if int(self._layout_combo.itemData(idx)) == int(count):
@@ -375,7 +352,6 @@ class VideoTabs(QWidget):
 
         if save:
             self._save_preferences()
-        self._apply_display_fps_to_widgets()
         if emit:
             self.selectionChanged.emit()
 
@@ -462,12 +438,6 @@ class VideoTabs(QWidget):
         self._widgets[name] = vw
         if self._water_correction_enabled:
             vw.set_water_correction(True)
-        setter = getattr(vw, "set_display_fps", None)
-        if callable(setter):
-            try:
-                setter(self._display_fps_for_visible_count())
-            except Exception:
-                pass
 
     def _warmup_next(self) -> None:
         if not self.stream_names:

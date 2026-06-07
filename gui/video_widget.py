@@ -29,7 +29,6 @@ from config import (
     WATER_CORRECTION_TARGET_HFOV_DEG,
     VIDEO_FIRST_FRAME_TIMEOUT_S,
     VIDEO_STALL_TIMEOUT_S,
-    VIDEO_DISPLAY_FPS_SINGLE,
 )
 
 logger = logging.getLogger(__name__)
@@ -136,7 +135,6 @@ class VideoWidget(QWidget):
         self._snapshot_indicator_until_ts: float = 0.0
         self._snapshot_indicator_text: str = "SNAP"
         self._snapshot_indicator_duration_s: float = 1.2
-        self._display_fps: float = float(VIDEO_DISPLAY_FPS_SINGLE)
 
         # state
         self._state: str = "waiting"  # waiting|connecting|playing|stalled
@@ -180,8 +178,7 @@ class VideoWidget(QWidget):
 
         self._tick_timer = QTimer(self)
         self._tick_timer.timeout.connect(self._tick)
-        self.set_display_fps(self._display_fps)
-        self._tick_timer.start()
+        self._tick_timer.start(33)
 
         # kick off first attempt immediately (avoid waiting for the next timer tick)
         self._start_connect()
@@ -236,22 +233,6 @@ class VideoWidget(QWidget):
 
     def is_recording(self) -> bool:
         return self._rec is not None
-
-    def display_fps(self) -> float:
-        return float(self._display_fps)
-
-    def set_display_fps(self, fps: float) -> None:
-        try:
-            value = float(fps)
-        except Exception:
-            value = float(VIDEO_DISPLAY_FPS_SINGLE)
-        value = max(1.0, min(60.0, value))
-        self._display_fps = value
-        interval_ms = max(1, int(round(1000.0 / value)))
-        try:
-            self._tick_timer.setInterval(interval_ms)
-        except Exception:
-            pass
 
     def _format_elapsed(self, elapsed_s: float) -> str:
         elapsed_s = max(0, int(elapsed_s))

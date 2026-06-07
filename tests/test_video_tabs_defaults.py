@@ -34,13 +34,9 @@ class _DummyVideoWidget(QWidget):
         super().__init__(parent)
         self.stream_name = stream_name
         self._recording = False
-        self.display_fps_value = None
 
     def set_water_correction(self, enabled: bool) -> None:
         return
-
-    def set_display_fps(self, fps: float) -> None:
-        self.display_fps_value = float(fps)
 
     def is_recording(self) -> bool:
         return bool(self._recording)
@@ -258,36 +254,6 @@ def test_video_tabs_keeps_hidden_streams_warm_without_duplicate_widgets(monkeypa
 
         assert tabs.visible_stream_names() == ["Primary Camera", "Aux Camera", "Arm Camera"]
         assert tabs._widgets == original_widgets
-    finally:
-        tabs.close()
-        tabs.deleteLater()
-        app.processEvents()
-
-
-def test_video_tabs_lowers_display_fps_for_multi_camera_layouts(monkeypatch):
-    app = _app()
-    fake_settings = _FakeSettings({"video/layout_count": 4})
-    monkeypatch.setattr("gui.video_tabs.QSettings", lambda *args, **kwargs: fake_settings)
-    monkeypatch.setattr("gui.video_tabs.VideoWidget", _DummyVideoWidget)
-    monkeypatch.setattr("gui.video_tabs.VIDEO_DISPLAY_FPS_SINGLE", 30.0)
-    monkeypatch.setattr("gui.video_tabs.VIDEO_DISPLAY_FPS_DUAL", 24.0)
-    monkeypatch.setattr("gui.video_tabs.VIDEO_DISPLAY_FPS_MULTI", 18.0)
-
-    tabs = VideoTabs(
-        _DummyManager(default_pane_order=["Primary Camera", "Aux Camera", "Arm Camera", "Back Gripper Camera"]),
-        stream_names=["Primary Camera", "Aux Camera", "Arm Camera", "Back Gripper Camera"],
-    )
-    try:
-        app.processEvents()
-        assert {widget.display_fps_value for widget in tabs._widgets.values()} == {18.0}
-
-        tabs.set_layout_count(2)
-        app.processEvents()
-        assert {widget.display_fps_value for widget in tabs._widgets.values()} == {24.0}
-
-        tabs.set_layout_count(1)
-        app.processEvents()
-        assert {widget.display_fps_value for widget in tabs._widgets.values()} == {30.0}
     finally:
         tabs.close()
         tabs.deleteLater()
