@@ -14,11 +14,15 @@ from PyQt6.QtWidgets import (
 )
 
 from config import (
+    VIDEO_DISPLAY_FPS_DUAL,
+    VIDEO_DISPLAY_FPS_MULTI,
+    VIDEO_DISPLAY_FPS_SINGLE,
     VIDEO_DEFAULT_LAYOUT_COUNT,
     VIDEO_STOP_HIDDEN_STREAMS,
     VIDEO_WARM_HIDDEN_STREAMS,
     VIDEO_WARMUP_INTERVAL_MS,
 )
+from gui.direct_gst_video_widget import DirectGstVideoWidget
 from gui.video_widget import VideoWidget
 from video.cam import RemoteCameraManager
 
@@ -98,7 +102,7 @@ class VideoTabs(QWidget):
         self._settings = QSettings("TritonPilot", "ROVTopside")
 
         self._containers: dict[str, QWidget] = {}
-        self._widgets: dict[str, VideoWidget | None] = {}
+        self._widgets: dict[str, QWidget | None] = {}
         self._pane_streams: list[str | None] = [None, None, None, None]
         self._pane_count: int = 4
         self._active_pane_index: int = 0
@@ -201,6 +205,26 @@ class VideoTabs(QWidget):
         if not self.stream_names:
             return 0
         return min(len(self.stream_names), self._allowed_layout_count(self._pane_count))
+
+    def _display_fps_for_visible_count(self) -> float:
+        count = self._visible_pane_count()
+        if count <= 1:
+            return float(VIDEO_DISPLAY_FPS_SINGLE)
+        if count == 2:
+            return float(VIDEO_DISPLAY_FPS_DUAL)
+        return float(VIDEO_DISPLAY_FPS_MULTI)
+
+    def _apply_display_fps_to_widgets(self) -> None:
+        fps = self._display_fps_for_visible_count()
+        for widget in self._widgets.values():
+            if widget is None:
+                continue
+            setter = getattr(widget, "set_display_fps", None)
+            if callable(setter):
+                try:
+                    setter(fps)
+                except Exception:
+                    pass
 
     def _find_layout_combo_index(self, count: int) -> int:
         for idx in range(self._layout_combo.count()):
@@ -352,6 +376,7 @@ class VideoTabs(QWidget):
 
         if save:
             self._save_preferences()
+        self._apply_display_fps_to_widgets()
         if emit:
             self.selectionChanged.emit()
 
@@ -364,7 +389,7 @@ class VideoTabs(QWidget):
             w = item.widget()
             if w is not None:
                 w.setParent(None)
-                if not isinstance(w, VideoWidget):
+                if not isinstance(w, (VideoWidget, DirectGstVideoWidget)):
                     w.deleteLater()
 
     def _add_placeholder(self, cont: QWidget, text: str) -> None:
@@ -420,7 +445,8 @@ class VideoTabs(QWidget):
 
         self._clear_container(cont)
         try:
-            vw = VideoWidget(self.manager, stream_name=name)
+            widget_class = self._widget_class_for_stream(name)
+            vw = widget_class(self.manager, stream_name=name)
         except Exception as e:
             lay = cont.layout()
             if lay is not None:
@@ -438,6 +464,29 @@ class VideoTabs(QWidget):
         self._widgets[name] = vw
         if self._water_correction_enabled:
             vw.set_water_correction(True)
+        setter = getattr(vw, "set_display_fps", None)
+        if callable(setter):
+            try:
+                setter(self._display_fps_for_visible_count())
+            except Exception:
+                pass
+
+    def _widget_class_for_stream(self, name: str):
+        try:
+            stream_defs = getattr(self.manager, "stream_defs", {}) or {}
+            stream = dict(stream_defs.get(name, {}) or {})
+            render_mode = str(
+                stream.get(
+                    "render_mode",
+                    stream.get("receiver_render_mode", stream.get("display_mode", "")),
+                )
+            ).strip().lower()
+        except Exception:
+            render_mode = ""
+
+        if render_mode in {"direct3d", "direct-gst", "direct_gst", "gst", "gstreamer"}:
+            return DirectGstVideoWidget
+        return VideoWidget
 
     def _warmup_next(self) -> None:
         if not self.stream_names:
@@ -608,7 +657,7 @@ class VideoTabs(QWidget):
             self._ensure_stream_started(name)
         self._stop_hidden_streams()
 
-    def current_video_widget(self) -> VideoWidget | None:
+    def current_video_widget(self) -> QWidget | None:
         name = self.current_stream_name()
         if name is None:
             return None

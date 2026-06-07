@@ -88,11 +88,11 @@ class _CaptureWorker(QThread):
             close_on_stop=False,
         )
         captured = 0
+        stopped = False
         try:
             session.start()
             if self.continuous:
                 while not self.isInterruptionRequested():
-                    capture_started = time.monotonic()
                     record = session.capture_once(
                         wait_s=self.wait_s,
                         require_fresh=True,
@@ -101,7 +101,7 @@ class _CaptureWorker(QThread):
                     )
                     captured += 1
                     self.progress.emit(record)
-                    if not self._sleep_until(capture_started + self.interval_s):
+                    if not self._sleep_interruptibly(self.interval_s):
                         break
             else:
                 for idx in range(int(self.count or 0)):
@@ -116,19 +116,21 @@ class _CaptureWorker(QThread):
                     self.progress.emit(record)
                     if idx < int(self.count or 0) - 1 and not self._sleep_interruptibly(self.interval_s):
                         break
+            session.stop()
+            stopped = True
             self.completed.emit(str(session.manifest_path), captured)
         except StereoCaptureInterrupted:
+            session.stop()
+            stopped = True
             self.completed.emit(str(session.manifest_path), captured)
         except Exception as exc:
             self.failed.emit(str(exc))
         finally:
-            try:
-                session.stop()
-            except Exception:
-                pass
-
-    def _sleep_until(self, target_ts: float) -> bool:
-        return self._sleep_interruptibly(max(0.0, float(target_ts) - time.monotonic()))
+            if not stopped:
+                try:
+                    session.stop()
+                except Exception:
+                    pass
 
     def _sleep_interruptibly(self, duration_s: float) -> bool:
         deadline = time.monotonic() + max(0.0, float(duration_s))

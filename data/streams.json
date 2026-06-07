@@ -34,11 +34,25 @@
       "fps": 30,
       "rotation_deg": 0,
       "video_format": "h264",
-      "h264_bitrate": 16000000,
+      "render_mode": "direct3d",
+      "h264_bitrate": 8000000,
       "h264_gop": 15,
       "rtp_mtu": 1200,
-      "latency_ms": 60,
+      "latency_ms": 5,
+      "extra": {
+        "udp_qos_dscp": 34,
+        "sender_leaky_queues": true,
+        "sender_queue_max_buffers": 1,
+        "sender_queue_max_time_ms": 0,
+        "sender_v4l2_do_timestamp": true,
+        "v4l2_controls": {
+          "exposure_dynamic_framerate": 0
+        }
+      },
+      "receiver_h264_decoder": "decodebin",
+      "receiver_output_fps": 30,
       "port": 5001,
+      "capture_port": 6001,
       "enabled": true
     },
         {
@@ -49,11 +63,25 @@
       "fps": 30,
       "rotation_deg": 0,
       "video_format": "h264",
-      "h264_bitrate": 16000000,
+      "render_mode": "direct3d",
+      "h264_bitrate": 8000000,
       "h264_gop": 15,
       "rtp_mtu": 1200,
-      "latency_ms": 60,
+      "latency_ms": 5,
+      "extra": {
+        "udp_qos_dscp": 34,
+        "sender_leaky_queues": true,
+        "sender_queue_max_buffers": 1,
+        "sender_queue_max_time_ms": 0,
+        "sender_v4l2_do_timestamp": true,
+        "v4l2_controls": {
+          "exposure_dynamic_framerate": 0
+        }
+      },
+      "receiver_h264_decoder": "decodebin",
+      "receiver_output_fps": 30,
       "port": 5003,
+      "capture_port": 6003,
       "enabled": true
     },
         {
@@ -64,11 +92,25 @@
       "fps": 30,
       "rotation_deg": 0,
       "video_format": "h264",
-      "h264_bitrate": 16000000,
+      "render_mode": "direct3d",
+      "h264_bitrate": 8000000,
       "h264_gop": 15,
       "rtp_mtu": 1200,
-      "latency_ms": 60,
+      "latency_ms": 5,
+      "extra": {
+        "udp_qos_dscp": 34,
+        "sender_leaky_queues": true,
+        "sender_queue_max_buffers": 1,
+        "sender_queue_max_time_ms": 0,
+        "sender_v4l2_do_timestamp": true,
+        "v4l2_controls": {
+          "exposure_dynamic_framerate": 0
+        }
+      },
+      "receiver_h264_decoder": "decodebin",
+      "receiver_output_fps": 30,
       "port": 5000,
+      "capture_port": 6000,
       "enabled": true
     },
     {
@@ -79,11 +121,25 @@
       "fps": 30,
       "rotation_deg": 0,
       "video_format": "h264",
-      "h264_bitrate": 16000000,
+      "render_mode": "direct3d",
+      "h264_bitrate": 8000000,
       "h264_gop": 15,
       "rtp_mtu": 1200,
-      "latency_ms": 60,
+      "latency_ms": 5,
+      "extra": {
+        "udp_qos_dscp": 34,
+        "sender_leaky_queues": true,
+        "sender_queue_max_buffers": 1,
+        "sender_queue_max_time_ms": 0,
+        "sender_v4l2_do_timestamp": true,
+        "v4l2_controls": {
+          "exposure_dynamic_framerate": 0
+        }
+      },
+      "receiver_h264_decoder": "decodebin",
+      "receiver_output_fps": 30,
       "port": 5002,
+      "capture_port": 6002,
       "enabled": true
     }
   ]

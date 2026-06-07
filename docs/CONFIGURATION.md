@@ -41,6 +41,7 @@ $env:TRITON_VIDEO_STALL_TIMEOUT_S="8.0"
 $env:TRITON_VIDEO_FIRST_FRAME_TIMEOUT_S="14.0"
 $env:TRITON_VIDEO_DEFAULT_LAYOUT_COUNT="4"
 $env:TRITON_VIDEO_STOP_HIDDEN_STREAMS="0"
+$env:TRITON_VIDEO_DISPLAY_FPS_MULTI="30"
 ```
 
 Increase these values only after confirming the network and GStreamer runtime
@@ -58,18 +59,66 @@ define:
 - `fps`
 - `rotation_deg`
 - `video_format`
+- `render_mode`
 - `h264_bitrate`
 - `h264_gop`
 - `rtp_mtu`
 - `latency_ms`
 - `port`
+- `capture_port`
 - `enabled`
 
 For native H.264 cameras, TritonOS applies `h264_bitrate` and `h264_gop` as
 V4L2 camera encoder controls when the camera exposes matching controls. The
-current deployment target is `16000000` bps per 1080p30 stream with
-`latency_ms` set to `60` for a little more jitter tolerance across four live
-views.
+current full-resolution four-camera pilot profile is 1080p30 H.264 at
+`8000000` bps per stream with `latency_ms` set to `5` on the tether. The pilot
+view uses `render_mode: "direct3d"` so GStreamer decodes and renders directly
+through the Windows Direct3D sink. This avoids copying full-resolution BGR
+frames through Python/Qt for live piloting.
+
+Direct3D streams can still save snapshots, single-camera video, and stereo
+pairs by using a second mirrored H.264 UDP destination. The normal display
+ports remain `5000-5003`; `capture_port` values such as `6000-6003` tell
+TritonOS to mirror the same compressed stream for capture-only receivers.
+Those receivers start only when capture or stereo tooling needs CPU frames, so
+the pilot display path stays smooth.
+
+The older raw-frame widget is still available by omitting `render_mode` or
+setting it to anything other than `direct3d`. Use that path for debugging or
+experiments that intentionally need every displayed frame inside Python.
+
+Display refresh can be capped separately from the camera stream rate:
+
+```powershell
+$env:TRITON_VIDEO_DISPLAY_FPS_SINGLE="30"
+$env:TRITON_VIDEO_DISPLAY_FPS_DUAL="30"
+$env:TRITON_VIDEO_DISPLAY_FPS_MULTI="30"
+```
+
+The multi-camera value applies to three- and four-pane layouts. Lowering it can
+make quad view feel smoother on a loaded laptop because the UI stops trying to
+scale and repaint every pane at full camera rate.
+
+Per-stream receiver options in `data/streams.json`:
+
+- `render_mode`: set to `direct3d` for low-latency pilot viewing
+- `capture_port`: optional mirror UDP port for direct-mode snapshots,
+  recording, and stereo capture
+- `receiver_h264_decoder`: defaults to `decodebin`; set `avdec_h264` only when
+  debugging software decode behavior; direct mode also uses this decoder choice
+- `receiver_output_fps`: drops decoded frames before the Python pipe; the stream
+  can stay 1080p30 while quad-view display work is capped; this only affects
+  the legacy raw-frame widget
+- `extra.udp_qos_dscp`: requests a DSCP marking from TritonOS' UDP sender;
+  `34` is the current video-priority default
+- `extra.sender_leaky_queues`: keeps TritonOS from buffering stale camera frames
+  before RTP packetization; the low-latency default is `true`
+- `extra.sender_queue_max_buffers`: whole-frame sender queue depth; the
+  low-latency default is `1`
+- `extra.sender_v4l2_do_timestamp`: timestamps captured frames on the Pi before
+  RTP payloading; the low-latency default is `true`
+- `extra.v4l2_controls.exposure_dynamic_framerate`: set to `0` to prevent the
+  camera from lowering frame rate for exposure, which can look like video lag
 
 Top-level stream layout knobs:
 

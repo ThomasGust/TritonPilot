@@ -404,6 +404,9 @@ class MainWindow(QMainWindow):
         try:
             cam = getattr(self.cam_mgr, "_opened", {}).get(stream_name)
             if cam is None:
+                latest_capture = getattr(self.cam_mgr, "latest_capture_packet", None)
+                if callable(latest_capture):
+                    return latest_capture(stream_name)
                 return None
             latest = getattr(cam, "latest_frame_packet", None)
             if callable(latest):
@@ -438,6 +441,7 @@ class MainWindow(QMainWindow):
 
         previous_page = getattr(self, "_active_page_name", "")
         if previous_page == "stereo" and page_name != "stereo":
+            self._release_stereo_capture_receivers()
             if self.video_panel is not None and getattr(self, "_stereo_layout_restore_snapshot", None) is not None:
                 try:
                     self.video_panel.restore_layout_snapshot(
@@ -590,9 +594,40 @@ class MainWindow(QMainWindow):
                 active_name=pair.left,
                 emit=True,
             )
+            self._warm_stereo_capture_receivers(pair.left, pair.right)
             self._resume_video_panel()
         except Exception:
             pass
+
+    def _warm_stereo_capture_receivers(self, *stream_names: str) -> None:
+        previous = set(getattr(self, "_stereo_capture_warm_names", set()) or set())
+        desired = {str(name) for name in stream_names if name}
+        opener = getattr(self.cam_mgr, "open_capture", None)
+        closer = getattr(self.cam_mgr, "close_capture", None)
+        if callable(closer):
+            for name in sorted(previous - desired):
+                try:
+                    closer(name)
+                except Exception:
+                    pass
+        if callable(opener):
+            for name in sorted(desired - previous):
+                try:
+                    opener(name)
+                except Exception:
+                    pass
+        self._stereo_capture_warm_names = desired
+
+    def _release_stereo_capture_receivers(self) -> None:
+        names = set(getattr(self, "_stereo_capture_warm_names", set()) or set())
+        closer = getattr(self.cam_mgr, "close_capture", None)
+        if callable(closer):
+            for name in sorted(names):
+                try:
+                    closer(name)
+                except Exception:
+                    pass
+        self._stereo_capture_warm_names = set()
 
     def __init__(self, streams_path: str, parent=None):
         super().__init__(parent)
@@ -875,6 +910,7 @@ class MainWindow(QMainWindow):
         if self.video_panel is not None:
             self._pilot_layout_count_restore = int(self.video_panel.layout_count())
         self._stereo_layout_restore_snapshot: dict | None = None
+        self._stereo_capture_warm_names: set[str] = set()
         self._reverse_page_owns_mode: bool = False
         self._active_page_name = ""
 
@@ -2519,6 +2555,14 @@ class MainWindow(QMainWindow):
             pass
         try:
             self._ssh_page.shutdown()
+        except Exception:
+            pass
+        try:
+            self._release_stereo_capture_receivers()
+        except Exception:
+            pass
+        try:
+            self.cam_mgr.close_all_capture()
         except Exception:
             pass
         if self.video_panel is not None:

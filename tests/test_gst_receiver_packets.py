@@ -88,3 +88,29 @@ def test_receiver_pipeline_uses_configured_udp_buffer_and_jitter(monkeypatch):
     assert "buffer-size=1234567" in cmd
     assert "latency=60" in cmd
     assert "drop-on-latency=false" in cmd
+    assert "decodebin" in cmd
+    assert "avdec_h264" not in cmd
+    assert "sync=false" in cmd
+    assert "async=false" in cmd
+
+
+def test_receiver_pipeline_can_cap_raw_output_fps(monkeypatch):
+    receiver = _receiver(monkeypatch)
+
+    cmd = receiver._build_cmd(
+        RxConfig(
+            name="test",
+            codec="h264",
+            port=5000,
+            mode="raw",
+            width=1920,
+            height=1080,
+            latency_ms=25,
+            extra={"receiver_output_fps": 24, "source_fps": 30},
+        )
+    )
+
+    assert "videorate" in cmd
+    assert "drop-only=true" in cmd
+    assert "max-rate=24" in cmd
+    assert any("framerate=24/1" in part for part in cmd)

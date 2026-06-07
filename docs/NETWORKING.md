@@ -141,6 +141,12 @@ local interface that can reach the ROV and is suitable for receiving the stream.
 If the pilot has multiple adapters active, validate the selected route before
 competition.
 
+For full-resolution four-camera piloting, confirm TritonPilot resolves the video
+RPC endpoint to the tether address (`tcp://192.168.1.4:5555`) and sends streams
+to the pilot tether address (`192.168.1.1`). If the USB/Ethernet adapter is
+disconnected, the app can fall back to Wi-Fi (`10.x.x.x`), which may work for
+control but can add visible video jitter at 1080p quad-view bandwidth.
+
 Firewall rules must allow inbound UDP traffic on the configured camera ports.
 
 ## Diagnostics

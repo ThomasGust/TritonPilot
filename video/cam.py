@@ -137,6 +137,21 @@ class RemoteCv2Camera:
         if stream_opts and ("bind_receiver_to_host" in stream_opts):
             bind_rx = bool(stream_opts.get("bind_receiver_to_host"))
 
+        rx_extra = {}
+        configured_rx_extra = stream_opts.get("receiver_extra")
+        if isinstance(configured_rx_extra, dict):
+            rx_extra.update(configured_rx_extra)
+        for key in (
+            "frame_history_size",
+            "receiver_h264_decoder",
+            "h264_decoder",
+            "receiver_output_fps",
+            "output_fps",
+        ):
+            if key in stream_opts and stream_opts[key] is not None:
+                rx_extra[key] = stream_opts[key]
+        rx_extra.setdefault("source_fps", self.fps)
+
         rx_cfg = RxConfig(
             name=self.name,
             codec="h264" if tx_is_h264 else "jpeg",
@@ -149,6 +164,7 @@ class RemoteCv2Camera:
             channel_order=self.channel_order,
             udp_buffer_size=int(stream_opts.get("receiver_udp_buffer_size", 4 * 1024 * 1024)),
             drop_on_latency=bool(stream_opts.get("receiver_drop_on_latency", True)),
+            extra=rx_extra,
         )
         self.rx = ReceiverProcess(rx_cfg)
         self.rx.start()
@@ -230,6 +246,143 @@ class RemoteCv2Camera:
             logger.warning("Failed to stop ROV stream '%s': %s", self.name, e)
 
 
+class RemoteCaptureCamera:
+    """Raw-frame receiver for a stream that is already being transmitted.
+
+    Direct3D display streams are started by the display widget. Capture uses a
+    mirrored UDP port so snapshots, recording, and stereo pairing can decode
+    frames without owning or restarting the ROV-side sender.
+    """
+
+    def __init__(
+        self,
+        name: str,
+        width: int,
+        height: int,
+        fps: int,
+        video_format: str = "mjpeg",
+        port: int = 5000,
+        latency_ms: int = 60,
+        channel_order: str = "BGR",
+        windows_host: str | None = None,
+        stream_opts: dict | None = None,
+    ):
+        self.name = name
+        self.width = int(width)
+        self.height = int(height)
+        self.fps = int(fps)
+        self.video_format = video_format
+        self.port = int(port)
+        self.latency_ms = int(latency_ms)
+        self.channel_order = channel_order
+        self.rotation_deg = normalize_rotation_deg(stream_opts.get("rotation_deg", 0) if stream_opts else 0)
+        self.start_messages: list[str] = []
+
+        stream_opts = stream_opts or {}
+        if windows_host is None:
+            try:
+                rov_host, rov_port = parse_zmq_endpoint(VIDEO_RPC_ENDPOINT)
+                prefer_wired = bool(stream_opts.get("tether_prefer_wired", True))
+                windows_host = choose_video_receive_ip(
+                    remote_host=rov_host,
+                    remote_port=int(rov_port),
+                    prefer_wired=prefer_wired,
+                    require_private=True,
+                )
+            except Exception:
+                s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+                try:
+                    rov_host, _rov_port = parse_zmq_endpoint(VIDEO_RPC_ENDPOINT)
+                    s.connect((rov_host, 9))
+                    windows_host = s.getsockname()[0]
+                finally:
+                    s.close()
+        self.windows_host = windows_host
+
+        tx_is_h264 = (
+            str(stream_opts.get("video_format", video_format)).lower() == "h264"
+            or str(stream_opts.get("encode", "")).lower() == "h264"
+        )
+
+        bind_rx = bool(stream_opts.get("bind_receiver_to_host", True))
+        rx_extra = {}
+        configured_rx_extra = stream_opts.get("receiver_extra")
+        if isinstance(configured_rx_extra, dict):
+            rx_extra.update(configured_rx_extra)
+        for key in (
+            "frame_history_size",
+            "receiver_h264_decoder",
+            "h264_decoder",
+            "receiver_capture_output_fps",
+            "capture_output_fps",
+            "receiver_output_fps",
+            "output_fps",
+        ):
+            if key in stream_opts and stream_opts[key] is not None:
+                rx_extra[key] = stream_opts[key]
+        if "receiver_capture_output_fps" in rx_extra:
+            rx_extra["receiver_output_fps"] = rx_extra["receiver_capture_output_fps"]
+        elif "capture_output_fps" in rx_extra:
+            rx_extra["receiver_output_fps"] = rx_extra["capture_output_fps"]
+        rx_extra.setdefault("source_fps", self.fps)
+        rx_extra["receiver_kill_port_users"] = False
+
+        rx_cfg = RxConfig(
+            name=f"{self.name} capture",
+            codec="h264" if tx_is_h264 else "jpeg",
+            port=self.port,
+            bind_address=self.windows_host if bind_rx else "0.0.0.0",
+            latency_ms=int(stream_opts.get("latency_ms", self.latency_ms)),
+            mode="raw",
+            width=self.width,
+            height=self.height,
+            channel_order=self.channel_order,
+            udp_buffer_size=int(stream_opts.get("receiver_udp_buffer_size", 4 * 1024 * 1024)),
+            drop_on_latency=bool(stream_opts.get("receiver_drop_on_latency", True)),
+            extra=rx_extra,
+        )
+        self.rx = ReceiverProcess(rx_cfg)
+        self.rx.start()
+
+    def read(self):
+        packet = self.read_frame_packet()
+        if packet is None:
+            return False, None
+        return True, packet.frame_bgr
+
+    def _decode_packet(self, packet) -> CameraFramePacket:
+        img = np.frombuffer(packet.data, dtype=np.uint8).reshape((self.height, self.width, 3))
+        return CameraFramePacket(
+            source_name=self.name,
+            frame_bgr=img,
+            seq=int(packet.seq),
+            monotonic_ts=float(packet.monotonic_ts),
+            wall_ts=float(packet.wall_ts),
+        )
+
+    def read_frame_packet(self) -> CameraFramePacket | None:
+        packet = self.rx.read_frame_packet()
+        if packet is None:
+            return None
+        return self._decode_packet(packet)
+
+    def latest_frame_packet(self) -> CameraFramePacket | None:
+        packet = self.rx.latest_frame_packet()
+        if packet is None:
+            return None
+        return self._decode_packet(packet)
+
+    def recent_frame_packets(self, *, max_age_s: float = 0.5) -> list[CameraFramePacket]:
+        packets = self.rx.recent_frame_packets(max_age_s=max_age_s)
+        return [self._decode_packet(packet) for packet in packets]
+
+    def release(self, rx_grace_s: float = 0.15):
+        try:
+            self.rx.stop(grace_s=rx_grace_s)
+        except Exception as e:
+            logger.warning("Failed to stop capture receiver for '%s': %s", self.name, e)
+
+
 class RemoteCameraManager:
     """Load stream definitions and manage active ``RemoteCv2Camera`` objects."""
 
@@ -269,6 +422,8 @@ class RemoteCameraManager:
         ]
         # If a stream def omits "enabled", assume True.
         self._opened: dict[str, RemoteCv2Camera] = {}
+        self._capture_opened: dict[str, RemoteCaptureCamera] = {}
+        self._capture_refs: dict[str, int] = {}
         self._closing: dict[str, threading.Thread] = {}
         self._name_locks: dict[str, threading.Lock] = {}
         # Serialize open/close across background connect workers. This avoids
@@ -357,6 +512,96 @@ class RemoteCameraManager:
                     return existing
                 self._opened[name] = cam
                 return cam
+
+    def _merged_stream_options(self, name: str) -> dict:
+        if name not in self.stream_defs:
+            raise KeyError(f"Unknown stream '{name}'")
+        stream = self.stream_defs[name]
+        if not stream.get("enabled", True):
+            raise ValueError(f"Stream '{name}' is disabled in config")
+        stream_opts = dict(self._defaults)
+        stream_opts.update(stream)
+        return stream_opts
+
+    def _capture_port_for_stream(self, stream_opts: dict) -> int:
+        for key in ("capture_port", "receiver_capture_port", "mirror_port"):
+            value = stream_opts.get(key)
+            if value is not None:
+                return int(value)
+        return int(stream_opts.get("port", 5000))
+
+    def open_capture(self, name: str) -> RemoteCaptureCamera:
+        """Open or share a capture-only receiver for a named stream."""
+
+        name_lock = self._lock_for_name(name)
+        with name_lock:
+            with self._mgr_lock:
+                existing = self._capture_opened.get(name)
+                if existing is not None:
+                    self._capture_refs[name] = int(self._capture_refs.get(name, 0)) + 1
+                    return existing
+                stream_opts = self._merged_stream_options(name)
+
+            capture_port = self._capture_port_for_stream(stream_opts)
+            cam = RemoteCaptureCamera(
+                name=stream_opts["name"],
+                width=stream_opts["width"],
+                height=stream_opts["height"],
+                fps=stream_opts["fps"],
+                video_format=stream_opts.get("video_format", "mjpeg"),
+                port=capture_port,
+                latency_ms=int(stream_opts.get("latency_ms", 60)),
+                windows_host=self.windows_host,
+                stream_opts=stream_opts,
+            )
+            with self._mgr_lock:
+                existing = self._capture_opened.get(name)
+                if existing is not None:
+                    try:
+                        cam.release()
+                    except Exception:
+                        pass
+                    self._capture_refs[name] = int(self._capture_refs.get(name, 0)) + 1
+                    return existing
+                self._capture_opened[name] = cam
+                self._capture_refs[name] = 1
+                return cam
+
+    def latest_capture_packet(self, name: str) -> CameraFramePacket | None:
+        with self._mgr_lock:
+            cam = self._capture_opened.get(name)
+        if cam is None:
+            return None
+        return cam.latest_frame_packet()
+
+    def close_capture(self, name: str) -> bool:
+        """Release one reference to a capture-only receiver."""
+
+        name_lock = self._lock_for_name(name)
+        with name_lock:
+            with self._mgr_lock:
+                cam = self._capture_opened.get(name)
+                if cam is None:
+                    self._capture_refs.pop(name, None)
+                    return False
+                refs = max(0, int(self._capture_refs.get(name, 1)) - 1)
+                if refs > 0:
+                    self._capture_refs[name] = refs
+                    return False
+                self._capture_opened.pop(name, None)
+                self._capture_refs.pop(name, None)
+            cam.release()
+            return True
+
+    def close_all_capture(self) -> None:
+        with self._mgr_lock:
+            names = list(self._capture_opened.keys())
+            self._capture_refs = {name: 1 for name in names}
+        for name in names:
+            try:
+                self.close_capture(name)
+            except Exception:
+                pass
 
     def close(self, name: str) -> bool:
         """Close a named stream if it is currently active."""

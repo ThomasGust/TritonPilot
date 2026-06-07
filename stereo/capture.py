@@ -60,6 +60,7 @@ class StereoCaptureSession:
         self._manifest_dirty = False
         self._last_manifest_write_ts = 0.0
         self._manifest_flush_interval_s = 1.0
+        self._using_capture_receivers = False
 
     @property
     def manifest_path(self) -> Path:
@@ -71,8 +72,15 @@ class StereoCaptureSession:
         self.left_dir.mkdir(parents=True, exist_ok=True)
         self.right_dir.mkdir(parents=True, exist_ok=True)
         self._started_wall_ts = time.time()
-        self._left_camera = self.manager.open(self.pair.left)
-        self._right_camera = self.manager.open(self.pair.right)
+        open_capture = getattr(self.manager, "open_capture", None)
+        if callable(open_capture):
+            self._left_camera = open_capture(self.pair.left)
+            self._right_camera = open_capture(self.pair.right)
+            self._using_capture_receivers = True
+        else:
+            self._left_camera = self.manager.open(self.pair.left)
+            self._right_camera = self.manager.open(self.pair.right)
+            self._using_capture_receivers = False
         self._manifest = self._load_existing_manifest() or self._base_manifest()
         self._resume_frame_state()
         self._write_manifest()
@@ -88,7 +96,16 @@ class StereoCaptureSession:
         if self.close_on_stop:
             for stream_name in (self.pair.left, self.pair.right):
                 try:
-                    self.manager.close(stream_name)
+                    if self._using_capture_receivers and callable(getattr(self.manager, "close_capture", None)):
+                        self.manager.close_capture(stream_name)
+                    else:
+                        self.manager.close(stream_name)
+                except Exception:
+                    pass
+        elif self._using_capture_receivers and callable(getattr(self.manager, "close_capture", None)):
+            for stream_name in (self.pair.left, self.pair.right):
+                try:
+                    self.manager.close_capture(stream_name)
                 except Exception:
                     pass
 
@@ -119,7 +136,12 @@ class StereoCaptureSession:
             delta_s = abs(float(left.monotonic_ts) - float(right.monotonic_ts))
             best_delta_s = delta_s if best_delta_s is None else min(best_delta_s, delta_s)
             if delta_s <= self.pair.max_pair_delta_s:
-                return self._save_pair(left, right, delta_s, flush_manifest=flush_manifest)
+                return self._save_pair(
+                    left,
+                    right,
+                    delta_s,
+                    flush_manifest=flush_manifest,
+                )
             time.sleep(0.002)
 
         detail = "no frames received" if best_delta_s is None else f"best delta {best_delta_s * 1000.0:.1f} ms"

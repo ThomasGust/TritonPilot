@@ -52,8 +52,10 @@ def _log_receiver_start(cfg: "RxConfig", cmd: List[str]) -> None:
     if os.environ.get("TRITON_GST_LOG_COMMAND", "").strip() == "1":
         logger.info("Starting receiver '%s': %s", cfg.name, " ".join(cmd))
         return
+    output_fps = cfg.extra.get("receiver_output_fps", cfg.extra.get("output_fps", "native"))
+    h264_decoder = cfg.extra.get("receiver_h264_decoder", cfg.extra.get("h264_decoder", "decodebin"))
     logger.info(
-        "Starting receiver '%s' port=%s codec=%s mode=%s %dx%d latency=%sms udp_buffer=%s",
+        "Starting receiver '%s' port=%s codec=%s mode=%s %dx%d latency=%sms udp_buffer=%s decoder=%s output_fps=%s",
         cfg.name,
         cfg.port,
         cfg.codec,
@@ -62,6 +64,8 @@ def _log_receiver_start(cfg: "RxConfig", cmd: List[str]) -> None:
         cfg.height,
         cfg.latency_ms,
         cfg.udp_buffer_size,
+        h264_decoder,
+        output_fps,
     )
 
 
@@ -242,7 +246,8 @@ class ReceiverProcess:
                 return
 
             # Make sure no old receiver is sitting on this UDP port.
-            _win_kill_udp_port_users(self.cfg.port)
+            if bool(self.cfg.extra.get("receiver_kill_port_users", True)):
+                _win_kill_udp_port_users(self.cfg.port)
 
             # Reset frame bookkeeping so the first frame after (re)start is treated as new.
             with self._raw_buffer_lock:
@@ -349,13 +354,19 @@ class ReceiverProcess:
             return
 
         def read_exact(n: int) -> Optional[bytes]:
-            buf = b""
-            while len(buf) < n and not self._stop_reader.is_set():
-                chunk = stream.read(n - len(buf))
+            chunks: list[bytes] = []
+            remaining = n
+            while remaining > 0 and not self._stop_reader.is_set():
+                chunk = stream.read(remaining)
                 if not chunk:
                     return None
-                buf += chunk
-            return buf
+                chunks.append(chunk)
+                remaining -= len(chunk)
+            if remaining > 0:
+                return None
+            if len(chunks) == 1:
+                return chunks[0]
+            return b"".join(chunks)
 
         while not self._stop_reader.is_set():
             frame = read_exact(self._frame_size)
@@ -506,6 +517,68 @@ class ReceiverProcess:
             if self.proc.poll() is not None:
                 break
 
+    @staticmethod
+    def _extra_int(extra: Dict[str, Any], *names: str, default: int = 0) -> int:
+        for name in names:
+            if name not in extra or extra.get(name) is None:
+                continue
+            try:
+                return int(float(extra.get(name)))
+            except Exception:
+                return int(default)
+        return int(default)
+
+    @staticmethod
+    def _extra_str(extra: Dict[str, Any], *names: str, default: str = "") -> str:
+        for name in names:
+            value = extra.get(name)
+            if value is None:
+                continue
+            text = str(value).strip()
+            if text:
+                return text
+        return str(default)
+
+    def _h264_decoder_chain(self, cfg: RxConfig) -> list[str]:
+        decoder = self._extra_str(
+            cfg.extra,
+            "receiver_h264_decoder",
+            "h264_decoder",
+            default=os.environ.get("TRITON_GST_H264_DECODER", "decodebin"),
+        ).lower()
+        if decoder in {"", "auto", "hardware", "decodebin"}:
+            return ["decodebin"]
+        return [decoder]
+
+    def _raw_caps(self, cfg: RxConfig, *, include_size: bool) -> str:
+        parts = ["video/x-raw", "format=BGR"]
+        if include_size:
+            parts.extend([f"width={cfg.width}", f"height={cfg.height}"])
+        parts.extend(["colorimetry=1:4:0:0", "range=full"])
+        return ",".join(parts)
+
+    def _raw_output_chain(self, cfg: RxConfig) -> list[str]:
+        output_fps = self._extra_int(
+            cfg.extra,
+            "receiver_output_fps",
+            "output_fps",
+            default=0,
+        )
+        if output_fps > 0 and (cfg.width > 0 and cfg.height > 0):
+            try:
+                source_fps = int(cfg.extra.get("source_fps", 0))
+            except Exception:
+                source_fps = 0
+            if source_fps <= 0 or output_fps < source_fps:
+                return [
+                    "videorate", "drop-only=true", f"max-rate={output_fps}",
+                    "!", (
+                        f"video/x-raw,format=BGR,width={cfg.width},height={cfg.height},"
+                        f"framerate={output_fps}/1,colorimetry=1:4:0:0,range=full"
+                    ),
+                ]
+        return [self._raw_caps(cfg, include_size=True)]
+
     # ---------------- command builder ---------------- #
     def _build_cmd(self, cfg: RxConfig) -> List[str]:
         gst = self._gst
@@ -527,12 +600,9 @@ class ReceiverProcess:
                     "!", "rtpjpegdepay",
                     "!", "jpegdec",
                     "!", "videoconvert",
+                    "!", *self._raw_output_chain(cfg),
                     "!", "queue", "max-size-buffers=1", "max-size-bytes=0", "max-size-time=0", "leaky=downstream",
-                    "!", (
-                        f"video/x-raw,format=BGR,width={cfg.width},height={cfg.height},"
-                        "colorimetry=1:4:0:0,range=full"
-                    ),
-                    "!", "fdsink", "fd=1",
+                    "!", "fdsink", "fd=1", "sync=false", "async=false",
                 ]
             else:
                 caps = "application/x-rtp,media=video,encoding-name=H264,payload=96,clock-rate=90000"
@@ -541,14 +611,11 @@ class ReceiverProcess:
                     "!", "rtpjitterbuffer", f"latency={cfg.latency_ms}", f"drop-on-latency={drop_on_latency}", "faststart-min-packets=1",
                     "!", "rtph264depay",
                     "!", "h264parse", "config-interval=-1", "disable-passthrough=true",
-                    "!", "avdec_h264",
+                    "!", *self._h264_decoder_chain(cfg),
                     "!", "videoconvert",
+                    "!", *self._raw_output_chain(cfg),
                     "!", "queue", "max-size-buffers=1", "max-size-bytes=0", "max-size-time=0", "leaky=downstream",
-                    "!", (
-                        f"video/x-raw,format=BGR,width={cfg.width},height={cfg.height},"
-                        "colorimetry=1:4:0:0,range=full"
-                    ),
-                    "!", "fdsink", "fd=1",
+                    "!", "fdsink", "fd=1", "sync=false", "async=false",
                 ]
             return base + pipeline
 
@@ -567,7 +634,7 @@ class ReceiverProcess:
                 "!", "jpegdec",
                 "!", "videoconvert",
                 "!", "queue", "max-size-buffers=1", "max-size-bytes=0", "max-size-time=0", "leaky=downstream",
-                "!", "video/x-raw,format=BGR,colorimetry=1:4:0:0,range=full",
+                "!", self._raw_caps(cfg, include_size=False),
                 "!", cfg.sink, f"sync={'true' if cfg.sync else 'false'}",
             ]
         else:
@@ -577,10 +644,10 @@ class ReceiverProcess:
                 "!", "rtpjitterbuffer", f"latency={cfg.latency_ms}", f"drop-on-latency={drop_on_latency}", "faststart-min-packets=1",
                 "!", "rtph264depay",
                 "!", "h264parse", "config-interval=-1", "disable-passthrough=true",
-                "!", "avdec_h264",
+                "!", *self._h264_decoder_chain(cfg),
                 "!", "videoconvert",
                 "!", "queue", "max-size-buffers=1", "max-size-bytes=0", "max-size-time=0", "leaky=downstream",
-                "!", "video/x-raw,format=BGR,colorimetry=1:4:0:0,range=full",
+                "!", self._raw_caps(cfg, include_size=False),
                 "!", cfg.sink, f"sync={'true' if cfg.sync else 'false'}",
             ]
         return base + pipeline
