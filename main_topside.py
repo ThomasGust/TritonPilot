@@ -6,6 +6,7 @@ point small makes tests and field debugging easier because the live services
 are created in one predictable place.
 """
 
+import os
 import sys
 
 from PyQt6.QtCore import Qt
@@ -17,12 +18,38 @@ from app_paths import APP_DISPLAY_NAME, APP_ORGANIZATION, app_icon_path, streams
 
 SPLASH_W = 520
 SPLASH_H = 292
+CUSTOM_ARG_FLAGS = {"--no-splash", "--windowed", "--maximized", "--fullscreen"}
 
 
 def _smoke_test() -> int:
     """Verify packaged resources without opening the operator window."""
     missing = [path for path in (streams_file_path(), app_icon_path()) if not path.exists()]
     return 1 if missing else 0
+
+
+def _env_bool(name: str, default: bool) -> bool:
+    raw = os.environ.get(name, "").strip().lower()
+    if not raw:
+        return bool(default)
+    return raw not in {"0", "false", "no", "off"}
+
+
+def _startup_window_mode(argv: list[str]) -> str:
+    if "--fullscreen" in argv:
+        return "fullscreen"
+    if "--windowed" in argv:
+        return "windowed"
+    if "--maximized" in argv:
+        return "maximized"
+    if _env_bool("TRITON_START_FULLSCREEN", False):
+        return "fullscreen"
+    if not _env_bool("TRITON_START_MAXIMIZED", True):
+        return "windowed"
+    return "maximized"
+
+
+def _qt_argv(argv: list[str]) -> list[str]:
+    return [arg for arg in argv if arg not in CUSTOM_ARG_FLAGS]
 
 
 def _make_splash_pixmap() -> QPixmap:
@@ -86,7 +113,8 @@ def main(argv: list[str] | None = None) -> int:
         return _smoke_test()
 
     use_splash = "--no-splash" not in argv
-    qt_argv = [arg for arg in argv if arg != "--no-splash"]
+    startup_window_mode = _startup_window_mode(argv)
+    qt_argv = _qt_argv(argv)
 
     app = QApplication(qt_argv)
     app.setApplicationName(APP_DISPLAY_NAME)
@@ -115,7 +143,12 @@ def main(argv: list[str] | None = None) -> int:
         win.setWindowIcon(icon)
     win.setAutoFillBackground(True)
     _show_startup_message(app, splash, "Opening pilot view...")
-    win.show()
+    if startup_window_mode == "fullscreen":
+        win.set_fullscreen_mode(True)
+    elif startup_window_mode == "maximized":
+        win.showMaximized()
+    else:
+        win.show()
     app.processEvents()
     if splash is not None:
         splash.finish(win)

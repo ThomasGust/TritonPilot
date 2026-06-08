@@ -646,6 +646,7 @@ class MainWindow(QMainWindow):
         self._preferred_save_dir: str = str(self._settings.value(self.SAVE_DIR_SETTINGS_KEY, "") or "").strip()
         self._save_dir_act: QAction | None = None
         self._reset_save_dir_act: QAction | None = None
+        self._fullscreen_act: QAction | None = None
         self._analysis_transfer_start_act: QAction | None = None
         self._analysis_transfer_stop_act: QAction | None = None
         self._analysis_transfer_restart_act: QAction | None = None
@@ -1290,6 +1291,13 @@ class MainWindow(QMainWindow):
             if et in (QEvent.Type.KeyPress, QEvent.Type.KeyRelease):
                 if hasattr(event, "isAutoRepeat") and event.isAutoRepeat():
                     return False
+                if et == QEvent.Type.KeyPress:
+                    if event.key() == Qt.Key.Key_F11:
+                        self._toggle_fullscreen_mode()
+                        return True
+                    if event.key() == Qt.Key.Key_Escape and self.isFullScreen():
+                        self.set_fullscreen_mode(False)
+                        return True
                 if self._keyboard_vehicle_shortcuts_suppressed(obj):
                     self._release_keyboard_vehicle_controls()
                     return False
@@ -2433,12 +2441,46 @@ class MainWindow(QMainWindow):
         if not os.environ.get("TRITON_PILOT_TRANSFER_ROOT", "").strip():
             self._restart_analysis_transfer_server()
 
+    def set_fullscreen_mode(self, enabled: bool) -> None:
+        if bool(enabled):
+            self.showFullScreen()
+        else:
+            self.showMaximized()
+        self._sync_fullscreen_action()
+
+    def _toggle_fullscreen_mode(self, checked: bool | None = None) -> None:
+        if checked is None:
+            checked = not self.isFullScreen()
+        self.set_fullscreen_mode(bool(checked))
+
+    def _sync_fullscreen_action(self) -> None:
+        act = self._fullscreen_act
+        if act is None:
+            return
+        try:
+            prev = act.blockSignals(True)
+            act.setChecked(bool(self.isFullScreen()))
+        finally:
+            try:
+                act.blockSignals(prev)
+            except Exception:
+                pass
+
     def _make_menu(self):
         bar = self.menuBar()
         file_menu = bar.addMenu("&File")
         rec_menu = bar.addMenu("&Record")
         transfer_menu = bar.addMenu("&Transfer")
         view_menu = bar.addMenu("&View")
+
+        self._fullscreen_act = QAction("Full Screen", self)
+        self._fullscreen_act.setCheckable(True)
+        self._fullscreen_act.setShortcut("F11")
+        self._fullscreen_act.setToolTip("Toggle full-screen pilot view.")
+        self._fullscreen_act.toggled.connect(self._toggle_fullscreen_mode)
+        view_menu.addAction(self._fullscreen_act)
+        self.addAction(self._fullscreen_act)
+        view_menu.addSeparator()
 
         self._save_dir_act = QAction("Set Save Directory...", self)
         self._save_dir_act.triggered.connect(self._choose_save_directory)

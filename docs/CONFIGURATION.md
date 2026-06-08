@@ -304,3 +304,19 @@ Set `TRITON_STREAMS_FILE` to point a source run or packaged app at a different
 camera stream configuration file.
 
 Use clear session names and preserve original media for TritonAnalysis.
+
+## Startup Window Mode
+
+TritonPilot opens maximized by default. Press `F11` or use
+`View > Full Screen` to enter true full-screen mode; press `F11` or `Esc` to
+return to maximized mode.
+
+For development or bench runs:
+
+```powershell
+$env:TRITON_START_MAXIMIZED="0"
+```
+
+You can also pass `--windowed` when launching from a terminal.
+Pass `--fullscreen` or set `TRITON_START_FULLSCREEN=1` only when you want true
+borderless full-screen at startup.

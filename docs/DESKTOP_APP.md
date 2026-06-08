@@ -61,6 +61,18 @@ The bundled app includes the Python GUI code and `data\streams.json`. It still
 expects the pilot laptop to have the Windows GStreamer runtime installed so the
 Direct3D video receive pipelines can launch `gst-launch-1.0`.
 
+The app opens maximized by default for pilot use. Press `F11` or use
+`View > Full Screen` for true full-screen mode; press `F11` or `Esc` to return
+to maximized mode. For development or bench testing, launch with `--windowed`
+or set:
+
+```powershell
+$env:TRITON_START_MAXIMIZED="0"
+```
+
+True full-screen can still be forced with `--fullscreen` or
+`TRITON_START_FULLSCREEN=1`.
+
 If video does not start on a fresh laptop, run:
 
 ```powershell
