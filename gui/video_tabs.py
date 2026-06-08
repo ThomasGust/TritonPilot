@@ -14,6 +14,7 @@ from PyQt6.QtWidgets import (
 )
 
 from config import (
+    VIDEO_DEFER_STREAMS_UNTIL_LINK,
     VIDEO_DISPLAY_FPS_DUAL,
     VIDEO_DISPLAY_FPS_MULTI,
     VIDEO_DISPLAY_FPS_SINGLE,
@@ -112,6 +113,7 @@ class VideoTabs(QWidget):
         self._pane_streams: list[str | None] = [None, None, None, None]
         self._pane_count: int = 4
         self._active_pane_index: int = 0
+        self._rov_link_status: str = "NO DATA"
         self._warmup_index: int = 0
         self._warmup_timer = QTimer(self)
         self._warmup_timer.setSingleShot(True)
@@ -415,8 +417,36 @@ class VideoTabs(QWidget):
             self._save_preferences()
         if apply_display_fps:
             self._apply_display_fps_to_widgets()
+        self._refresh_visible_widget_geometry()
         if emit:
             self.selectionChanged.emit()
+
+    def _stream_autostart_enabled(self) -> bool:
+        if not VIDEO_DEFER_STREAMS_UNTIL_LINK:
+            return True
+        return self._rov_link_status == "OK"
+
+    def _refresh_widget_geometry(self, widget: QWidget | None) -> None:
+        if widget is None:
+            return
+        try:
+            widget.updateGeometry()
+            widget.update()
+        except Exception:
+            pass
+        refresher = getattr(widget, "refresh_layout_geometry", None)
+        if callable(refresher):
+            try:
+                refresher()
+            except Exception:
+                pass
+
+    def _refresh_visible_widget_geometry(self, *, defer: bool = True) -> None:
+        for name in self.visible_stream_names():
+            self._refresh_widget_geometry(self._widgets.get(name))
+        if defer:
+            QTimer.singleShot(0, lambda: self._refresh_visible_widget_geometry(defer=False))
+            QTimer.singleShot(80, lambda: self._refresh_visible_widget_geometry(defer=False))
 
     def _clear_container(self, cont: QWidget) -> None:
         lay = cont.layout()
@@ -484,7 +514,11 @@ class VideoTabs(QWidget):
         self._clear_container(cont)
         try:
             widget_class = self._widget_class_for_stream(name)
-            vw = widget_class(self.manager, stream_name=name)
+            vw = widget_class(
+                self.manager,
+                stream_name=name,
+                autostart=self._stream_autostart_enabled(),
+            )
         except Exception as e:
             lay = cont.layout()
             if lay is not None:
@@ -500,6 +534,13 @@ class VideoTabs(QWidget):
         if lay is not None:
             lay.addWidget(vw)
         self._widgets[name] = vw
+        if self._rov_link_status != "OK":
+            setter = getattr(vw, "set_rov_link_status", None)
+            if callable(setter):
+                try:
+                    setter(self._rov_link_status)
+                except Exception:
+                    pass
         if self._water_correction_enabled:
             vw.set_water_correction(True)
         setter = getattr(vw, "set_display_fps", None)
@@ -515,6 +556,8 @@ class VideoTabs(QWidget):
                 connect(lambda name=name: self.set_current_stream(name, save=True, emit=True))
             except Exception:
                 pass
+        self._refresh_widget_geometry(vw)
+        QTimer.singleShot(0, lambda w=vw: self._refresh_widget_geometry(w))
 
     def _widget_class_for_stream(self, name: str):
         try:
@@ -777,15 +820,25 @@ class VideoTabs(QWidget):
         self.cycle_stream(-1)
 
     def set_rov_link_status(self, status: str) -> None:
+        status_key = str(status or "").strip().upper()
+        if not status_key:
+            status_key = "NO DATA"
+        prev_status = self._rov_link_status
+        self._rov_link_status = status_key
+        if status_key == "OK" and prev_status != "OK":
+            for name in self.visible_stream_names():
+                self._ensure_stream_started(name)
         for widget in list(self._widgets.values()):
             if widget is None:
                 continue
             setter = getattr(widget, "set_rov_link_status", None)
             if callable(setter):
                 try:
-                    setter(status)
+                    setter(status_key)
                 except Exception:
                     pass
+        if status_key == "OK":
+            self._stop_hidden_streams()
 
     def stop_all(self) -> None:
         try:

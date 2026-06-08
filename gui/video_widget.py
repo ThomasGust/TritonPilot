@@ -156,7 +156,7 @@ class VideoWidget(QWidget):
       - Auto-retry connect and auto-recover from stalls
     """
 
-    def __init__(self, manager: RemoteCameraManager, stream_name: str, parent=None):
+    def __init__(self, manager: RemoteCameraManager, stream_name: str, parent=None, *, autostart: bool = True):
         super().__init__(parent)
         self.manager = manager
         self.stream_name = stream_name
@@ -191,6 +191,7 @@ class VideoWidget(QWidget):
         # If no new frames arrive, we clear the pixmap and show a status message.
         self._clear_stale_frame: bool = True
         self._rov_link_lost: bool = False
+        self._rov_link_wait_message = f"{self.stream_name}\nROV link lost.\nWaiting for heartbeat..."
 
         self.label = QLabel(f"{self.stream_name}\nWaiting for stream...")
         self.label.setAlignment(Qt.AlignmentFlag.AlignCenter)
@@ -223,8 +224,15 @@ class VideoWidget(QWidget):
         self.set_display_fps(self._display_fps)
         self._tick_timer.start()
 
-        # kick off first attempt immediately (avoid waiting for the next timer tick)
-        self._start_connect()
+        # Kick off first attempt immediately unless the app is waiting for the
+        # first heartbeat so offline boot stays responsive.
+        if autostart:
+            self._start_connect()
+        else:
+            self._rov_link_lost = True
+            self._rov_link_wait_message = f"{self.stream_name}\nWaiting for ROV heartbeat..."
+            self._schedule_retry(1.0)
+            self._show_message(self._rov_link_wait_message)
         self._refresh_capture_indicators()
 
     def _show_message(self, msg: str, *, clear_pixmap: bool | None = None) -> None:
@@ -350,7 +358,8 @@ class VideoWidget(QWidget):
 
     def _start_connect(self):
         if self._rov_link_lost:
-            self._show_message(f"{self.stream_name}\nROV link lost.\nWaiting for heartbeat...")
+            self._show_message(self._rov_link_wait_message)
+            self._schedule_retry(1.0)
             return
         if self._connect_worker is not None and self._connect_worker.isRunning():
             return
@@ -437,17 +446,23 @@ class VideoWidget(QWidget):
 
     def set_rov_link_status(self, status: str) -> None:
         status_key = str(status or "").strip().upper()
-        if status_key == "LOST":
+        if status_key in {"LOST", "NO DATA"}:
+            if status_key == "NO DATA":
+                self._rov_link_wait_message = f"{self.stream_name}\nWaiting for ROV heartbeat..."
+            else:
+                self._rov_link_wait_message = f"{self.stream_name}\nROV link lost.\nWaiting for heartbeat..."
             if self._rov_link_lost:
+                self._show_message(self._rov_link_wait_message)
                 return
             self._rov_link_lost = True
             self._restart_stream(
-                f"{self.stream_name}\nROV link lost.\nWaiting for heartbeat...",
+                self._rov_link_wait_message,
                 retry_delay_s=0.0,
             )
             return
         if status_key == "OK" and self._rov_link_lost:
             self._rov_link_lost = False
+            self._rov_link_wait_message = f"{self.stream_name}\nROV link lost.\nWaiting for heartbeat..."
             self._restart_stream(
                 f"{self.stream_name}\nROV heartbeat recovered.\nReconnecting video...",
                 retry_delay_s=0.1,
@@ -503,6 +518,9 @@ class VideoWidget(QWidget):
         except Exception:
             pass
 
+        self._render_frame(frame)
+
+    def _render_frame(self, frame: np.ndarray) -> None:
         h, w, ch = frame.shape
         bytes_per_line = ch * w
         image = QImage(frame.data, w, h, bytes_per_line, QImage.Format.Format_BGR888)
@@ -517,6 +535,15 @@ class VideoWidget(QWidget):
         )
         pix.setDevicePixelRatio(dpr)
         self.label.setPixmap(pix)
+
+    def refresh_layout_geometry(self) -> None:
+        self._layout_capture_badges()
+        if self.last_frame is None:
+            return
+        try:
+            self._render_frame(self.last_frame)
+        except Exception:
+            pass
 
     def mouseDoubleClickEvent(self, event):
         """Allow the operator to force a reconnect on the active stream."""

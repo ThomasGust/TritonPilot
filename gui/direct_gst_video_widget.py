@@ -590,7 +590,7 @@ class DirectGstVideoWidget(QWidget):
 
     activated = pyqtSignal()
 
-    def __init__(self, manager: RemoteCameraManager, stream_name: str, parent=None):
+    def __init__(self, manager: RemoteCameraManager, stream_name: str, parent=None, *, autostart: bool = True):
         super().__init__(parent)
         self.manager = manager
         self.stream_name = stream_name
@@ -608,6 +608,7 @@ class DirectGstVideoWidget(QWidget):
         self._display_fps = 30.0
         self._water_correction_enabled = False
         self._rov_link_lost = False
+        self._rov_link_wait_message = f"{self.stream_name}\nROV link lost.\nWaiting for heartbeat..."
         self._capture_camera = None
         self._capture_lock = threading.RLock()
         self._rec: VideoRecorder | None = None
@@ -654,7 +655,13 @@ class DirectGstVideoWidget(QWidget):
         self._record_label_timer.setSingleShot(True)
         self._record_label_timer.setInterval(1000)
         self._record_label_timer.timeout.connect(self._on_record_label_tick)
-        self._start_connect()
+        if autostart:
+            self._start_connect()
+        else:
+            self._rov_link_lost = True
+            self._rov_link_wait_message = f"{self.stream_name}\nWaiting for ROV heartbeat..."
+            self._schedule_retry(1.0)
+            self._show_message(self._rov_link_wait_message)
 
     def _show_message(self, text: str) -> None:
         self._message.setText(text)
@@ -854,7 +861,8 @@ class DirectGstVideoWidget(QWidget):
 
     def _start_connect(self) -> None:
         if self._rov_link_lost:
-            self._show_message(f"{self.stream_name}\nROV link lost.\nWaiting for heartbeat...")
+            self._show_message(self._rov_link_wait_message)
+            self._schedule_retry(1.0)
             return
         if self._connect_attempt_active:
             return
@@ -958,7 +966,31 @@ class DirectGstVideoWidget(QWidget):
             return
         host_hwnd = int(self.winId())
         native_width, native_height = _window_client_size(host_hwnd, self.width(), self.height())
-        _user32.MoveWindow(hwnd, 0, 0, native_width, native_height, True)
+        _user32.SetWindowPos(
+            int(hwnd),
+            0,
+            0,
+            0,
+            native_width,
+            native_height,
+            _SWP_NOZORDER | _SWP_NOACTIVATE | _SWP_FRAMECHANGED | _SWP_SHOWWINDOW,
+        )
+        try:
+            _user32.InvalidateRect(int(hwnd), None, True)
+            _user32.UpdateWindow(int(hwnd))
+        except Exception:
+            pass
+
+    def refresh_layout_geometry(self) -> None:
+        self._message.setGeometry(0, 0, self.width(), self.height())
+        if self._embedded_hwnd and os.name == "nt":
+            if not _embed_window(int(self._embedded_hwnd), int(self.winId()), self.width(), self.height()):
+                self._embedded_hwnd = None
+                self._try_embed()
+        else:
+            self._try_embed()
+        self._resize_embedded()
+        self._layout_capture_badges()
 
     def _tick(self) -> None:
         now = time.time()
@@ -1003,18 +1035,24 @@ class DirectGstVideoWidget(QWidget):
 
     def set_rov_link_status(self, status: str) -> None:
         status_key = str(status or "").strip().upper()
-        if status_key == "LOST":
+        if status_key in {"LOST", "NO DATA"}:
+            if status_key == "NO DATA":
+                self._rov_link_wait_message = f"{self.stream_name}\nWaiting for ROV heartbeat..."
+            else:
+                self._rov_link_wait_message = f"{self.stream_name}\nROV link lost.\nWaiting for heartbeat..."
             if self._rov_link_lost:
+                self._show_message(self._rov_link_wait_message)
                 return
             self._rov_link_lost = True
             trace_event("direct_video_link_lost", stream=self.stream_name)
             self._force_reconnect(
-                f"{self.stream_name}\nROV link lost.\nWaiting for heartbeat...",
+                self._rov_link_wait_message,
                 retry_delay_s=0.0,
             )
             return
         if status_key == "OK" and self._rov_link_lost:
             self._rov_link_lost = False
+            self._rov_link_wait_message = f"{self.stream_name}\nROV link lost.\nWaiting for heartbeat..."
             trace_event("direct_video_link_recovered", stream=self.stream_name)
             self._force_reconnect(
                 f"{self.stream_name}\nROV heartbeat recovered.\nReconnecting video...",

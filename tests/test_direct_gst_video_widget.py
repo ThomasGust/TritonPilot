@@ -303,6 +303,33 @@ def test_direct_widget_async_shutdown_does_not_wait_for_connect_worker(monkeypat
         app.processEvents()
 
 
+def test_direct_widget_can_defer_first_connect_until_heartbeat(monkeypatch):
+    app = _app()
+    starts = []
+    monkeypatch.setattr(
+        "gui.direct_gst_video_widget.DirectGstVideoWidget._start_connect",
+        lambda self: starts.append(self.stream_name),
+    )
+
+    manager = _FakeManager()
+    widget = DirectGstVideoWidget(manager, "Primary Camera", autostart=False)
+    try:
+        app.processEvents()
+        assert starts == []
+        assert widget._rov_link_lost is True
+        assert "Waiting for ROV heartbeat" in widget._message.text()
+
+        widget.set_rov_link_status("OK")
+
+        assert widget._rov_link_lost is False
+        assert "heartbeat recovered" in widget._message.text()
+        assert widget._next_retry_ts > 0
+    finally:
+        widget.close()
+        widget.deleteLater()
+        app.processEvents()
+
+
 def test_direct_widget_link_loss_clears_renderer_and_recovers(monkeypatch):
     app = _app()
     monkeypatch.setattr("gui.direct_gst_video_widget.DirectGstVideoWidget._start_connect", lambda self: None)

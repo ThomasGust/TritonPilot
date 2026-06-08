@@ -100,6 +100,12 @@ VIDEO_WARM_HIDDEN_STREAMS = os.environ.get("TRITON_VIDEO_WARM_HIDDEN_STREAMS", "
     "on",
 )
 VIDEO_WARMUP_INTERVAL_MS = int(os.environ.get("TRITON_VIDEO_WARMUP_INTERVAL_MS", "750"))
+VIDEO_DEFER_STREAMS_UNTIL_LINK = os.environ.get("TRITON_VIDEO_DEFER_UNTIL_LINK", "1").strip().lower() not in (
+    "0",
+    "false",
+    "no",
+    "off",
+)
 
 
 def _float_env(name: str, default: float, *, min_value: float, max_value: float) -> float:
