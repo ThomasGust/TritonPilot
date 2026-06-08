@@ -29,9 +29,11 @@ def test_pilot_telemetry_column_shows_stereo_capture_activity(monkeypatch):
 
         column.set_capture_mode("camera")
         assert column.capture_activity_text.text() == ""
+        assert "C toggles" in column.capture_mode_text.text()
 
         column.set_capture_mode("stereo")
         assert column.capture_activity_text.text() == "STEREO READY"
+        assert "C toggles" in column.capture_mode_text.text()
 
         column.set_capture_activity({"state": "single", "mode": "single", "count": 0})
         assert column.capture_activity_text.text() == "STEREO CAPTURE | 0 pairs"

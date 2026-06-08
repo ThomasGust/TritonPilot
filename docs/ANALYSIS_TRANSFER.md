@@ -100,7 +100,8 @@ $env:TRITON_PILOT_TRANSFER_STABLE_SECONDS="0.75"
 From the TritonPilot repository root:
 
 ```powershell
-python -m tools.analysis_transfer_server --root recordings --host 0.0.0.0 --port 8765
+$recordings = Join-Path $env:USERPROFILE "Documents\TritonPilot\Recordings"
+python -m tools.analysis_transfer_server --root $recordings --host 0.0.0.0 --port 8765
 ```
 
 The server is read-only. It publishes:
@@ -115,7 +116,8 @@ recording is less likely to be copied mid-write. For bench simulation only, you
 can lower that:
 
 ```powershell
-python -m tools.analysis_transfer_server --root recordings --host 127.0.0.1 --port 8765 --stable-seconds 0
+$recordings = Join-Path $env:USERPROFILE "Documents\TritonPilot\Recordings"
+python -m tools.analysis_transfer_server --root $recordings --host 127.0.0.1 --port 8765 --stable-seconds 0
 ```
 
 ## Pull From TritonAnalysis
@@ -144,7 +146,8 @@ You can test without a second laptop:
 1. In a TritonPilot terminal:
 
    ```powershell
-   python -m tools.analysis_transfer_server --root recordings --host 127.0.0.1 --port 8765 --stable-seconds 0
+   $recordings = Join-Path $env:USERPROFILE "Documents\TritonPilot\Recordings"
+   python -m tools.analysis_transfer_server --root $recordings --host 127.0.0.1 --port 8765 --stable-seconds 0
    ```
 
 2. In a TritonAnalysis terminal on the same computer:

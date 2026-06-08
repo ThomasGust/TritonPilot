@@ -53,7 +53,8 @@ Gateway                   leave blank
 Start the read-only server from the pilot computer:
 
 ```powershell
-python -m tools.analysis_transfer_server --root recordings --host 0.0.0.0 --port 8765
+$recordings = Join-Path $env:USERPROFILE "Documents\TritonPilot\Recordings"
+python -m tools.analysis_transfer_server --root $recordings --host 0.0.0.0 --port 8765
 ```
 
 Set up a new Pilot or Analysis adapter with:

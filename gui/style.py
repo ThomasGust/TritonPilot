@@ -106,11 +106,11 @@ def apply_modern_style(app: QApplication) -> None:
     }
     QFrame#videoPane {
         background: #0f1015;
-        border: none;
+        border: 2px solid #0f1015;
         border-radius: 2px;
     }
     QFrame#videoPane[active="true"] {
-        border: 1px solid #4a78d8;
+        border: 2px solid #5a86ff;
         background: #0f1015;
     }
     QLabel#videoRecordBadge {

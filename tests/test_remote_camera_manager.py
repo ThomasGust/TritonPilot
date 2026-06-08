@@ -118,3 +118,50 @@ def test_capture_receiver_uses_capture_port_and_refcounts(monkeypatch, tmp_path)
     assert opened[0].released is False
     assert manager.close_capture("Front") is True
     assert opened[0].released is True
+
+
+def test_capture_receiver_can_close_async_after_refcount_reaches_zero(monkeypatch, tmp_path):
+    released = threading.Event()
+    opened = []
+
+    class _FakeCaptureCamera:
+        def __init__(self, **kwargs):
+            self.kwargs = kwargs
+            opened.append(self)
+
+        def release(self):
+            released.set()
+
+    monkeypatch.setattr(cam_module, "ROVStreams", lambda endpoint: _FakeRov())
+    monkeypatch.setattr(cam_module, "RemoteCaptureCamera", _FakeCaptureCamera)
+
+    cfg_path = tmp_path / "streams.json"
+    cfg_path.write_text(
+        json.dumps(
+            {
+                "streams": [
+                    {
+                        "name": "Front",
+                        "device": "/dev/video0",
+                        "width": 2,
+                        "height": 1,
+                        "fps": 30,
+                        "video_format": "h264",
+                        "port": 5000,
+                        "capture_port": 6000,
+                    }
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+    manager = cam_module.RemoteCameraManager(str(cfg_path))
+
+    first = manager.open_capture("Front")
+    second = manager.open_capture("Front")
+
+    assert first is second
+    assert manager.close_capture_async("Front") is False
+    assert released.is_set() is False
+    assert manager.close_capture_async("Front") is True
+    assert released.wait(timeout=1.0)

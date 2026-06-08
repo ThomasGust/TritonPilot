@@ -740,6 +740,38 @@ class RemoteCameraManager:
             trace_event("camera_manager_close_capture_closed", stream=name)
             return True
 
+    def close_capture_async(self, name: str) -> bool:
+        """Release one capture receiver reference on a background thread."""
+
+        trace_event("camera_manager_close_capture_async_request", stream=name)
+        name_lock = self._lock_for_name(name)
+        with name_lock:
+            with self._mgr_lock:
+                cam = self._capture_opened.get(name)
+                if cam is None:
+                    self._capture_refs.pop(name, None)
+                    trace_event("camera_manager_close_capture_async_missing", stream=name)
+                    return False
+                refs = max(0, int(self._capture_refs.get(name, 1)) - 1)
+                if refs > 0:
+                    self._capture_refs[name] = refs
+                    trace_event("camera_manager_close_capture_async_decremented", stream=name, refs=refs)
+                    return False
+                self._capture_opened.pop(name, None)
+                self._capture_refs.pop(name, None)
+
+        def _release() -> None:
+            try:
+                cam.release()
+            finally:
+                trace_event("camera_manager_close_capture_async_closed", stream=name)
+
+        try:
+            threading.Thread(target=_release, name=f"video-capture-close-{name}", daemon=True).start()
+        except Exception:
+            _release()
+        return True
+
     def close_all_capture(self) -> None:
         with self._mgr_lock:
             names = list(self._capture_opened.keys())
@@ -749,6 +781,24 @@ class RemoteCameraManager:
                 self.close_capture(name)
             except Exception:
                 pass
+
+    def close_all_capture_async(self) -> None:
+        with self._mgr_lock:
+            items = list(self._capture_opened.items())
+            self._capture_opened.clear()
+            self._capture_refs.clear()
+
+        for name, cam in items:
+            def _release(camera=cam, stream_name=name) -> None:
+                try:
+                    camera.release()
+                finally:
+                    trace_event("camera_manager_close_all_capture_async_closed", stream=stream_name)
+
+            try:
+                threading.Thread(target=_release, name=f"video-capture-close-{name}", daemon=True).start()
+            except Exception:
+                _release()
 
     def close(self, name: str) -> bool:
         """Close a named stream if it is currently active."""

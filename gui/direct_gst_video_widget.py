@@ -30,6 +30,8 @@ from video.cam import RemoteCameraManager
 
 
 logger = logging.getLogger(__name__)
+_ORPHANED_CONNECT_WORKERS: set[QThread] = set()
+_STARTUP_ARTIFACT_MAX_SKIP_S = 2.5
 
 
 @dataclass(frozen=True)
@@ -318,6 +320,85 @@ def _stop_process(proc: subprocess.Popen, *, grace_s: float = 0.25) -> None:
                 pass
 
 
+def _stop_process_async(proc: subprocess.Popen, *, grace_s: float = 0.05) -> None:
+    try:
+        if proc.poll() is not None:
+            return
+    except Exception:
+        return
+
+    try:
+        threading.Thread(
+            target=lambda: _stop_process(proc, grace_s=grace_s),
+            name=f"direct-video-proc-stop-{getattr(proc, 'pid', 'unknown')}",
+            daemon=True,
+        ).start()
+    except Exception:
+        _stop_process(proc, grace_s=0.0)
+
+
+def _disconnect_direct_worker(worker: QThread) -> None:
+    for signal_name in ("receiver_started", "connected", "failed"):
+        signal = getattr(worker, signal_name, None)
+        disconnect = getattr(signal, "disconnect", None)
+        if callable(disconnect):
+            try:
+                disconnect()
+            except Exception:
+                pass
+
+
+def _abandon_direct_connect_worker(worker: QThread) -> None:
+    _disconnect_direct_worker(worker)
+    try:
+        worker.setParent(None)
+    except Exception:
+        pass
+    _ORPHANED_CONNECT_WORKERS.add(worker)
+
+    def _finished() -> None:
+        try:
+            proc = getattr(worker, "proc", None)
+            if proc is not None:
+                _stop_process(proc, grace_s=0.02)
+        except Exception:
+            pass
+        _ORPHANED_CONNECT_WORKERS.discard(worker)
+
+    try:
+        worker.finished.connect(_finished)
+    except Exception:
+        pass
+    try:
+        worker.quit()
+    except Exception:
+        pass
+
+
+def _looks_like_green_startup_artifact(frame: np.ndarray) -> bool:
+    """Detect the one-color H.264 startup filler frames seen before keyframe lock."""
+    try:
+        arr = np.asarray(frame)
+        if arr.ndim != 3 or arr.shape[2] < 3:
+            return False
+        h, w = int(arr.shape[0]), int(arr.shape[1])
+        sample = arr[:: max(1, h // 120), :: max(1, w // 160), :3].astype(np.float32, copy=False)
+        flat = sample.reshape(-1, 3)
+        mean_b, mean_g, mean_r = [float(v) for v in flat.mean(axis=0)]
+        std_mean = float(flat.std(axis=0).mean())
+        if mean_g < 35.0 or mean_b > 16.0 or mean_r > 16.0:
+            return False
+        if mean_g < (max(mean_b, mean_r) * 4.0 + 18.0):
+            return False
+        b = flat[:, 0]
+        g = flat[:, 1]
+        r = flat[:, 2]
+        greenish = ((g > r * 1.35 + 12.0) & (g > b * 1.35 + 12.0) & (g > 45.0)).mean()
+        return bool(greenish > 0.90 and std_mean < 18.0)
+    except Exception:
+        return False
+
+
 if os.name == "nt":
     _user32 = ctypes.windll.user32
     _GWL_STYLE = -16
@@ -526,6 +607,7 @@ class DirectGstVideoWidget(QWidget):
         self._next_retry_ts = 0.0
         self._display_fps = 30.0
         self._water_correction_enabled = False
+        self._rov_link_lost = False
         self._capture_camera = None
         self._capture_lock = threading.RLock()
         self._rec: VideoRecorder | None = None
@@ -663,20 +745,44 @@ class DirectGstVideoWidget(QWidget):
                 self._capture_camera = self.manager.open(self.stream_name)
             return self._capture_camera
 
-    def _release_capture_camera(self) -> None:
+    def _release_capture_camera(self, *, async_release: bool = False) -> None:
         with self._capture_lock:
             camera = self._capture_camera
             self._capture_camera = None
         if camera is None:
             return
-        closer = getattr(self.manager, "close_capture", None)
-        try:
-            if callable(closer):
-                closer(self.stream_name)
-            else:
-                self.manager.close(self.stream_name)
-        except Exception:
-            pass
+
+        def _close() -> None:
+            closer = getattr(self.manager, "close_capture", None)
+            try:
+                if callable(closer):
+                    closer(self.stream_name)
+                else:
+                    self.manager.close(self.stream_name)
+            except Exception:
+                try:
+                    camera.release()
+                except Exception:
+                    pass
+
+        if async_release:
+            async_closer = getattr(self.manager, "close_capture_async", None)
+            try:
+                if callable(async_closer) and bool(async_closer(self.stream_name)):
+                    return
+            except Exception:
+                pass
+            try:
+                threading.Thread(
+                    target=_close,
+                    name=f"direct-video-capture-close-{self.stream_name}",
+                    daemon=True,
+                ).start()
+                return
+            except Exception:
+                pass
+
+        _close()
 
     def _capture_packet(self, *, wait_s: float = 0.0, consume: bool = False):
         camera = self._ensure_capture_camera()
@@ -747,6 +853,9 @@ class DirectGstVideoWidget(QWidget):
         self._next_retry_ts = time.time() + max(0.0, float(delay_s))
 
     def _start_connect(self) -> None:
+        if self._rov_link_lost:
+            self._show_message(f"{self.stream_name}\nROV link lost.\nWaiting for heartbeat...")
+            return
         if self._connect_attempt_active:
             return
         if self._proc is not None and self._proc.poll() is None:
@@ -784,6 +893,7 @@ class DirectGstVideoWidget(QWidget):
         self._connect_attempt_active = False
         self._connect_worker = None
         self._proc = proc
+        self._rov_link_lost = False
         if embedded_hwnd:
             self._embedded_hwnd = int(embedded_hwnd)
         self._state = "playing"
@@ -879,6 +989,38 @@ class DirectGstVideoWidget(QWidget):
             self._start_connect()
         self._refresh_capture_indicators()
 
+    def _force_reconnect(self, message: str, *, retry_delay_s: float = 0.2) -> None:
+        try:
+            self.shutdown(release_only=True, async_release=True)
+        except Exception:
+            pass
+        self._state = "waiting"
+        self._last_error = message.replace("\n", " ")
+        self._show_message(message)
+        self._retry_backoff_s = 0.5
+        if not self._rov_link_lost:
+            self._schedule_retry(retry_delay_s)
+
+    def set_rov_link_status(self, status: str) -> None:
+        status_key = str(status or "").strip().upper()
+        if status_key == "LOST":
+            if self._rov_link_lost:
+                return
+            self._rov_link_lost = True
+            trace_event("direct_video_link_lost", stream=self.stream_name)
+            self._force_reconnect(
+                f"{self.stream_name}\nROV link lost.\nWaiting for heartbeat...",
+                retry_delay_s=0.0,
+            )
+            return
+        if status_key == "OK" and self._rov_link_lost:
+            self._rov_link_lost = False
+            trace_event("direct_video_link_recovered", stream=self.stream_name)
+            self._force_reconnect(
+                f"{self.stream_name}\nROV heartbeat recovered.\nReconnecting video...",
+                retry_delay_s=0.1,
+            )
+
     def status(self) -> dict:
         age = max(0.0, time.time() - self._connected_ts) if self._connected_ts > 0 else None
         return {
@@ -886,6 +1028,7 @@ class DirectGstVideoWidget(QWidget):
             "age_s": age,
             "last_error": self._last_error,
             "render_mode": "direct3d",
+            "rov_link_lost": bool(self._rov_link_lost),
         }
 
     def water_correction_enabled(self) -> bool:
@@ -999,6 +1142,8 @@ class DirectGstVideoWidget(QWidget):
             last_frame = None
             last_seq = None
             frame_index = 0
+            skipped_startup_artifacts = 0
+            startup_artifact_deadline_s = record_started_mono + float(_STARTUP_ARTIFACT_MAX_SKIP_S)
             trace_event(
                 "mono_record_loop_started",
                 stream=self.stream_name,
@@ -1022,13 +1167,31 @@ class DirectGstVideoWidget(QWidget):
                         )
                         self._record_stop.wait(0.02)
                         continue
+                    if (
+                        time.monotonic() < startup_artifact_deadline_s
+                        and _looks_like_green_startup_artifact(packet.frame_bgr)
+                    ):
+                        skipped_startup_artifacts += 1
+                        trace_event(
+                            "mono_record_startup_artifact_skipped",
+                            stream=self.stream_name,
+                            out_file=out_file,
+                            seq=int(getattr(packet, "seq", -1)),
+                            skipped=skipped_startup_artifacts,
+                            elapsed_ms=(time.monotonic() - record_started_mono) * 1000.0,
+                        )
+                        self._record_stop.wait(0.02)
+                        continue
                     last_frame = packet.frame_bgr
                     last_seq = int(getattr(packet, "seq", -1))
+                    if skipped_startup_artifacts:
+                        next_ts = time.monotonic()
                     trace_event(
                         "mono_record_first_frame",
                         stream=self.stream_name,
                         out_file=out_file,
                         seq=last_seq,
+                        skipped_startup_artifacts=skipped_startup_artifacts,
                         frame_age_ms=(time.monotonic() - float(getattr(packet, "monotonic_ts", time.monotonic()))) * 1000.0,
                         elapsed_ms=(time.monotonic() - record_started_mono) * 1000.0,
                     )
@@ -1212,25 +1375,28 @@ class DirectGstVideoWidget(QWidget):
         self._flash_snapshot_indicator("SNAP")
         return str(out_path)
 
-    def _stop_connect_worker(self) -> None:
+    def _stop_connect_worker(self, *, async_release: bool = False) -> None:
         if self._connect_worker is None:
             return
         worker = self._connect_worker
+        self._connect_attempt_active = False
+        self._connect_worker = None
+        if async_release:
+            _abandon_direct_connect_worker(worker)
+            return
         try:
             worker.quit()
             worker.wait(5000)
         except Exception:
             pass
-        self._connect_attempt_active = False
-        self._connect_worker = None
 
     def shutdown(self, release_only: bool = True, *, async_release: bool = True) -> None:
         try:
             self.stop_recording()
         except Exception:
             pass
-        self._release_capture_camera()
-        self._stop_connect_worker()
+        self._release_capture_camera(async_release=bool(async_release))
+        self._stop_connect_worker(async_release=bool(async_release))
         proc = self._proc
         self._proc = None
         self._embedded_hwnd = None
@@ -1243,11 +1409,28 @@ class DirectGstVideoWidget(QWidget):
         except Exception:
             pass
         if proc is not None:
-            _stop_process(proc)
-        try:
-            self.manager.rov.stop_stream(name=self.stream_name)
-        except Exception:
-            pass
+            if async_release:
+                _stop_process_async(proc, grace_s=0.05)
+            else:
+                _stop_process(proc)
+
+        def _stop_remote_stream() -> None:
+            try:
+                self.manager.rov.stop_stream(name=self.stream_name)
+            except Exception:
+                pass
+
+        if async_release:
+            try:
+                threading.Thread(
+                    target=_stop_remote_stream,
+                    name=f"direct-video-remote-stop-{self.stream_name}",
+                    daemon=True,
+                ).start()
+            except Exception:
+                pass
+        else:
+            _stop_remote_stream()
         self._state = "waiting"
 
     def resizeEvent(self, event) -> None:
@@ -1298,8 +1481,11 @@ class DirectGstVideoWidget(QWidget):
 
     def mouseDoubleClickEvent(self, event) -> None:
         try:
-            self.shutdown(release_only=True)
-            self._schedule_retry(0.1)
+            self._rov_link_lost = False
+            self._force_reconnect(
+                f"{self.stream_name}\nManual reconnect requested...",
+                retry_delay_s=0.1,
+            )
         except Exception:
             pass
         super().mouseDoubleClickEvent(event)

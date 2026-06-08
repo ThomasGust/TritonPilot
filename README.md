@@ -67,6 +67,7 @@ docs/               Maintained setup, operations, and architecture docs
 
 - [Documentation Index](docs/README.md)
 - [Setup Guide](docs/SETUP.md)
+- [Desktop App Build](docs/DESKTOP_APP.md)
 - [Network Guide](docs/NETWORKING.md)
 - [Analysis Transfer Link](docs/ANALYSIS_TRANSFER.md)
 - [Operations Guide](docs/OPERATIONS.md)
@@ -141,9 +142,10 @@ TritonPilot is allowed to display raw data and diagnostics, but it should not
 grow mission-scoring applets. That separation keeps the piloting station
 predictable under competition pressure.
 
-The Stereo tab is a capture and diagnostics surface, not a scoring applet. It
-lets operators view the configured stereo pair, monitor left/right frame timing,
-and save timestamped stereo sessions for TritonAnalysis calibration.
+Stereo capture is an operator capture mode in the main pilot view, not a
+scoring applet. It lets operators save timestamped stereo sessions for
+TritonAnalysis calibration while keeping live camera layouts in the driver
+window.
 
 ## Safety Notes
 

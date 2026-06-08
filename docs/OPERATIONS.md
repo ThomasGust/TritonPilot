@@ -85,7 +85,8 @@ competition instead of relying on the operator to remember a special case.
 
 Use reverse drive when the pilot is intentionally driving from a rear-facing
 view. Reverse drive flips translation commands so stick direction matches the
-camera perspective while yaw remains normal.
+camera perspective while yaw remains normal. Press `R` to toggle reverse drive
+from the main pilot view.
 
 ## Recording
 
@@ -96,9 +97,12 @@ Use the GUI recording controls to capture:
 - Pilot/sensor JSONL stream logs
 - Raw sensor CSV time series
 
+In the main pilot view, press `C` to switch controller capture between the
+active camera and the configured stereo pair path.
+
 Recordings should go into the selected session directory. If the preferred save
 location is unavailable, `recording/save_location.py` falls back to the default
-recordings directory.
+recordings directory in `Documents\TritonPilot\Recordings`.
 
 For analysis handoff, capture the clearest source media possible and note which
 camera, time, and mission task the file belongs to. TritonAnalysis should work

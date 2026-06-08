@@ -7,9 +7,9 @@ from pathlib import Path
 from typing import Optional
 from uuid import uuid4
 
+from app_paths import default_recordings_dir
 
-REPO_ROOT = Path(__file__).resolve().parents[1]
-DEFAULT_RECORDINGS_DIR = REPO_ROOT / "recordings"
+DEFAULT_RECORDINGS_DIR = default_recordings_dir()
 
 
 @dataclass(frozen=True)
@@ -63,10 +63,10 @@ def is_available_directory(path: str | Path | None) -> bool:
 
 
 def resolve_recordings_dir(preferred: str | Path | None, fallback: str | Path = DEFAULT_RECORDINGS_DIR) -> SaveLocation:
-    """Resolve the active recordings root, falling back to the repo folder.
+    """Resolve the active recordings root, falling back to the app default.
 
     A preferred directory is only used when it already exists and is writable.
-    The fallback directory is created on demand so a fresh checkout still works.
+    The fallback directory is created on demand so a fresh install still works.
     """
     preferred_path: Path | None = None
     if preferred is not None and str(preferred).strip():

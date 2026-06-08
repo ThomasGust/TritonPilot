@@ -29,6 +29,7 @@ from video.cam import RemoteCameraManager
 
 class _VideoPane(QFrame):
     activated = pyqtSignal(int)
+    SELECTION_BORDER_PX = 2
 
     def __init__(self, index: int, parent=None):
         super().__init__(parent)
@@ -40,7 +41,12 @@ class _VideoPane(QFrame):
         self.setToolTip("Click to make this the active pane for controller snapshots and recording.")
 
         self._layout = QVBoxLayout(self)
-        self._layout.setContentsMargins(0, 0, 0, 0)
+        self._layout.setContentsMargins(
+            self.SELECTION_BORDER_PX,
+            self.SELECTION_BORDER_PX,
+            self.SELECTION_BORDER_PX,
+            self.SELECTION_BORDER_PX,
+        )
         self._layout.setSpacing(0)
 
     def mousePressEvent(self, event) -> None:
@@ -769,6 +775,17 @@ class VideoTabs(QWidget):
 
     def prev_stream(self) -> None:
         self.cycle_stream(-1)
+
+    def set_rov_link_status(self, status: str) -> None:
+        for widget in list(self._widgets.values()):
+            if widget is None:
+                continue
+            setter = getattr(widget, "set_rov_link_status", None)
+            if callable(setter):
+                try:
+                    setter(status)
+                except Exception:
+                    pass
 
     def stop_all(self) -> None:
         try:

@@ -8,7 +8,8 @@ You can import this from anywhere:
 
 import os
 import socket
-from pathlib import Path
+
+from app_paths import streams_file_path
 
 DEFAULT_ROV_HOST = os.environ.get("TRITON_ROV_DEFAULT_HOST", "192.168.1.4")
 
@@ -138,8 +139,8 @@ VIDEO_DISPLAY_FPS_SINGLE = _float_env("TRITON_VIDEO_DISPLAY_FPS_SINGLE", 30.0, m
 VIDEO_DISPLAY_FPS_DUAL = _float_env("TRITON_VIDEO_DISPLAY_FPS_DUAL", 30.0, min_value=1.0, max_value=60.0)
 VIDEO_DISPLAY_FPS_MULTI = _float_env("TRITON_VIDEO_DISPLAY_FPS_MULTI", 30.0, min_value=1.0, max_value=60.0)
 
-# Where your JSON with stream definitions lives
-STREAMS_FILE = Path(__file__).parent / "data" / "streams.json"
+# Where your JSON with stream definitions lives.
+STREAMS_FILE = streams_file_path()
 
 # Controller shaping
 #

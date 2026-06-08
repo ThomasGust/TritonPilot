@@ -172,6 +172,7 @@ class _FakeVideoPanel(QWidget):
         self.apply_temporary_layout_calls = []
         self.restore_layout_snapshot_calls = []
         self.set_current_stream_calls = []
+        self.rov_link_statuses = []
 
     def _visible_count(self):
         return min(len(self.stream_names), int(self._pane_count))
@@ -227,6 +228,9 @@ class _FakeVideoPanel(QWidget):
     def set_water_correction(self, *_args, **_kwargs):
         return None
 
+    def set_rov_link_status(self, status):
+        self.rov_link_statuses.append(str(status))
+
     def stop_all(self):
         return None
 
@@ -281,6 +285,13 @@ def test_reverse_drive_page_keeps_pilot_video_layout(monkeypatch, tmp_path):
         app.processEvents()
         panel = win.video_panel
         assert panel is not None
+        assert [win._page_tabs.tabText(i) for i in range(win._page_tabs.count())] == [
+            "Pilot",
+            "Hold Test",
+            "Raw Sensors",
+            "Vehicle Setup",
+            "SSH",
+        ]
         assert panel.layout_count() == 4
         assert panel.visible_stream_names() == [
             "Primary Camera",
@@ -311,6 +322,49 @@ def test_reverse_drive_page_keeps_pilot_video_layout(monkeypatch, tmp_path):
         win._set_center_page("pilot", announce=False)
         app.processEvents()
         assert panel.layout_count() == 2
+    finally:
+        win.close()
+        app.processEvents()
+
+
+def test_r_shortcut_toggles_reverse_without_leaving_pilot_page(monkeypatch, tmp_path):
+    app = _app()
+    streams_path = tmp_path / "streams.json"
+    streams_path.write_text("{}", encoding="utf-8")
+
+    monkeypatch.setattr(main_window, "QSettings", lambda *args, **kwargs: _FakeSettings())
+    monkeypatch.setattr(main_window, "PilotPublisherService", _FakePilotService)
+    monkeypatch.setattr(main_window, "SensorSubscriberService", _FakeSensorService)
+    monkeypatch.setattr(main_window, "RemoteCameraManager", _FakeRemoteCameraManager)
+    monkeypatch.setattr(main_window, "VideoTabs", _FakeVideoPanel)
+    monkeypatch.setattr(main_window, "HoldTestPanel", _SimplePage)
+    monkeypatch.setattr(main_window, "ManagementPage", _SimplePage)
+    monkeypatch.setattr(main_window.threading, "Thread", _NoopThread)
+
+    win = main_window.MainWindow(str(streams_path))
+    try:
+        app.processEvents()
+        assert win._active_page_name == "pilot"
+        assert win._page_tabs.tabText(win._page_tabs.currentIndex()) == "Pilot"
+        before_size = win.size()
+        before_video_rect = win._pilot_video_host.geometry()
+
+        key_event = QKeyEvent(QEvent.Type.KeyPress, Qt.Key.Key_R, Qt.KeyboardModifier.NoModifier, "r")
+        assert win.eventFilter(win, key_event) is True
+        app.processEvents()
+
+        assert win._reverse_enabled is True
+        assert win.pilot_svc.is_reverse_enabled() is True
+        assert win._active_page_name == "pilot"
+        assert win._page_tabs.tabText(win._page_tabs.currentIndex()) == "Pilot"
+        assert win.size() == before_size
+        assert win._pilot_video_host.geometry() == before_video_rect
+        assert "Mode: REVERSE" in win._mode_lbl.text()
+
+        key_event = QKeyEvent(QEvent.Type.KeyPress, Qt.Key.Key_R, Qt.KeyboardModifier.NoModifier, "r")
+        assert win.eventFilter(win, key_event) is True
+        assert win._reverse_enabled is False
+        assert win._active_page_name == "pilot"
     finally:
         win.close()
         app.processEvents()
@@ -476,6 +530,46 @@ def test_pilot_page_adds_compact_telemetry_column_and_frees_status_bar(monkeypat
         app.processEvents()
 
 
+def test_heartbeat_loss_and_recovery_notify_video_panel(monkeypatch, tmp_path):
+    app = _app()
+    streams_path = tmp_path / "streams.json"
+    streams_path.write_text("{}", encoding="utf-8")
+
+    now = {"value": 1_000.0}
+    monkeypatch.setattr(main_window.time, "time", lambda: now["value"])
+    monkeypatch.setattr(main_window, "QSettings", lambda *args, **kwargs: _FakeSettings())
+    monkeypatch.setattr(main_window, "PilotPublisherService", _FakePilotService)
+    monkeypatch.setattr(main_window, "SensorSubscriberService", _FakeSensorService)
+    monkeypatch.setattr(main_window, "RemoteCameraManager", _FakeRemoteCameraManager)
+    monkeypatch.setattr(main_window, "VideoTabs", _FakeVideoPanel)
+    monkeypatch.setattr(main_window, "HoldTestPanel", _SimplePage)
+    monkeypatch.setattr(main_window, "ManagementPage", _SimplePage)
+    monkeypatch.setattr(main_window.threading, "Thread", _NoopThread)
+
+    win = main_window.MainWindow(str(streams_path))
+    try:
+        app.processEvents()
+        panel = win.video_panel
+        assert panel is not None
+
+        win._handle_sensor_msg_on_ui({"type": "heartbeat", "sensor": "heartbeat", "armed": False})
+        win._update_link_status()
+        assert panel.rov_link_statuses[-1] == "OK"
+
+        now["value"] += 6.0
+        win._update_link_status()
+        assert panel.rov_link_statuses[-1] == "LOST"
+        assert "Heartbeat: LOST" in win._link_lbl.text()
+
+        now["value"] += 0.1
+        win._handle_sensor_msg_on_ui({"type": "heartbeat", "sensor": "heartbeat", "armed": False})
+        win._update_link_status()
+        assert panel.rov_link_statuses[-1] == "OK"
+    finally:
+        win.close()
+        app.processEvents()
+
+
 def test_stereo_page_applies_configured_pair_layout(monkeypatch, tmp_path):
     app = _app()
     streams_path = tmp_path / "streams.json"
@@ -521,7 +615,9 @@ def test_stereo_page_applies_configured_pair_layout(monkeypatch, tmp_path):
         win._set_center_page("stereo", announce=False)
         app.processEvents()
 
-        assert win._page_tabs.tabText(win._page_tabs.currentIndex()) == "Stereo"
+        assert "Stereo" not in [win._page_tabs.tabText(i) for i in range(win._page_tabs.count())]
+        assert win._active_page_name == "stereo"
+        assert win._page_tabs.tabText(win._page_tabs.currentIndex()) == "Pilot"
         assert panel.apply_temporary_layout_calls[-1][0] == (
             2,
             ["Primary Camera", "Aux Camera"],
@@ -596,7 +692,17 @@ def test_stereo_page_controller_x_b_route_to_stereo_capture(monkeypatch, tmp_pat
 
         before_size = win.size()
         before_video_rect = win._pilot_video_host.geometry()
-        key_event = QKeyEvent(QEvent.Type.KeyPress, Qt.Key.Key_R, Qt.KeyboardModifier.NoModifier, "r")
+        reverse_key_event = QKeyEvent(QEvent.Type.KeyPress, Qt.Key.Key_R, Qt.KeyboardModifier.NoModifier, "r")
+        assert win.eventFilter(win, reverse_key_event) is True
+        app.processEvents()
+        assert win._reverse_enabled is True
+        assert win._capture_route_mode == "camera"
+        assert win._active_page_name == "pilot"
+        assert win._page_tabs.tabText(win._page_tabs.currentIndex()) == "Pilot"
+        assert win.size() == before_size
+        assert win._pilot_video_host.geometry() == before_video_rect
+
+        key_event = QKeyEvent(QEvent.Type.KeyPress, Qt.Key.Key_C, Qt.KeyboardModifier.NoModifier, "c")
         assert win.eventFilter(win, key_event) is True
         app.processEvents()
         assert win._capture_route_mode == "stereo"
@@ -620,7 +726,7 @@ def test_stereo_page_controller_x_b_route_to_stereo_capture(monkeypatch, tmp_pat
         focused_combo.show()
         focused_combo.setFocus()
         app.processEvents()
-        combo_key_event = QKeyEvent(QEvent.Type.KeyPress, Qt.Key.Key_R, Qt.KeyboardModifier.NoModifier, "r")
+        combo_key_event = QKeyEvent(QEvent.Type.KeyPress, Qt.Key.Key_C, Qt.KeyboardModifier.NoModifier, "c")
         assert win.eventFilter(focused_combo, combo_key_event) is True
         assert win._capture_route_mode == "camera"
         assert focused_combo.currentIndex() == 0

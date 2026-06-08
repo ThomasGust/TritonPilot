@@ -119,6 +119,8 @@ def test_video_tabs_uses_tight_pane_spacing(monkeypatch):
         app.processEvents()
         assert tabs._grid.spacing() == 0
         assert tabs.layout().spacing() == 1
+        margins = tabs._panes[0].layout().contentsMargins()
+        assert (margins.left(), margins.top(), margins.right(), margins.bottom()) == (2, 2, 2, 2)
     finally:
         tabs.close()
         tabs.deleteLater()

@@ -44,14 +44,12 @@ configuration does not change the normal pilot video layout.
 
 ## Capture Workflow
 
-In TritonPilot, open the Stereo tab. The tab shows the selected stereo pair,
-left/right stream settings, live frame age, pair delta, rig metadata, and
-capture controls. When the tab is active, the shared video panel is temporarily
-set to the left/right pair and the normal pilot layout is restored when leaving
-the tab. Controller X captures one stereo pair, and controller B starts or
-stops stereo recording while this tab is active. Disparity review stays in
-TritonAnalysis so both live camera streams keep the full available video area
-during capture.
+In TritonPilot's main pilot view, press `C` to route controller capture through
+the configured stereo pair path. Controller X captures one stereo pair, and
+controller B starts or stops stereo pair recording while stereo capture is
+selected. The pilot telemetry column shows the active capture mode and stereo
+recording status. Disparity review stays in TritonAnalysis so all live camera
+streams keep the full available video area during capture.
 
 The command-line capture helper is also available on the pilot computer after
 TritonOS video RPC is reachable:
@@ -77,15 +75,13 @@ stereo_sessions/
 timestamps, left/right frame sequence numbers, frame delta in milliseconds, and
 relative image paths. Move the whole session folder to the analysis computer.
 
-The Stereo tab keeps appending to the active session until `New Session` is
-pressed or the session name is changed. That means repeated `Capture Pair`
-clicks build one calibration dataset with many poses instead of one manifest
-per pose.
+The in-app stereo capture path keeps appending to the active session until a
+new still session is started. That means repeated single-pair captures build one
+calibration dataset with many poses instead of one manifest per pose.
 
-After closing TritonPilot, use `Resume Session` in the Stereo tab and choose
-that session's `manifest.json` to continue the same dataset. Only resume a
-session when the stereo mount, camera ordering, stream resolution, lens
-settings, and board-facing orientation have not changed.
+After closing TritonPilot, resume a session only when the stereo mount, camera
+ordering, stream resolution, lens settings, and board-facing orientation have
+not changed.
 
 ## Quality Checklist
 

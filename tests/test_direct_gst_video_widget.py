@@ -10,7 +10,12 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 from PyQt6.QtCore import Qt
 from PyQt6.QtWidgets import QApplication
 
-from gui.direct_gst_video_widget import DirectGstVideoWidget, DirectReceiverConfig, build_direct_receiver_cmd
+from gui.direct_gst_video_widget import (
+    DirectGstVideoWidget,
+    DirectReceiverConfig,
+    _looks_like_green_startup_artifact,
+    build_direct_receiver_cmd,
+)
 from gui.video_tabs import VideoTabs
 
 
@@ -110,7 +115,7 @@ class _FakeRecorder:
         self.out_path = Path(out_path)
         self.fps = float(fps)
         self.target = self.out_path
-        self.frames = 0
+        self.frames = []
         self.stopped = False
         self.stop_timeout_s = None
         self.stop_drain_pending = None
@@ -121,7 +126,8 @@ class _FakeRecorder:
         return self.target
 
     def add_frame(self, frame):
-        self.frames += 1
+        self.frames.append(np.array(frame, copy=True))
+        return True
 
     def stop(self, timeout_s=5.0, *, drain_pending=True):
         self.stop_timeout_s = timeout_s
@@ -188,6 +194,146 @@ def test_direct_widget_snapshot_and_recording_use_capture_receiver(monkeypatch, 
         assert rec.stopped is True
         assert rec.stop_timeout_s == 10.0
         assert rec.stop_drain_pending is True
+    finally:
+        widget.close()
+        widget.deleteLater()
+        app.processEvents()
+
+
+def test_direct_recording_skips_green_startup_artifact_frames(monkeypatch, tmp_path):
+    app = _app()
+    monkeypatch.setattr("gui.direct_gst_video_widget.DirectGstVideoWidget._start_connect", lambda self: None)
+    monkeypatch.setattr("gui.direct_gst_video_widget.VideoRecorder", _FakeRecorder)
+
+    green = np.zeros((24, 32, 3), dtype=np.uint8)
+    green[:, :, 1] = 72
+    normal = np.zeros((24, 32, 3), dtype=np.uint8)
+    normal[:, :, 0] = 80
+    normal[:, :, 1] = 78
+    normal[:, :, 2] = 84
+    normal[::2, ::2, :] = 150
+
+    assert _looks_like_green_startup_artifact(green) is True
+    assert _looks_like_green_startup_artifact(normal) is False
+
+    class _PacketCamera:
+        def __init__(self):
+            self._idx = 0
+            self._frames = [green, green, green, normal, normal]
+
+        def latest_frame_packet(self):
+            frame = self._frames[min(self._idx, len(self._frames) - 1)]
+            self._idx += 1
+            return SimpleNamespace(
+                frame_bgr=frame,
+                seq=self._idx,
+                monotonic_ts=time.monotonic(),
+                wall_ts=time.time(),
+            )
+
+        def read_frame_packet(self):
+            return self.latest_frame_packet()
+
+    manager = _FakeManager()
+    manager.capture = _PacketCamera()
+    widget = DirectGstVideoWidget(manager, "Primary Camera")
+    try:
+        app.processEvents()
+        target = widget.start_recording(out_dir=str(tmp_path), basename="primary", fps=30.0)
+        assert target is not None
+        rec = widget._rec
+        deadline = time.monotonic() + 1.0
+        while rec is not None and not rec.frames and time.monotonic() < deadline:
+            app.processEvents()
+            time.sleep(0.01)
+
+        assert rec is not None
+        assert rec.frames
+        assert _looks_like_green_startup_artifact(rec.frames[0]) is False
+    finally:
+        widget.close()
+        widget.deleteLater()
+        app.processEvents()
+
+
+def test_direct_widget_async_shutdown_does_not_wait_for_connect_worker(monkeypatch):
+    app = _app()
+    monkeypatch.setattr("gui.direct_gst_video_widget.DirectGstVideoWidget._start_connect", lambda self: None)
+    stopped = []
+    monkeypatch.setattr("gui.direct_gst_video_widget._stop_process_async", lambda proc, grace_s=0.05: stopped.append(proc))
+
+    class _FakeProc:
+        pid = 12345
+
+        def poll(self):
+            return None
+
+    class _FakeWorker:
+        def __init__(self):
+            self.quit_called = False
+            self.wait_called = False
+            self.proc = None
+
+        def quit(self):
+            self.quit_called = True
+
+        def wait(self, _timeout_ms):
+            self.wait_called = True
+            return True
+
+        def setParent(self, _parent):
+            return None
+
+    manager = _FakeManager()
+    widget = DirectGstVideoWidget(manager, "Primary Camera")
+    worker = _FakeWorker()
+    proc = _FakeProc()
+    widget._connect_worker = worker
+    widget._connect_attempt_active = True
+    widget._proc = proc
+    try:
+        widget.shutdown(async_release=True)
+
+        assert worker.quit_called is True
+        assert worker.wait_called is False
+        assert stopped == [proc]
+    finally:
+        widget.close()
+        widget.deleteLater()
+        app.processEvents()
+
+
+def test_direct_widget_link_loss_clears_renderer_and_recovers(monkeypatch):
+    app = _app()
+    monkeypatch.setattr("gui.direct_gst_video_widget.DirectGstVideoWidget._start_connect", lambda self: None)
+    stopped = []
+    monkeypatch.setattr("gui.direct_gst_video_widget._stop_process_async", lambda proc, grace_s=0.05: stopped.append(proc))
+
+    class _FakeProc:
+        pid = 23456
+
+        def poll(self):
+            return None
+
+    manager = _FakeManager()
+    widget = DirectGstVideoWidget(manager, "Primary Camera")
+    proc = _FakeProc()
+    widget._proc = proc
+    widget._state = "playing"
+    try:
+        widget.set_rov_link_status("LOST")
+
+        assert widget._rov_link_lost is True
+        assert widget._proc is None
+        assert stopped == [proc]
+        assert "ROV link lost" in widget._message.text()
+        next_retry_while_lost = widget._next_retry_ts
+
+        widget.set_rov_link_status("OK")
+
+        assert widget._rov_link_lost is False
+        assert "heartbeat recovered" in widget._message.text()
+        assert widget._next_retry_ts > next_retry_while_lost
     finally:
         widget.close()
         widget.deleteLater()

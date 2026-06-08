@@ -39,6 +39,26 @@ After setup, activate the environment and start the app:
 python .\main_topside.py
 ```
 
+## Windows Desktop App Build
+
+For pilot handoff, build the standalone desktop bundle instead of launching
+from VSCode or a Python prompt:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\tools\build_windows_app.ps1 -Clean -CreateDesktopShortcut
+```
+
+The executable is written to `dist\TritonPilot\TritonPilot.exe` with the
+golden trident icon. See [Desktop App Build](DESKTOP_APP.md) for rebuild and
+runtime notes.
+
+For a single executable that can be copied to Desktop without the `_internal`
+folder, build:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\tools\build_windows_app.ps1 -Clean -OneFile
+```
+
 ## Manual Python Setup
 
 Use this path for development machines, CI-like checks, or systems where

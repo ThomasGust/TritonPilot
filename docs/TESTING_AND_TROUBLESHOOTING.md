@@ -155,7 +155,7 @@ Management actions time out:
 Recordings are missing:
 
 - Confirm the selected save directory exists and is writable.
-- Check the fallback recordings directory.
+- Check `Documents\TritonPilot\Recordings`, the default recordings directory.
 - Stop recording before closing the app so files flush cleanly.
 
 ## Debugging Order

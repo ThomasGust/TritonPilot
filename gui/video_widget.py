@@ -33,6 +33,7 @@ from config import (
 )
 
 logger = logging.getLogger(__name__)
+_ORPHANED_CONNECT_WORKERS: set[QThread] = set()
 
 
 class _VideoWorker(QThread):
@@ -107,6 +108,44 @@ class _ConnectWorker(QThread):
             self.failed.emit(str(e))
 
 
+def _disconnect_connect_worker(worker) -> None:
+    for signal_name in ("connected", "failed"):
+        signal = getattr(worker, signal_name, None)
+        disconnect = getattr(signal, "disconnect", None)
+        if callable(disconnect):
+            try:
+                disconnect()
+            except Exception:
+                pass
+
+
+def _abandon_connect_worker(worker) -> None:
+    _disconnect_connect_worker(worker)
+    try:
+        worker.setParent(None)
+    except Exception:
+        pass
+    try:
+        _ORPHANED_CONNECT_WORKERS.add(worker)
+    except Exception:
+        pass
+
+    def _finished() -> None:
+        try:
+            _ORPHANED_CONNECT_WORKERS.discard(worker)
+        except Exception:
+            pass
+
+    try:
+        worker.finished.connect(_finished)
+    except Exception:
+        pass
+    try:
+        worker.quit()
+    except Exception:
+        pass
+
+
 class VideoWidget(QWidget):
     """Video display for a single ROV stream, with failsafe reconnection.
 
@@ -151,6 +190,7 @@ class VideoWidget(QWidget):
         # When disconnected/stalled we don't want to leave a stale frame visible.
         # If no new frames arrive, we clear the pixmap and show a status message.
         self._clear_stale_frame: bool = True
+        self._rov_link_lost: bool = False
 
         self.label = QLabel(f"{self.stream_name}\nWaiting for stream...")
         self.label.setAlignment(Qt.AlignmentFlag.AlignCenter)
@@ -229,6 +269,7 @@ class VideoWidget(QWidget):
             "state": self._state,
             "age_s": age,
             "last_error": self._last_error,
+            "rov_link_lost": bool(self._rov_link_lost),
         }
 
     def water_correction_enabled(self) -> bool:
@@ -308,6 +349,9 @@ class VideoWidget(QWidget):
         self._next_retry_ts = time.time() + max(0.0, float(delay_s))
 
     def _start_connect(self):
+        if self._rov_link_lost:
+            self._show_message(f"{self.stream_name}\nROV link lost.\nWaiting for heartbeat...")
+            return
         if self._connect_worker is not None and self._connect_worker.isRunning():
             return
 
@@ -327,6 +371,7 @@ class VideoWidget(QWidget):
         self._retry_backoff_s = 0.5
         self._state = "playing"
         self._connected_ts = time.time()
+        self._rov_link_lost = False
 
         # New connection: treat frames as "not yet received" until the first one arrives.
         self.last_frame = None
@@ -374,7 +419,7 @@ class VideoWidget(QWidget):
                 pass
             self.worker = None
 
-    def _restart_stream(self):
+    def _restart_stream(self, message: str | None = None, *, retry_delay_s: float = 0.2):
         self._state = "stalled"
         # Clear timestamps so we don't immediately re-trigger stall before the
         # new pipeline produces its first frame.
@@ -382,12 +427,31 @@ class VideoWidget(QWidget):
         self.last_frame_ts = 0.0
         self.frame_buffer.clear()
         self._connected_ts = 0.0
+        self.shutdown(release_only=True)  # keep widget alive + clear pixmap
         # Clear any stale frame immediately so the user doesn't think the
         # stream is still live.
-        self._show_message(f"{self.stream_name}\nDisconnected - attempting to reconnect...")
-        self.shutdown(release_only=True)  # keep widget alive + clear pixmap
+        self._show_message(message or f"{self.stream_name}\nDisconnected - attempting to reconnect...")
         self._retry_backoff_s = 0.5
-        self._schedule_retry(0.2)
+        if not self._rov_link_lost:
+            self._schedule_retry(retry_delay_s)
+
+    def set_rov_link_status(self, status: str) -> None:
+        status_key = str(status or "").strip().upper()
+        if status_key == "LOST":
+            if self._rov_link_lost:
+                return
+            self._rov_link_lost = True
+            self._restart_stream(
+                f"{self.stream_name}\nROV link lost.\nWaiting for heartbeat...",
+                retry_delay_s=0.0,
+            )
+            return
+        if status_key == "OK" and self._rov_link_lost:
+            self._rov_link_lost = False
+            self._restart_stream(
+                f"{self.stream_name}\nROV heartbeat recovered.\nReconnecting video...",
+                retry_delay_s=0.1,
+            )
 
     def _tick(self):
         now = time.time()
@@ -411,7 +475,9 @@ class VideoWidget(QWidget):
                     self._restart_stream()
         else:
             # If we haven't received frames yet, we still want to retry connect.
-            if now >= self._next_retry_ts:
+            if self._rov_link_lost:
+                self._show_message(f"{self.stream_name}\nROV link lost.\nWaiting for heartbeat...")
+            elif now >= self._next_retry_ts:
                 self._start_connect()
 
         self._refresh_capture_indicators()
@@ -455,7 +521,11 @@ class VideoWidget(QWidget):
     def mouseDoubleClickEvent(self, event):
         """Allow the operator to force a reconnect on the active stream."""
         try:
-            self._restart_stream()
+            self._rov_link_lost = False
+            self._restart_stream(
+                f"{self.stream_name}\nManual reconnect requested...",
+                retry_delay_s=0.1,
+            )
         except Exception:
             pass
         super().mouseDoubleClickEvent(event)
@@ -566,12 +636,15 @@ class VideoWidget(QWidget):
         # process on Windows/PyQt, so wait for the bounded RPC attempt to exit.
         if self._connect_worker is not None:
             worker = self._connect_worker
-            try:
-                worker.quit()
-                worker.wait(5000)
-            except Exception:
-                pass
             self._connect_worker = None
+            if async_release:
+                _abandon_connect_worker(worker)
+            else:
+                try:
+                    worker.quit()
+                    worker.wait(5000)
+                except Exception:
+                    pass
 
         if self.camera is not None:
             camera = self.camera

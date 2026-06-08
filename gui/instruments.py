@@ -51,12 +51,12 @@ class _Card(QFrame):
         self.title.setAlignment(Qt.AlignmentFlag.AlignCenter)
 
         self.body = QVBoxLayout()
-        self.body.setContentsMargins(6, 4, 6, 6)
-        self.body.setSpacing(6)
+        self.body.setContentsMargins(5, 3, 5, 4)
+        self.body.setSpacing(4)
 
         lay = QVBoxLayout(self)
-        lay.setContentsMargins(8, 8, 8, 8)
-        lay.setSpacing(6)
+        lay.setContentsMargins(6, 6, 6, 6)
+        lay.setSpacing(4)
         lay.addWidget(self.title)
         lay.addLayout(self.body)
 
@@ -64,7 +64,7 @@ class _Card(QFrame):
             """
             QFrame#InstrumentCard {
                 border: 1px solid #2a2a32;
-                border-radius: 10px;
+                border-radius: 8px;
                 background: #16161b;
             }
             QProgressBar {
@@ -162,7 +162,7 @@ class AttitudeIndicatorWidget(QWidget):
         self.roll_deg: Optional[float] = None
         self.pitch_deg: Optional[float] = None
         self.yaw_deg: Optional[float] = None
-        self.setMinimumSize(170, 210)
+        self.setMinimumSize(150, 176)
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
 
     def clear(self) -> None:
@@ -308,7 +308,7 @@ class GainPillarWidget(QWidget):
         super().__init__(parent)
         self.label = str(label or "-").upper()
         self.value = 0.0
-        self.setMinimumSize(54, 104)
+        self.setMinimumSize(48, 88)
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         self.set_gain(value)
 
@@ -363,12 +363,13 @@ class PilotTelemetryColumn(QWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setObjectName("pilotTelemetryColumn")
-        self.setMinimumWidth(220)
-        self.setMaximumWidth(260)
+        self.setMinimumWidth(208)
+        self.setMaximumWidth(236)
         self.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Expanding)
 
         self.attitude_card = _Card("Attitude")
         self.attitude_indicator = AttitudeIndicatorWidget()
+        self.attitude_indicator.setMaximumHeight(188)
         self.attitude_text = QLabel("roll - | pitch - | yaw -")
         self.attitude_text.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.attitude_text.setWordWrap(True)
@@ -377,7 +378,8 @@ class PilotTelemetryColumn(QWidget):
 
         self.depth_card = _Card("Depth")
         self.depth_gauge = VerticalGaugeWidget(label="Depth", unit="m", vmin=0.0, vmax=30.0)
-        self.depth_gauge.setMinimumSize(100, 190)
+        self.depth_gauge.setMinimumSize(90, 138)
+        self.depth_gauge.setMaximumHeight(154)
         self.depth_text = QLabel("-")
         self.depth_text.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.depth_text.setWordWrap(True)
@@ -391,13 +393,15 @@ class PilotTelemetryColumn(QWidget):
         self.back_gain_indicator = GainPillarWidget("BACK", 0.50)
         self.rov_gain_indicator = GainPillarWidget("ROV", 1.0)
         self.arm_gain_indicator = GainPillarWidget("ARM", 0.50)
+        for indicator in (self.back_gain_indicator, self.rov_gain_indicator, self.arm_gain_indicator):
+            indicator.setMaximumHeight(92)
         gain_row.addWidget(self.back_gain_indicator, 1)
         gain_row.addWidget(self.rov_gain_indicator, 1)
         gain_row.addWidget(self.arm_gain_indicator, 1)
         self.gain_card.body.addLayout(gain_row)
 
         self.analysis_card = _Card("Capture / Analysis")
-        self.capture_mode_text = QLabel("Capture: Camera  |  R toggles")
+        self.capture_mode_text = QLabel("Capture: Camera  |  C toggles")
         self.capture_mode_text.setObjectName("pilotCaptureModeText")
         self.capture_mode_text.setWordWrap(True)
         self.capture_mode_text.setAlignment(Qt.AlignmentFlag.AlignCenter)
@@ -483,11 +487,11 @@ class PilotTelemetryColumn(QWidget):
         mode_key = str(mode or "camera").strip().lower()
         self._capture_mode_key = "stereo" if mode_key == "stereo" else "camera"
         if mode_key == "stereo":
-            text = "Capture: Stereo pairs  |  R toggles"
+            text = "Capture: Stereo pairs  |  C toggles"
             tip = "X captures a stereo pair. B starts or stops stereo pair recording."
             color = "#9fd1ff"
         else:
-            text = "Capture: Camera  |  R toggles"
+            text = "Capture: Camera  |  C toggles"
             tip = "X saves the active camera image. B starts or stops active-camera video."
             color = "#dfe6f5"
         self.capture_mode_text.setText(text)

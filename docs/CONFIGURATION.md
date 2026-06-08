@@ -293,7 +293,14 @@ using a new correction setting during a run.
 ## Save Locations
 
 The GUI lets the operator choose a recording directory. If that directory is
-unavailable, `recording/save_location.py` falls back to the repository's default
-recordings directory.
+unavailable, `recording/save_location.py` falls back to the app default:
+
+```text
+%USERPROFILE%\Documents\TritonPilot\Recordings
+```
+
+Set `TRITON_RECORDINGS_DIR` to override the default without using the GUI.
+Set `TRITON_STREAMS_FILE` to point a source run or packaged app at a different
+camera stream configuration file.
 
 Use clear session names and preserve original media for TritonAnalysis.

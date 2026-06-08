@@ -163,7 +163,7 @@ def test_video_widget_display_fps_updates_tick_timer(monkeypatch):
         app.processEvents()
 
 
-def test_video_widget_shutdown_waits_for_inflight_connect_worker(monkeypatch):
+def test_video_widget_shutdown_can_wait_for_inflight_connect_worker(monkeypatch):
     app = _app()
     monkeypatch.setattr("gui.video_widget.VideoWidget._start_connect", lambda self: None)
 
@@ -183,11 +183,73 @@ def test_video_widget_shutdown_waits_for_inflight_connect_worker(monkeypatch):
     worker = _FakeConnectWorker()
     widget._connect_worker = worker
     try:
-        widget.shutdown()
+        widget.shutdown(async_release=False)
 
         assert worker.quit_called is True
         assert worker.wait_ms == 5000
         assert widget._connect_worker is None
+    finally:
+        widget.close()
+        widget.deleteLater()
+        app.processEvents()
+
+
+def test_video_widget_async_shutdown_does_not_wait_for_inflight_connect_worker(monkeypatch):
+    app = _app()
+    monkeypatch.setattr("gui.video_widget.VideoWidget._start_connect", lambda self: None)
+
+    class _FakeConnectWorker:
+        def __init__(self):
+            self.quit_called = False
+            self.wait_ms = None
+
+        def quit(self):
+            self.quit_called = True
+
+        def wait(self, timeout_ms):
+            self.wait_ms = int(timeout_ms)
+            return True
+
+        def setParent(self, _parent):
+            return None
+
+    widget = VideoWidget(_DummyManager(), "front")
+    worker = _FakeConnectWorker()
+    widget._connect_worker = worker
+    try:
+        widget.shutdown(async_release=True)
+
+        assert worker.quit_called is True
+        assert worker.wait_ms is None
+        assert widget._connect_worker is None
+    finally:
+        widget.close()
+        widget.deleteLater()
+        app.processEvents()
+
+
+def test_video_widget_link_loss_clears_stale_frame_and_recovers(monkeypatch):
+    app = _app()
+    monkeypatch.setattr("gui.video_widget.VideoWidget._start_connect", lambda self: None)
+
+    widget = VideoWidget(_DummyManager(), "front")
+    widget.show()
+    try:
+        app.processEvents()
+        widget._on_frame(np.full((32, 32, 3), 100, dtype=np.uint8))
+        assert widget.label.pixmap() is not None
+
+        widget.set_rov_link_status("LOST")
+
+        assert widget._rov_link_lost is True
+        assert "ROV link lost" in widget.label.text()
+        assert widget.label.pixmap().isNull()
+
+        widget.set_rov_link_status("OK")
+
+        assert widget._rov_link_lost is False
+        assert "heartbeat recovered" in widget.label.text()
+        assert widget._next_retry_ts > 0
     finally:
         widget.close()
         widget.deleteLater()

@@ -208,7 +208,9 @@ class MainWindow(QMainWindow):
 
         st = vw.status()
         state = str(st.get("state") or "-")
-        if state == "playing":
+        if bool(st.get("rov_link_lost")):
+            state_txt = "ROV link lost; reconnecting after heartbeat"
+        elif state == "playing":
             age = st.get("age_s")
             state_txt = f"live, age={float(age):.1f}s" if isinstance(age, (int, float)) else "live"
         elif state == "waiting":
@@ -258,10 +260,6 @@ class MainWindow(QMainWindow):
             checked = not self._reverse_enabled
         checked = bool(checked)
         self._set_reverse_mode(checked)
-        if checked and getattr(self, "_page_stack", None) is not None:
-            self._set_center_page("reverse_drive", announce=False)
-        elif not checked and getattr(self, "_active_page_name", "") == "reverse_drive":
-            self._set_center_page("pilot", announce=False)
 
     def _on_video_tab_changed(self, *_args) -> None:
         self._refresh_video_status()
@@ -437,21 +435,14 @@ class MainWindow(QMainWindow):
         return None
 
     def _on_page_tab_changed(self, index: int) -> None:
-        index = int(index)
-        if index == 1:
-            self._set_center_page("stereo")
-        elif index == 2:
-            self._set_center_page("reverse_drive")
-        elif index == 3:
-            self._set_center_page("hold_test")
-        elif index == 4:
-            self._set_center_page("raw_sensors")
-        elif index == 5:
-            self._set_center_page("management")
-        elif index == 6:
-            self._set_center_page("ssh")
-        else:
-            self._set_center_page("pilot")
+        page_name = {
+            0: "pilot",
+            1: "hold_test",
+            2: "raw_sensors",
+            3: "management",
+            4: "ssh",
+        }.get(int(index), "pilot")
+        self._set_center_page(page_name)
 
     def _set_center_page(self, page_name: str, *, announce: bool = True) -> None:
         page_name = str(page_name)
@@ -571,12 +562,10 @@ class MainWindow(QMainWindow):
             prev = self._page_tabs.blockSignals(True)
             tab_index = {
                 "pilot": 0,
-                "stereo": 1,
-                "reverse_drive": 2,
-                "hold_test": 3,
-                "raw_sensors": 4,
-                "management": 5,
-                "ssh": 6,
+                "hold_test": 1,
+                "raw_sensors": 2,
+                "management": 3,
+                "ssh": 4,
             }.get(page_name, 0)
             self._page_tabs.setCurrentIndex(tab_index)
         finally:
@@ -652,7 +641,7 @@ class MainWindow(QMainWindow):
 
     def __init__(self, streams_path: str, parent=None):
         super().__init__(parent)
-        self.setWindowTitle("ROV Topside (PyQt6)")
+        self.setWindowTitle("TritonPilot")
         self._settings = QSettings("TritonPilot", "ROVTopside")
         self._preferred_save_dir: str = str(self._settings.value(self.SAVE_DIR_SETTINGS_KEY, "") or "").strip()
         self._save_dir_act: QAction | None = None
@@ -877,8 +866,8 @@ class MainWindow(QMainWindow):
             self.pilot_telemetry_column,
             object_name="pilotTelemetryScroll",
         )
-        self.pilot_telemetry_scroll.setMinimumWidth(236)
-        self.pilot_telemetry_scroll.setMaximumWidth(280)
+        self.pilot_telemetry_scroll.setMinimumWidth(224)
+        self.pilot_telemetry_scroll.setMaximumWidth(252)
         self.pilot_telemetry_scroll.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Expanding)
         try:
             self._refresh_gain_indicators_from_modes(self.pilot_svc.current_modes())
@@ -945,8 +934,6 @@ class MainWindow(QMainWindow):
         self._page_tabs.setDocumentMode(True)
         self._page_tabs.setExpanding(False)
         self._page_tabs.addTab("Pilot")
-        self._page_tabs.addTab("Stereo")
-        self._page_tabs.addTab("Reverse Drive")
         self._page_tabs.addTab("Hold Test")
         self._page_tabs.addTab("Raw Sensors")
         self._page_tabs.addTab("Vehicle Setup")
@@ -1318,6 +1305,9 @@ class MainWindow(QMainWindow):
                     return True
                 if et == QEvent.Type.KeyPress:
                     if event.key() == Qt.Key.Key_R:
+                        self._toggle_reverse_mode()
+                        return True
+                    if event.key() == Qt.Key.Key_C:
                         self._toggle_capture_route_mode()
                         return True
                     try:
@@ -1793,6 +1783,11 @@ class MainWindow(QMainWindow):
                 status = "WARN" if age >= ok_th else "OK"
 
         self._link_state_last = status
+        try:
+            if self.video_panel is not None:
+                self.video_panel.set_rov_link_status(status)
+        except Exception:
+            pass
 
         parts = [f"Heartbeat: {status}"]
         if hb_age is not None:
@@ -2378,7 +2373,7 @@ class MainWindow(QMainWindow):
 
     def _save_location_note(self, location: SaveLocation | None) -> str:
         if location is not None and location.used_fallback and self._preferred_save_dir:
-            return " (using repo fallback)"
+            return " (using app default)"
         return ""
 
     def _current_save_dir_summary(self) -> str:
@@ -2449,7 +2444,7 @@ class MainWindow(QMainWindow):
         self._save_dir_act.triggered.connect(self._choose_save_directory)
         rec_menu.addAction(self._save_dir_act)
 
-        self._reset_save_dir_act = QAction("Use Repository Recordings Folder", self)
+        self._reset_save_dir_act = QAction("Use Default Recordings Folder", self)
         self._reset_save_dir_act.triggered.connect(self._reset_save_directory)
         rec_menu.addAction(self._reset_save_dir_act)
         rec_menu.addSeparator()
@@ -2547,6 +2542,8 @@ class MainWindow(QMainWindow):
                 self.video_panel.stop_all()
         except Exception:
             pass
+        video_panel = self.video_panel
+        self.video_panel = None
         # stop recorders
         try:
             self._stop_stream_log()
@@ -2595,11 +2592,19 @@ class MainWindow(QMainWindow):
         except Exception:
             pass
         try:
-            self.cam_mgr.close_all_capture()
+            close_all_capture_async = getattr(self.cam_mgr, "close_all_capture_async", None)
+            if callable(close_all_capture_async):
+                close_all_capture_async()
+            else:
+                threading.Thread(target=self.cam_mgr.close_all_capture, daemon=True).start()
         except Exception:
             pass
-        if self.video_panel is not None:
-            self.video_panel.close()
+        if video_panel is not None:
+            try:
+                video_panel.setParent(None)
+                video_panel.deleteLater()
+            except Exception:
+                pass
         super().closeEvent(event)
 
     def _current_camera_name_for_file(self) -> str:

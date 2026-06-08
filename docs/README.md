@@ -8,6 +8,8 @@ stays close to the code.
 
 - [Setup Guide](SETUP.md) - Install Python dependencies, GStreamer, and the
   Windows helper environment needed to run the topside app.
+- [Desktop App Build](DESKTOP_APP.md) - Build the Windows desktop executable
+  bundle and golden trident icon for pilot handoff.
 - [Network Guide](NETWORKING.md) - Tether addressing, ZeroMQ endpoints, video
   ports, Windows NAT routing, firewalls, and diagnostics.
 - [Pilot Tether Adapter Setup](PILOT_TETHER_SETUP.md) - Configure the Windows
