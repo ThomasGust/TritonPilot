@@ -546,6 +546,18 @@ def _dist_coeffs_from_json(value: object, *, label: str) -> np.ndarray:
     return arr
 
 
+def _calibration_units_to_mm(units: object) -> float:
+    """Return a multiplier from TritonAnalysis calibration units to millimeters."""
+    normalized = str(units or "").strip().lower()
+    if normalized in {"", "mm", "millimeter", "millimeters"}:
+        return 1.0
+    if normalized in {"cm", "centimeter", "centimeters"}:
+        return 10.0
+    if normalized in {"m", "meter", "meters"}:
+        return 1000.0
+    raise RuntimeError(f"Unsupported stereo calibration units for metric scaling: {units}")
+
+
 def load_stereo_calibration(path: Path) -> StereoCalibration:
     """Load a TritonAnalysis stereo calibration JSON file."""
     data = _load_json(path)
@@ -553,17 +565,21 @@ def load_stereo_calibration(path: Path) -> StereoCalibration:
     stereo = data.get("stereo") if isinstance(data.get("stereo"), dict) else {}
     left = data.get("left") if isinstance(data.get("left"), dict) else {}
     right = data.get("right") if isinstance(data.get("right"), dict) else {}
+    board = data.get("board") if isinstance(data.get("board"), dict) else {}
+    units_to_mm = _calibration_units_to_mm(board.get("units"))
+    baseline_units = float(stereo.get("baseline") or np.linalg.norm(stereo.get("translation", [0, 0, 0])))
+    translation_units = np.asarray(stereo.get("translation"), dtype=np.float64).reshape(3)
     return StereoCalibration(
         path=path.resolve(),
         image_size=(width, height),
         rig_id=str(data.get("rig_id") or "stereo_rig"),
-        baseline_mm=float(stereo.get("baseline") or np.linalg.norm(stereo.get("translation", [0, 0, 0]))),
+        baseline_mm=baseline_units * units_to_mm,
         left_camera_matrix=_matrix_from_json(left.get("camera_matrix"), shape=(3, 3), label="left.camera_matrix"),
         right_camera_matrix=_matrix_from_json(right.get("camera_matrix"), shape=(3, 3), label="right.camera_matrix"),
         left_dist_coeffs=_dist_coeffs_from_json(left.get("dist_coeffs"), label="left.dist_coeffs"),
         right_dist_coeffs=_dist_coeffs_from_json(right.get("dist_coeffs"), label="right.dist_coeffs"),
         rotation=_matrix_from_json(stereo.get("rotation"), shape=(3, 3), label="stereo.rotation"),
-        translation_mm=np.asarray(stereo.get("translation"), dtype=np.float64).reshape(3),
+        translation_mm=translation_units * units_to_mm,
     )
 
 

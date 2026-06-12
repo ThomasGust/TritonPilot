@@ -63,7 +63,7 @@ def _make_stereo_session(tmp_path: Path) -> Path:
     return session_dir
 
 
-def _make_calibration(tmp_path: Path) -> Path:
+def _make_calibration(tmp_path: Path, *, units: str | None = None, baseline: float = 100.0) -> Path:
     calibration = {
         "image_size": [16, 12],
         "rig_id": "unit_test_rig",
@@ -76,12 +76,14 @@ def _make_calibration(tmp_path: Path) -> Path:
             "dist_coeffs": [[0.2, 0.02, 0.003, 0.004, 0.0002]],
         },
         "stereo": {
-            "baseline": 100.0,
+            "baseline": baseline,
             "rotation": [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]],
-            "translation": [-100.0, 0.0, 0.0],
+            "translation": [-baseline, 0.0, 0.0],
         },
     }
-    path = tmp_path / "stereo_calibration.json"
+    if units is not None:
+        calibration["board"] = {"units": units}
+    path = tmp_path / f"stereo_calibration_{units or 'default'}.json"
     path.write_text(json.dumps(calibration), encoding="utf-8")
     return path
 
@@ -200,6 +202,33 @@ def test_metric_scale_from_solved_stereo_xmp_writes_meter_obj(tmp_path: Path):
     assert "v 0.05 0.1 0.15" in text
     assert "v -0.1 0 0.2 0.4 0.5 0.6" in text
     assert "vn 0.0 0.0 1.0" in text
+
+
+def test_metric_scale_honors_centimeter_calibration_units(tmp_path: Path):
+    calibration = load_stereo_calibration(_make_calibration(tmp_path, units="cm", baseline=12.0))
+    frames_dir = tmp_path / "frames"
+    frames_dir.mkdir()
+    for index, x_offset in enumerate((0.0, 5.0, 10.0), start=1):
+        stem = f"pair_{index:06d}"
+        _write_solved_xmp(frames_dir / f"{stem}_left_t_0000.000.xmp", (x_offset, 0.0, 0.0))
+        _write_solved_xmp(frames_dir / f"{stem}_right_t_0000.000.xmp", (x_offset + 2.0, 0.0, 0.0))
+
+    model = tmp_path / "model.obj"
+    model.write_text("v 1.0 0.0 0.0\n", encoding="utf-8")
+
+    result = scale_model_from_stereo_baseline(
+        model,
+        frames_dir,
+        calibration,
+        translation_scale=0.001,
+        min_pairs=3,
+        report_path=tmp_path / "metric_scale.json",
+    )
+
+    assert calibration.baseline_mm == approx(120.0)
+    assert result.real_baseline_m == approx(0.12)
+    assert result.scale_factor == approx(0.06)
+    assert "v 0.06 0 0" in result.metric_model.read_text(encoding="utf-8")
 
 
 def test_final_command_exports_solved_xmp_for_metric_scaling(tmp_path: Path):
