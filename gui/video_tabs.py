@@ -106,6 +106,7 @@ class VideoTabs(QWidget):
         else:
             self._stop_hidden_streams_enabled = bool(config_stop_hidden)
         self._water_correction_enabled: bool = False
+        self._square_display_enabled: bool = False
         self._settings = QSettings("TritonPilot", "ROVTopside")
 
         self._containers: dict[str, QWidget] = {}
@@ -233,6 +234,16 @@ class VideoTabs(QWidget):
                     setter(fps)
                 except Exception:
                     pass
+
+    def _apply_square_display_to_widget(self, widget: QWidget | None) -> None:
+        if widget is None:
+            return
+        setter = getattr(widget, "set_square_display_enabled", None)
+        if callable(setter):
+            try:
+                setter(self._square_display_enabled)
+            except Exception:
+                pass
 
     def _find_layout_combo_index(self, count: int) -> int:
         for idx in range(self._layout_combo.count()):
@@ -448,6 +459,11 @@ class VideoTabs(QWidget):
             QTimer.singleShot(0, lambda: self._refresh_visible_widget_geometry(defer=False))
             QTimer.singleShot(80, lambda: self._refresh_visible_widget_geometry(defer=False))
 
+    def refresh_layout_geometry(self) -> None:
+        self.updateGeometry()
+        self.update()
+        self._refresh_visible_widget_geometry()
+
     def _clear_container(self, cont: QWidget) -> None:
         lay = cont.layout()
         if lay is None:
@@ -543,6 +559,7 @@ class VideoTabs(QWidget):
                     pass
         if self._water_correction_enabled:
             vw.set_water_correction(True)
+        self._apply_square_display_to_widget(vw)
         setter = getattr(vw, "set_display_fps", None)
         if callable(setter):
             try:
@@ -795,6 +812,15 @@ class VideoTabs(QWidget):
         for widget in self._widgets.values():
             if widget is not None:
                 widget.set_water_correction(enabled)
+
+    def set_square_display_enabled(self, enabled: bool) -> None:
+        self._square_display_enabled = bool(enabled)
+        for widget in self._widgets.values():
+            self._apply_square_display_to_widget(widget)
+        self._refresh_visible_widget_geometry()
+
+    def square_display_enabled(self) -> bool:
+        return bool(self._square_display_enabled)
 
     def cycle_stream(self, step: int) -> None:
         if not self.stream_names:

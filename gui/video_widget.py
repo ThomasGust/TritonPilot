@@ -176,6 +176,7 @@ class VideoWidget(QWidget):
         self._snapshot_indicator_text: str = "SNAP"
         self._snapshot_indicator_duration_s: float = 1.2
         self._display_fps: float = float(VIDEO_DISPLAY_FPS_SINGLE)
+        self._square_display_enabled: bool = False
 
         # state
         self._state: str = "waiting"  # waiting|connecting|playing|stalled
@@ -288,6 +289,17 @@ class VideoWidget(QWidget):
 
     def display_fps(self) -> float:
         return float(self._display_fps)
+
+    def set_square_display_enabled(self, enabled: bool) -> None:
+        enabled = bool(enabled)
+        if enabled == self._square_display_enabled:
+            return
+        self._square_display_enabled = enabled
+        if self.last_frame is not None:
+            try:
+                self._render_frame(self.last_frame)
+            except Exception:
+                pass
 
     def set_display_fps(self, fps: float) -> None:
         try:
@@ -520,9 +532,25 @@ class VideoWidget(QWidget):
 
         self._render_frame(frame)
 
+    def _display_frame(self, frame: np.ndarray) -> np.ndarray:
+        if not self._square_display_enabled:
+            return np.ascontiguousarray(frame)
+        try:
+            h, w = int(frame.shape[0]), int(frame.shape[1])
+            if h <= 0 or w <= 0 or h == w:
+                return np.ascontiguousarray(frame)
+            if w > h:
+                left = max(0, (w - h) // 2)
+                return np.ascontiguousarray(frame[:, left : left + h, :])
+            top = max(0, (h - w) // 2)
+            return np.ascontiguousarray(frame[top : top + w, :, :])
+        except Exception:
+            return np.ascontiguousarray(frame)
+
     def _render_frame(self, frame: np.ndarray) -> None:
+        frame = self._display_frame(frame)
         h, w, ch = frame.shape
-        bytes_per_line = ch * w
+        bytes_per_line = frame.strides[0]
         image = QImage(frame.data, w, h, bytes_per_line, QImage.Format.Format_BGR888)
         dpr = max(1.0, float(self.devicePixelRatioF()))
         target_w = max(1, int(self.label.width() * dpr))

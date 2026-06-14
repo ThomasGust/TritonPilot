@@ -173,6 +173,8 @@ class _FakeVideoPanel(QWidget):
         self.restore_layout_snapshot_calls = []
         self.set_current_stream_calls = []
         self.rov_link_statuses = []
+        self.square_display_enabled = False
+        self.refresh_layout_count = 0
 
     def _visible_count(self):
         return min(len(self.stream_names), int(self._pane_count))
@@ -224,6 +226,12 @@ class _FakeVideoPanel(QWidget):
 
     def restore_layout_snapshot(self, *args, **kwargs):
         self.restore_layout_snapshot_calls.append((args, kwargs))
+
+    def set_square_display_enabled(self, enabled):
+        self.square_display_enabled = bool(enabled)
+
+    def refresh_layout_geometry(self):
+        self.refresh_layout_count += 1
 
     def set_water_correction(self, *_args, **_kwargs):
         return None
@@ -287,6 +295,7 @@ def test_reverse_drive_page_keeps_pilot_video_layout(monkeypatch, tmp_path):
         assert panel is not None
         assert [win._page_tabs.tabText(i) for i in range(win._page_tabs.count())] == [
             "Pilot",
+            "Transect",
             "Hold Test",
             "Raw Sensors",
             "Vehicle Setup",
@@ -322,6 +331,70 @@ def test_reverse_drive_page_keeps_pilot_video_layout(monkeypatch, tmp_path):
         win._set_center_page("pilot", announce=False)
         app.processEvents()
         assert panel.layout_count() == 2
+    finally:
+        win.close()
+        app.processEvents()
+
+
+def test_transect_page_applies_square_single_camera_layout(monkeypatch, tmp_path):
+    app = _app()
+    streams_path = tmp_path / "streams.json"
+    streams_path.write_text("{}", encoding="utf-8")
+
+    monkeypatch.setattr(main_window, "QSettings", lambda *args, **kwargs: _FakeSettings())
+    monkeypatch.setattr(main_window, "PilotPublisherService", _FakePilotService)
+    monkeypatch.setattr(main_window, "SensorSubscriberService", _FakeSensorService)
+    monkeypatch.setattr(main_window, "RemoteCameraManager", _FakeRemoteCameraManager)
+    monkeypatch.setattr(main_window, "VideoTabs", _FakeVideoPanel)
+    monkeypatch.setattr(main_window, "HoldTestPanel", _SimplePage)
+    monkeypatch.setattr(main_window, "ManagementPage", _SimplePage)
+    monkeypatch.setattr(main_window.threading, "Thread", _NoopThread)
+
+    win = main_window.MainWindow(str(streams_path))
+    try:
+        app.processEvents()
+        panel = win.video_panel
+        assert panel is not None
+
+        win._set_capture_route_mode("stereo", announce=False)
+        win._set_center_page("transect", announce=False)
+        app.processEvents()
+
+        assert win._active_page_name == "transect"
+        assert win._page_tabs.tabText(win._page_tabs.currentIndex()) == "Transect"
+        assert win._capture_route_mode == "camera"
+        assert win._capture_should_use_stereo() is False
+        assert win._transect_page.camera_combo.focusPolicy() == Qt.FocusPolicy.NoFocus
+        assert panel.controls_visible is False
+        assert panel.controls_enabled is False
+        assert panel.square_display_enabled is True
+        assert win._transect_page.square_host.current_widget() is panel
+        assert panel.apply_temporary_layout_calls[-1][0] == (1, ["Primary Camera"])
+        assert panel.apply_temporary_layout_calls[-1][1]["active_name"] == "Primary Camera"
+
+        win._transect_page.set_current_stream("Aux Camera", emit=True)
+        app.processEvents()
+        assert panel.apply_temporary_layout_calls[-1][0] == (1, ["Aux Camera"])
+        assert panel.apply_temporary_layout_calls[-1][1]["active_name"] == "Aux Camera"
+
+        before_calls = len(panel.apply_temporary_layout_calls)
+        win._transect_page.camera_combo.setFocus()
+        key_event = QKeyEvent(QEvent.Type.KeyPress, Qt.Key.Key_A, Qt.KeyboardModifier.NoModifier, "a")
+        assert win.eventFilter(win._transect_page.camera_combo, key_event) is True
+        assert win._servo_wrist_keys_down == {"A"}
+        assert len(panel.apply_temporary_layout_calls) == before_calls
+        assert win._transect_page.current_stream_name() == "Aux Camera"
+
+        win._set_center_page("pilot", announce=False)
+        app.processEvents()
+
+        assert win._active_page_name == "pilot"
+        assert panel.square_display_enabled is False
+        assert panel.restore_layout_snapshot_calls
+        assert panel.controls_visible is True
+        assert panel.controls_enabled is True
+        assert panel.isHidden() is False
+        assert panel.refresh_layout_count > 0
     finally:
         win.close()
         app.processEvents()

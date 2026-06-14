@@ -95,7 +95,8 @@ def apply_modern_style(app: QApplication) -> None:
         background: #335fb6;
     }
     QComboBox#videoLayoutCombo,
-    QComboBox#videoPaneSelector {
+    QComboBox#videoPaneSelector,
+    QComboBox#transectCameraSelector {
         padding: 2px 6px;
         border: 1px solid #2a2a32;
         border-radius: 6px;
@@ -132,6 +133,14 @@ def apply_modern_style(app: QApplication) -> None:
     QLabel#videoPanePlaceholder {
         color: #97a0b8;
         padding: 8px;
+    }
+    QWidget#transectControls {
+        background: transparent;
+    }
+    QFrame#transectSquareHost {
+        background: #0f1015;
+        border: 1px solid #2a2a32;
+        border-radius: 2px;
     }
     QFrame#stereoSectionCard {
         border: 1px solid #2a2a32;

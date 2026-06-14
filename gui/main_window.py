@@ -73,6 +73,7 @@ from gui.instruments import InstrumentPanel, HoldTestPanel, PilotTelemetryColumn
 from gui.raw_sensor_page import RawSensorPage
 from gui.management_page import ManagementPage
 from gui.stereo_page import StereoPage
+from gui.transect_page import TransectPage
 from gui.ssh_page import SshConsolePage, default_pilot_ssh_presets
 from gui.responsive import resize_to_available_screen, vertical_scroll_area
 from network.net_select import LocalAddr, list_local_ipv4_addrs
@@ -265,6 +266,8 @@ class MainWindow(QMainWindow):
         self._refresh_video_status()
 
     def _capture_should_use_stereo(self) -> bool:
+        if getattr(self, "_active_page_name", "") == "transect":
+            return False
         return getattr(self, "_capture_route_mode", "camera") == "stereo" or (
             getattr(self, "_active_page_name", "") == "stereo" and getattr(self, "_stereo_page", None) is not None
         )
@@ -394,6 +397,43 @@ class MainWindow(QMainWindow):
         except Exception:
             pass
         target_layout.addWidget(self.video_panel, 1)
+        try:
+            self.video_panel.show()
+            self.video_panel.raise_()
+        except Exception:
+            pass
+        self._refresh_video_panel_geometry()
+
+    def _refresh_video_panel_geometry(self, *, defer: bool = True) -> None:
+        if self.video_panel is None:
+            return
+        try:
+            self.video_panel.updateGeometry()
+            self.video_panel.update()
+        except Exception:
+            pass
+        refresher = getattr(self.video_panel, "refresh_layout_geometry", None)
+        if callable(refresher):
+            try:
+                refresher()
+            except Exception:
+                pass
+        if defer:
+            try:
+                QTimer.singleShot(0, lambda: self._refresh_video_panel_geometry(defer=False))
+                QTimer.singleShot(80, lambda: self._refresh_video_panel_geometry(defer=False))
+            except Exception:
+                pass
+
+    def _set_video_panel_square_display(self, enabled: bool) -> None:
+        if self.video_panel is None:
+            return
+        setter = getattr(self.video_panel, "set_square_display_enabled", None)
+        if callable(setter):
+            try:
+                setter(bool(enabled))
+            except Exception:
+                pass
 
     def _resume_video_panel(self) -> None:
         if self.video_panel is None:
@@ -437,16 +477,17 @@ class MainWindow(QMainWindow):
     def _on_page_tab_changed(self, index: int) -> None:
         page_name = {
             0: "pilot",
-            1: "hold_test",
-            2: "raw_sensors",
-            3: "management",
-            4: "ssh",
+            1: "transect",
+            2: "hold_test",
+            3: "raw_sensors",
+            4: "management",
+            5: "ssh",
         }.get(int(index), "pilot")
         self._set_center_page(page_name)
 
     def _set_center_page(self, page_name: str, *, announce: bool = True) -> None:
         page_name = str(page_name)
-        if page_name not in {"pilot", "stereo", "reverse_drive", "hold_test", "raw_sensors", "management", "ssh"}:
+        if page_name not in {"pilot", "transect", "stereo", "reverse_drive", "hold_test", "raw_sensors", "management", "ssh"}:
             page_name = "pilot"
         if page_name == getattr(self, "_active_page_name", "pilot"):
             return
@@ -470,6 +511,23 @@ class MainWindow(QMainWindow):
             if getattr(self, "_reverse_page_owns_mode", False):
                 self._reverse_page_owns_mode = False
                 self._set_reverse_mode(False, announce=False)
+        if previous_page == "transect" and page_name != "transect":
+            if self.video_panel is not None:
+                try:
+                    self._transect_page.detach_video_panel(self.video_panel)
+                except Exception:
+                    pass
+                self._set_video_panel_square_display(False)
+                if getattr(self, "_transect_layout_restore_snapshot", None) is not None:
+                    try:
+                        self.video_panel.restore_layout_snapshot(
+                            self._transect_layout_restore_snapshot,
+                            save=False,
+                            emit=True,
+                        )
+                    except Exception:
+                        pass
+                    self._transect_layout_restore_snapshot = None
 
         if page_name == "reverse_drive":
             if self.video_panel is not None:
@@ -499,6 +557,21 @@ class MainWindow(QMainWindow):
                 self._attach_shared_video_panel(self._stereo_page.video_host_layout)
                 self._apply_stereo_pair_view()
             self._page_stack.setCurrentWidget(self._stereo_page)
+        elif page_name == "transect":
+            if self.video_panel is not None:
+                if self._active_page_name == "pilot":
+                    self._pilot_layout_count_restore = int(self.video_panel.layout_count())
+                try:
+                    self._transect_layout_restore_snapshot = self.video_panel.layout_snapshot()
+                except Exception:
+                    self._transect_layout_restore_snapshot = None
+                self._set_capture_route_mode("camera", announce=False)
+                self.video_panel.set_layout_controls_visible(False)
+                self.video_panel.set_layout_controls_enabled(False)
+                self._resume_video_panel()
+                self._transect_page.attach_video_panel(self.video_panel)
+                self._apply_transect_camera_view()
+            self._page_stack.setCurrentWidget(self._transect_page)
         elif page_name == "hold_test":
             if self.video_panel is not None:
                 if self._active_page_name == "pilot":
@@ -562,10 +635,11 @@ class MainWindow(QMainWindow):
             prev = self._page_tabs.blockSignals(True)
             tab_index = {
                 "pilot": 0,
-                "hold_test": 1,
-                "raw_sensors": 2,
-                "management": 3,
-                "ssh": 4,
+                "transect": 1,
+                "hold_test": 2,
+                "raw_sensors": 3,
+                "management": 4,
+                "ssh": 5,
             }.get(page_name, 0)
             self._page_tabs.setCurrentIndex(tab_index)
         finally:
@@ -578,6 +652,7 @@ class MainWindow(QMainWindow):
         if announce:
             label = {
                 "pilot": "Pilot",
+                "transect": "Transect",
                 "stereo": "Stereo",
                 "reverse_drive": "Reverse Drive",
                 "hold_test": "Hold Test",
@@ -605,6 +680,42 @@ class MainWindow(QMainWindow):
                 emit=True,
             )
             self._warm_stereo_capture_receivers(pair.left, pair.right)
+            self._resume_video_panel()
+        except Exception:
+            pass
+
+    def _on_transect_camera_changed(self, name: str) -> None:
+        if getattr(self, "_active_page_name", "") == "transect":
+            self._apply_transect_camera_view(name)
+
+    def _apply_transect_camera_view(self, name: str | None = None) -> None:
+        if self.video_panel is None:
+            return
+        selected = str(name or "").strip()
+        if not selected:
+            try:
+                selected = str(self._transect_page.current_stream_name() or "")
+            except Exception:
+                selected = ""
+        if not self.video_panel.has_stream(selected):
+            try:
+                selected = str(self.video_panel.current_stream_name() or "")
+            except Exception:
+                selected = ""
+        if not self.video_panel.has_stream(selected):
+            return
+        try:
+            self._transect_page.set_current_stream(selected, emit=False)
+        except Exception:
+            pass
+        self._set_video_panel_square_display(True)
+        try:
+            self.video_panel.apply_temporary_layout(
+                1,
+                [selected],
+                active_name=selected,
+                emit=True,
+            )
             self._resume_video_panel()
         except Exception:
             pass
@@ -899,6 +1010,7 @@ class MainWindow(QMainWindow):
         # 3) video (failsafe: GUI should boot even if ROV/video isn't available yet)
         self.cam_mgr = None
         self.video_panel = None
+        stream_names: list[str] = []
         try:
             if not os.path.exists(streams_path):
                 # Don't block startup; just disable video.
@@ -921,6 +1033,7 @@ class MainWindow(QMainWindow):
         if self.video_panel is not None:
             self._pilot_layout_count_restore = int(self.video_panel.layout_count())
         self._stereo_layout_restore_snapshot: dict | None = None
+        self._transect_layout_restore_snapshot: dict | None = None
         self._stereo_capture_warm_names: set[str] = set()
         self._reverse_page_owns_mode: bool = False
         self._active_page_name = ""
@@ -935,6 +1048,7 @@ class MainWindow(QMainWindow):
         self._page_tabs.setDocumentMode(True)
         self._page_tabs.setExpanding(False)
         self._page_tabs.addTab("Pilot")
+        self._page_tabs.addTab("Transect")
         self._page_tabs.addTab("Hold Test")
         self._page_tabs.addTab("Raw Sensors")
         self._page_tabs.addTab("Vehicle Setup")
@@ -979,6 +1093,12 @@ class MainWindow(QMainWindow):
             right_lay.addWidget(self.sensor_panel, 3)
             pilot_outer.addWidget(right_col, 1)
         self._page_stack.addWidget(self._pilot_page)
+
+        self._transect_page = TransectPage(stream_names=stream_names)
+        self._transect_page.cameraSelectionChanged.connect(self._on_transect_camera_changed)
+        if self.video_panel is None:
+            self._transect_page.attach_video_placeholder("Video unavailable.")
+        self._page_stack.addWidget(self._transect_page)
 
         self._reverse_page = QWidget()
         reverse_outer = QHBoxLayout(self._reverse_page)

@@ -24,6 +24,14 @@ CUSTOM_ARG_FLAGS = {"--no-splash", "--windowed", "--maximized", "--fullscreen"}
 def _smoke_test() -> int:
     """Verify packaged resources without opening the operator window."""
     missing = [path for path in (streams_file_path(), app_icon_path()) if not path.exists()]
+    try:
+        import imageio_ffmpeg  # type: ignore
+
+        ffmpeg_path = imageio_ffmpeg.get_ffmpeg_exe()
+    except Exception:
+        ffmpeg_path = ""
+    if not ffmpeg_path or not os.path.exists(ffmpeg_path):
+        missing.append("imageio_ffmpeg ffmpeg executable")
     return 1 if missing else 0
 
 

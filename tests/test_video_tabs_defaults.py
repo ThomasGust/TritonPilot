@@ -37,6 +37,7 @@ class _DummyVideoWidget(QWidget):
         self.autostart = bool(autostart)
         self._recording = False
         self.display_fps_value = None
+        self.square_display_enabled = False
         self.rov_link_statuses = []
         self.refresh_count = 0
 
@@ -45,6 +46,9 @@ class _DummyVideoWidget(QWidget):
 
     def set_display_fps(self, fps: float) -> None:
         self.display_fps_value = float(fps)
+
+    def set_square_display_enabled(self, enabled: bool) -> None:
+        self.square_display_enabled = bool(enabled)
 
     def is_recording(self) -> bool:
         return bool(self._recording)
@@ -343,6 +347,34 @@ def test_video_tabs_lowers_display_fps_for_multi_camera_layouts(monkeypatch):
         tabs.set_layout_count(1)
         app.processEvents()
         assert {widget.display_fps_value for widget in tabs._widgets.values()} == {30.0}
+    finally:
+        tabs.close()
+        tabs.deleteLater()
+        app.processEvents()
+
+
+def test_video_tabs_propagates_square_display_to_widgets(monkeypatch):
+    app = _app()
+    fake_settings = _FakeSettings({"video/layout_count": 2})
+    monkeypatch.setattr("gui.video_tabs.QSettings", lambda *args, **kwargs: fake_settings)
+    monkeypatch.setattr("gui.video_tabs.VideoWidget", _DummyVideoWidget)
+
+    tabs = VideoTabs(
+        _DummyManager(default_pane_order=["Primary Camera", "Aux Camera"]),
+        stream_names=["Primary Camera", "Aux Camera"],
+    )
+    try:
+        app.processEvents()
+        assert tabs.square_display_enabled() is False
+
+        tabs.set_square_display_enabled(True)
+        app.processEvents()
+        assert tabs.square_display_enabled() is True
+        assert {widget.square_display_enabled for widget in tabs._widgets.values()} == {True}
+
+        tabs.set_square_display_enabled(False)
+        app.processEvents()
+        assert {widget.square_display_enabled for widget in tabs._widgets.values()} == {False}
     finally:
         tabs.close()
         tabs.deleteLater()

@@ -40,11 +40,14 @@ class DirectReceiverConfig:
     codec: str
     port: int
     bind_address: str
+    width: int = 0
+    height: int = 0
     latency_ms: int = 5
     udp_buffer_size: int = 4 * 1024 * 1024
     drop_on_latency: bool = True
     h264_decoder: str = "decodebin"
     sink: str = "d3d11videosink"
+    square_crop: bool = False
 
 
 def _find_gst_launch() -> str:
@@ -76,6 +79,24 @@ def _h264_decoder_chain(decoder: str) -> list[str]:
     return [name]
 
 
+def _square_crop_chain(cfg: DirectReceiverConfig) -> list[str]:
+    if not bool(cfg.square_crop):
+        return []
+    width = max(0, int(cfg.width or 0))
+    height = max(0, int(cfg.height or 0))
+    if width <= 0 or height <= 0 or width == height:
+        return []
+    if width > height:
+        extra = width - height
+        left = extra // 2
+        right = extra - left
+        return ["!", "videocrop", f"left={left}", f"right={right}", "top=0", "bottom=0"]
+    extra = height - width
+    top = extra // 2
+    bottom = extra - top
+    return ["!", "videocrop", "left=0", "right=0", f"top={top}", f"bottom={bottom}"]
+
+
 def build_direct_receiver_cmd(gst_launch: str, cfg: DirectReceiverConfig) -> list[str]:
     """Build a direct-render RTP receiver pipeline.
 
@@ -89,6 +110,7 @@ def build_direct_receiver_cmd(gst_launch: str, cfg: DirectReceiverConfig) -> lis
     drop_on_latency = "true" if cfg.drop_on_latency else "false"
     sink = str(cfg.sink or "d3d11videosink").strip() or "d3d11videosink"
     sink_props = ["sync=false", "async=false", "force-aspect-ratio=true"]
+    crop_chain = _square_crop_chain(cfg)
 
     if cfg.codec.lower() == "h264":
         caps = "application/x-rtp,media=video,encoding-name=H264,payload=96,clock-rate=90000"
@@ -101,6 +123,7 @@ def build_direct_receiver_cmd(gst_launch: str, cfg: DirectReceiverConfig) -> lis
             "!", "h264parse", "config-interval=-1", "disable-passthrough=true",
             "!", *_h264_decoder_chain(cfg.h264_decoder),
             "!", "videoconvert",
+            *crop_chain,
             "!", "queue", "max-size-buffers=1", "max-size-bytes=0",
             "max-size-time=0", "leaky=downstream",
             "!", sink, *sink_props,
@@ -115,6 +138,7 @@ def build_direct_receiver_cmd(gst_launch: str, cfg: DirectReceiverConfig) -> lis
             "!", "rtpjpegdepay",
             "!", "jpegdec",
             "!", "videoconvert",
+            *crop_chain,
             "!", "queue", "max-size-buffers=1", "max-size-bytes=0",
             "max-size-time=0", "leaky=downstream",
             "!", sink, *sink_props,
@@ -203,6 +227,7 @@ class _DirectConnectWorker(QThread):
         host_hwnd: int = 0,
         host_width: int = 1,
         host_height: int = 1,
+        square_crop: bool = False,
         parent=None,
     ):
         super().__init__(parent)
@@ -211,6 +236,7 @@ class _DirectConnectWorker(QThread):
         self.host_hwnd = int(host_hwnd or 0)
         self.host_width = max(1, int(host_width or 1))
         self.host_height = max(1, int(host_height or 1))
+        self.square_crop = bool(square_crop)
         self.proc: subprocess.Popen | None = None
 
     def run(self) -> None:
@@ -245,11 +271,14 @@ class _DirectConnectWorker(QThread):
                 codec=codec,
                 port=port,
                 bind_address=host if bool(stream_opts.get("bind_receiver_to_host", True)) else "0.0.0.0",
+                width=int(stream_opts.get("width", start_kwargs.get("width", 0)) or 0),
+                height=int(stream_opts.get("height", start_kwargs.get("height", 0)) or 0),
                 latency_ms=int(stream_opts.get("latency_ms", 5)),
                 udp_buffer_size=int(stream_opts.get("receiver_udp_buffer_size", 4 * 1024 * 1024)),
                 drop_on_latency=bool(stream_opts.get("receiver_drop_on_latency", True)),
                 h264_decoder=h264_decoder,
                 sink=sink,
+                square_crop=bool(self.square_crop),
             )
             cmd = build_direct_receiver_cmd(_find_gst_launch(), cfg)
             env = dict(os.environ)
@@ -607,6 +636,7 @@ class DirectGstVideoWidget(QWidget):
         self._next_retry_ts = 0.0
         self._display_fps = 30.0
         self._water_correction_enabled = False
+        self._square_display_enabled = False
         self._rov_link_lost = False
         self._rov_link_wait_message = f"{self.stream_name}\nROV link lost.\nWaiting for heartbeat..."
         self._capture_camera = None
@@ -791,7 +821,7 @@ class DirectGstVideoWidget(QWidget):
 
         _close()
 
-    def _capture_packet(self, *, wait_s: float = 0.0, consume: bool = False):
+    def _capture_packet(self, *, wait_s: float = 0.0, consume: bool = False, allow_stale_latest: bool = True):
         camera = self._ensure_capture_camera()
         deadline = time.monotonic() + max(0.0, float(wait_s))
         while True:
@@ -810,7 +840,7 @@ class DirectGstVideoWidget(QWidget):
                         packet = reader()
                     except Exception:
                         packet = None
-            if packet is None and consume:
+            if packet is None and consume and allow_stale_latest:
                 latest = getattr(camera, "latest_frame_packet", None)
                 if callable(latest) and time.monotonic() >= deadline:
                     # Last resort for very short clips: return something rather
@@ -878,6 +908,7 @@ class DirectGstVideoWidget(QWidget):
             host_hwnd=int(self.winId()),
             host_width=self.width(),
             host_height=self.height(),
+            square_crop=bool(self._square_display_enabled),
             parent=self,
         )
         self._connect_worker.receiver_started.connect(self._on_receiver_started)
@@ -1088,6 +1119,29 @@ class DirectGstVideoWidget(QWidget):
         except Exception:
             self._display_fps = 30.0
 
+    def set_square_display_enabled(self, enabled: bool) -> None:
+        enabled = bool(enabled)
+        if enabled == self._square_display_enabled:
+            return
+        self._square_display_enabled = enabled
+        if self._rec is not None:
+            trace_event(
+                "direct_video_square_display_deferred_while_recording",
+                stream=self.stream_name,
+                enabled=enabled,
+            )
+            return
+        if self._proc is not None or self._connect_attempt_active:
+            trace_event(
+                "direct_video_square_display_changed",
+                stream=self.stream_name,
+                enabled=enabled,
+            )
+            self._force_reconnect(
+                f"{self.stream_name}\nUpdating square transect view...",
+                retry_delay_s=0.05,
+            )
+
     def start_recording(self, out_dir: str | None = None, basename: str | None = None, fps: float = 30.0) -> str | None:
         if self._rec is not None:
             target = self._rec.target
@@ -1179,9 +1233,11 @@ class DirectGstVideoWidget(QWidget):
             next_ts = float(record_started_mono)
             last_frame = None
             last_seq = None
+            last_frame_rx_s = record_started_mono
             frame_index = 0
             skipped_startup_artifacts = 0
             startup_artifact_deadline_s = record_started_mono + float(_STARTUP_ARTIFACT_MAX_SKIP_S)
+            stale_reuse_limit_s = max(0.5, period_s * 4.0)
             trace_event(
                 "mono_record_loop_started",
                 stream=self.stream_name,
@@ -1192,7 +1248,11 @@ class DirectGstVideoWidget(QWidget):
             while not self._record_stop.is_set():
                 if last_frame is None:
                     try:
-                        packet = self._capture_packet(wait_s=min(0.25, max(0.02, period_s)), consume=False)
+                        packet = self._capture_packet(
+                            wait_s=min(0.25, max(0.02, period_s)),
+                            consume=True,
+                            allow_stale_latest=True,
+                        )
                     except Exception as exc:
                         logger.warning("Capture read failed for '%s': %s", self.stream_name, exc)
                         packet = None
@@ -1222,6 +1282,7 @@ class DirectGstVideoWidget(QWidget):
                         continue
                     last_frame = packet.frame_bgr
                     last_seq = int(getattr(packet, "seq", -1))
+                    last_frame_rx_s = time.monotonic()
                     if skipped_startup_artifacts:
                         next_ts = time.monotonic()
                     trace_event(
@@ -1243,12 +1304,17 @@ class DirectGstVideoWidget(QWidget):
                 packet = None
                 reused = True
                 try:
-                    packet = self._capture_packet(wait_s=0.0, consume=False)
+                    packet = self._capture_packet(
+                        wait_s=min(0.05, max(0.0, period_s * 0.75)),
+                        consume=True,
+                        allow_stale_latest=False,
+                    )
                     if packet is not None:
                         last_frame = packet.frame_bgr
                         seq = int(getattr(packet, "seq", -1))
                         reused = seq == last_seq
                         last_seq = seq
+                        last_frame_rx_s = time.monotonic()
                 except Exception as exc:
                     logger.warning("Capture read failed for '%s': %s", self.stream_name, exc)
                     trace_event(
@@ -1265,6 +1331,19 @@ class DirectGstVideoWidget(QWidget):
                         frame_age_ms = (time.monotonic() - float(packet.monotonic_ts)) * 1000.0
                     except Exception:
                         frame_age_ms = None
+                if packet is None and (time.monotonic() - float(last_frame_rx_s)) > stale_reuse_limit_s:
+                    frame_index += 1
+                    trace_event(
+                        "mono_record_tick_skipped_stale",
+                        stream=self.stream_name,
+                        out_file=out_file,
+                        frame_index=frame_index,
+                        seq=last_seq,
+                        queue_size=getattr(rec, "queue_size", lambda: -1)(),
+                        stale_ms=(time.monotonic() - float(last_frame_rx_s)) * 1000.0,
+                    )
+                    next_ts += period_s
+                    continue
                 try:
                     accepted = bool(rec.add_frame(last_frame))
                 except Exception:

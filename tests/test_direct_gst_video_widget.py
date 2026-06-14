@@ -59,6 +59,27 @@ def test_direct_jpeg_receiver_uses_direct3d_sink():
     assert "fdsink" not in cmd
 
 
+def test_direct_receiver_can_center_crop_to_square():
+    cmd = build_direct_receiver_cmd(
+        "gst-launch-1.0",
+        DirectReceiverConfig(
+            name="Primary Camera",
+            codec="h264",
+            port=5000,
+            bind_address="192.168.1.1",
+            width=1920,
+            height=1080,
+            square_crop=True,
+        ),
+    )
+
+    assert "videocrop" in cmd
+    assert "left=420" in cmd
+    assert "right=420" in cmd
+    assert cmd.index("videocrop") > cmd.index("videoconvert")
+    assert cmd.index("videocrop") < cmd.index("d3d11videosink")
+
+
 def test_video_tabs_selects_direct_widget_for_direct3d_stream():
     class _Manager:
         stream_defs = {
@@ -195,6 +216,28 @@ def test_direct_widget_snapshot_and_recording_use_capture_receiver(monkeypatch, 
         assert rec.stop_timeout_s == 10.0
         assert rec.stop_drain_pending is True
     finally:
+        widget.close()
+        widget.deleteLater()
+        app.processEvents()
+
+
+def test_direct_widget_defers_square_reconnect_while_recording(monkeypatch):
+    app = _app()
+    monkeypatch.setattr("gui.direct_gst_video_widget.DirectGstVideoWidget._start_connect", lambda self: None)
+
+    widget = DirectGstVideoWidget(_FakeManager(), "Primary Camera")
+    try:
+        reconnects = []
+        monkeypatch.setattr(widget, "_force_reconnect", lambda *args, **kwargs: reconnects.append((args, kwargs)))
+        widget._rec = object()
+        widget._proc = SimpleNamespace(poll=lambda: None)
+
+        widget.set_square_display_enabled(True)
+
+        assert widget._square_display_enabled is True
+        assert reconnects == []
+    finally:
+        widget._rec = None
         widget.close()
         widget.deleteLater()
         app.processEvents()

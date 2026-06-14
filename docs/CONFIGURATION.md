@@ -99,6 +99,22 @@ The multi-camera value applies to three- and four-pane layouts. Lowering it can
 make quad view feel smoother on a loaded laptop because the UI stops trying to
 scale and repaint every pane at full camera rate.
 
+Video recording uses the full decoded capture frame, not the scaled viewport
+pixmap. MP4 output defaults to the bundled ffmpeg/libx264 writer with a
+high-quality CRF of `15`; OpenCV is only a final rescue backend because its MP4
+defaults can look blocky.
+
+Bench overrides:
+
+```powershell
+$env:TRITON_VIDEO_RECORDER_CRF="15"
+$env:TRITON_VIDEO_RECORDER_PRESET="veryfast"
+$env:TRITON_VIDEO_RECORDER_BACKEND="ffmpeg"
+```
+
+Lower CRF values make cleaner, larger files. Set
+`TRITON_VIDEO_RECORDER_BITRATE` only when you need a fixed bitrate target.
+
 Per-stream receiver options in `data/streams.json`:
 
 - `render_mode`: set to `direct3d` for low-latency pilot viewing
