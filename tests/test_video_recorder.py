@@ -1,4 +1,6 @@
 import builtins
+import subprocess
+import time
 from pathlib import Path
 
 import numpy as np
@@ -22,6 +24,22 @@ def _write_short_video(out_path: Path) -> Path:
         recorder.add_frame(_sample_frame(20 + idx * 10))
     recorder.stop(timeout_s=10.0)
     return target
+
+
+def _ffmpeg_exe() -> str:
+    imageio_ffmpeg = pytest.importorskip("imageio_ffmpeg")
+    return str(imageio_ffmpeg.get_ffmpeg_exe())
+
+
+def _assert_ffmpeg_can_read(path: Path) -> None:
+    proc = subprocess.run(
+        [_ffmpeg_exe(), "-hide_banner", "-v", "error", "-i", str(path), "-f", "null", "-"],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        timeout=20,
+    )
+    assert proc.returncode == 0, proc.stderr
 
 
 def test_video_recorder_defaults_to_high_quality_ffmpeg_backend(monkeypatch):
@@ -49,7 +67,37 @@ def test_video_recorder_writes_mp4_with_available_backend(tmp_path: Path):
     assert target.suffix == ".mp4"
     assert target.exists()
     assert target.stat().st_size > 0
+    _assert_ffmpeg_can_read(target)
     assert not (tmp_path / "single_camera_frames").exists()
+
+
+def test_video_recorder_hides_mp4_until_finalized(tmp_path: Path):
+    recorder = VideoRecorder(tmp_path / "pending.mp4", fps=10.0)
+    target = Path(recorder.start())
+    try:
+        recorder.add_frame(_sample_frame(40))
+        deadline = time.monotonic() + 3.0
+        while recorder._written_frames <= 0 and time.monotonic() < deadline:
+            time.sleep(0.02)
+        assert recorder._written_frames > 0
+        assert not target.exists()
+        assert not list(tmp_path.glob("*.mp4"))
+    finally:
+        recorder.stop(timeout_s=10.0)
+
+    assert target.exists()
+    _assert_ffmpeg_can_read(target)
+
+
+def test_video_recorder_discards_empty_mp4(tmp_path: Path):
+    target = tmp_path / "empty.mp4"
+    recorder = VideoRecorder(target, fps=10.0)
+    recorder.start()
+
+    recorder.stop(timeout_s=10.0)
+
+    assert not target.exists()
+    assert not list(tmp_path.glob("*.partial"))
 
 
 def test_video_recorder_uses_ffmpeg_mp4_when_imageio_is_missing(monkeypatch, tmp_path: Path):
@@ -76,6 +124,7 @@ def test_video_recorder_uses_ffmpeg_mp4_when_imageio_is_missing(monkeypatch, tmp
     assert target.suffix == ".mp4"
     assert target.exists()
     assert target.stat().st_size > 0
+    _assert_ffmpeg_can_read(target)
     assert not (tmp_path / "ffmpeg_without_imageio_frames").exists()
 
 
@@ -93,6 +142,7 @@ def test_video_recorder_prefers_high_quality_ffmpeg(monkeypatch, tmp_path: Path)
 
     assert target.suffix == ".mp4"
     assert target.exists()
+    _assert_ffmpeg_can_read(target)
 
 
 def test_video_recorder_uses_opencv_when_ffmpeg_and_imageio_are_missing(monkeypatch, tmp_path: Path):

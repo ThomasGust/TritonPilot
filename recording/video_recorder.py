@@ -7,6 +7,7 @@ import queue
 import threading
 import time
 import logging
+import uuid
 from pathlib import Path
 from typing import Optional
 
@@ -111,12 +112,23 @@ class VideoRecorder:
         self._ffmpeg_write_frames = None
         self._mode: str | None = None  # "mp4" or "frames"
         self._frame_dir: Path | None = None
+        self._active_out_path: Path | None = None
         self._frame_idx = 0
         self._written_frames = 0
         self._shape: tuple[int, int, int] | None = None
 
         # set during start()
         self._target: Path | None = None
+
+    def _mp4_temp_path(self) -> Path:
+        token = uuid.uuid4().hex[:8]
+        return self.out_path.with_name(f".{self.out_path.name}.{token}.partial")
+
+    def _mp4_output_params(self, *, force_mp4_format: bool = False) -> list[str]:
+        params = list(_ffmpeg_output_params())
+        if force_mp4_format:
+            params.extend(["-f", "mp4"])
+        return params
 
     def _prepare_ffmpeg_writer(self) -> Exception | None:
         """Prepare the high-quality ffmpeg MP4 writer.
@@ -138,11 +150,13 @@ class VideoRecorder:
         self._writer = None
         self._writer_backend = "ffmpeg"
         self._mode = "mp4"
+        self._active_out_path = self._mp4_temp_path()
         self._target = self.out_path
         return None
 
     def _start_imageio_writer(self) -> Exception | None:
         """Start the imageio/ffmpeg MP4 fallback."""
+        active_out_path = self._mp4_temp_path()
         try:
             import imageio.v2 as imageio  # type: ignore
         except Exception as exc:
@@ -153,7 +167,7 @@ class VideoRecorder:
             # - H.264 (libx264) + yuv420p pixel format
             # - macro_block_size=None avoids unexpected resizing
             self._writer = imageio.get_writer(
-                str(self.out_path),
+                str(active_out_path),
                 fps=self.fps,
                 codec="libx264",
                 format="FFMPEG",
@@ -161,7 +175,7 @@ class VideoRecorder:
                 macro_block_size=None,
                 quality=None,
                 bitrate=_ffmpeg_bitrate(),
-                output_params=_ffmpeg_output_params(),
+                output_params=self._mp4_output_params(force_mp4_format=True),
             )
         except Exception as exc:
             self._writer = None
@@ -169,6 +183,7 @@ class VideoRecorder:
 
         self._writer_backend = "imageio"
         self._mode = "mp4"
+        self._active_out_path = active_out_path
         self._target = self.out_path
         return None
 
@@ -180,9 +195,10 @@ class VideoRecorder:
             return False
 
         h, w = int(frame_shape[0]), int(frame_shape[1])
+        active_out_path = self._active_out_path or self.out_path
         try:
             writer = self._ffmpeg_write_frames(
-                str(self.out_path),
+                str(active_out_path),
                 size=(w, h),
                 pix_fmt_in="rgb24",
                 pix_fmt_out="yuv420p",
@@ -194,7 +210,7 @@ class VideoRecorder:
                 ffmpeg_log_level=os.environ.get("TRITON_VIDEO_RECORDER_FFMPEG_LOGLEVEL", "warning").strip()
                 or "warning",
                 ffmpeg_timeout=0,
-                output_params=_ffmpeg_output_params(),
+                output_params=self._mp4_output_params(force_mp4_format=active_out_path != self.out_path),
             )
             writer.send(None)
         except Exception as exc:
@@ -225,6 +241,7 @@ class VideoRecorder:
         self._writer = None
         self._writer_backend = "opencv"
         self._mode = "mp4"
+        self._active_out_path = self.out_path
         self._target = self.out_path
         return None
 
@@ -233,9 +250,61 @@ class VideoRecorder:
         self._writer = None
         self._writer_backend = None
         self._mode = "frames"
+        self._active_out_path = None
         self._frame_dir = self.out_path.parent / f"{self.out_path.stem}_frames"
         self._frame_dir.mkdir(parents=True, exist_ok=True)
         self._target = self._frame_dir
+
+    def _remove_path_quietly(self, path: Path | None) -> None:
+        if path is None:
+            return
+        try:
+            if path.exists() and path.is_file():
+                path.unlink()
+        except Exception:
+            logger.warning("Could not remove incomplete recording %s", path)
+
+    def _finalize_mp4_path(self) -> None:
+        if self._mode != "mp4":
+            return
+
+        active = self._active_out_path or self.out_path
+        final = self.out_path
+        if self._written_frames <= 0:
+            self._remove_path_quietly(active)
+            if active != final:
+                self._remove_path_quietly(final)
+            trace_event(
+                "video_recorder_discarded_empty_mp4",
+                path=final,
+                active_path=active,
+                backend=self._writer_backend,
+            )
+            return
+
+        if active == final:
+            return
+        try:
+            if final.exists():
+                final.unlink()
+            active.replace(final)
+            trace_event(
+                "video_recorder_finalized_mp4",
+                path=final,
+                active_path=active,
+                backend=self._writer_backend,
+                written_frames=self._written_frames,
+            )
+        except Exception as exc:
+            logger.warning("Could not finalize recording %s -> %s: %s", active, final, exc)
+            trace_event(
+                "video_recorder_finalize_failed",
+                path=final,
+                active_path=active,
+                backend=self._writer_backend,
+                written_frames=self._written_frames,
+                error=str(exc),
+            )
 
     def _ensure_opencv_writer(self, frame_shape: tuple[int, ...]) -> bool:
         """Open an OpenCV MP4 writer once the frame geometry is known."""
@@ -453,11 +522,11 @@ class VideoRecorder:
                     wrote = False
                     if self._mode == "mp4" and self._writer_backend == "ffmpeg":
                         if self._ensure_ffmpeg_writer(frame.shape) and self._writer is not None:
-                            rgb = frame[:, :, ::-1]
+                            rgb = np.ascontiguousarray(frame[:, :, ::-1])
                             self._writer.send(rgb)
                             wrote = True
                     elif self._mode == "mp4" and self._writer_backend == "imageio" and self._writer is not None:
-                        rgb = frame[:, :, ::-1]
+                        rgb = np.ascontiguousarray(frame[:, :, ::-1])
                         self._writer.append_data(rgb)
                         wrote = True
                     elif self._mode == "mp4" and self._writer_backend == "opencv":
@@ -482,14 +551,16 @@ class VideoRecorder:
                         queue_size=self.queue_size(),
                         dt_ms=(time.monotonic() - write_start_s) * 1000.0,
                     )
-                except Exception:
+                except Exception as exc:
                     # Don't crash the app mid-mission; keep recording best-effort.
+                    logger.warning("Video frame write failed for %s: %s", self.out_path, exc)
                     trace_event(
                         "video_recorder_frame_write_failed",
                         path=self.out_path,
                         backend=self._writer_backend,
                         mode=self._mode,
                         queue_size=self.queue_size(),
+                        error=str(exc),
                     )
                     continue
         finally:
@@ -504,6 +575,7 @@ class VideoRecorder:
                 except Exception:
                     pass
                 self._writer = None
+            self._finalize_mp4_path()
 
 
 def save_snapshot(frame_bgr: np.ndarray, out_path: str | os.PathLike) -> None:
