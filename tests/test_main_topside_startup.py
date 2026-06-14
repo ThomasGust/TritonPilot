@@ -53,6 +53,7 @@ def test_smoke_test_requires_ffmpeg_binary(monkeypatch, tmp_path):
 
     monkeypatch.setattr(main_topside, "streams_file_path", lambda: streams_path)
     monkeypatch.setattr(main_topside, "app_icon_path", lambda: icon_path)
+    monkeypatch.setattr(main_topside, "_recording_smoke_test", lambda _ffmpeg_path: True)
     monkeypatch.setitem(
         sys.modules,
         "imageio_ffmpeg",

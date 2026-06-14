@@ -21,6 +21,47 @@ SPLASH_H = 292
 CUSTOM_ARG_FLAGS = {"--no-splash", "--windowed", "--maximized", "--fullscreen"}
 
 
+def _recording_smoke_test(ffmpeg_path: str) -> bool:
+    """Write and decode a tiny MP4 through the packaged recorder path."""
+    try:
+        import subprocess
+        import tempfile
+        from pathlib import Path
+
+        import numpy as np
+
+        from recording.video_recorder import VideoRecorder
+
+        with tempfile.TemporaryDirectory(prefix="tritonpilot-smoke-") as tmp:
+            target = Path(tmp) / "recorder_smoke.mp4"
+            recorder = VideoRecorder(target, fps=10.0)
+            recorder.start()
+            try:
+                for idx in range(8):
+                    frame = np.zeros((48, 64, 3), dtype=np.uint8)
+                    frame[:, :, 0] = 20 + idx * 10
+                    frame[:, :, 1] = np.arange(64, dtype=np.uint8)
+                    frame[:, :, 2] = np.arange(48, dtype=np.uint8)[:, None]
+                    recorder.add_frame(frame)
+            finally:
+                recorder.stop(timeout_s=10.0)
+            if not target.exists() or target.stat().st_size <= 0:
+                return False
+            creationflags = 0
+            if os.name == "nt" and hasattr(subprocess, "CREATE_NO_WINDOW"):
+                creationflags = subprocess.CREATE_NO_WINDOW
+            proc = subprocess.run(
+                [ffmpeg_path, "-hide_banner", "-v", "error", "-i", str(target), "-f", "null", "-"],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                creationflags=creationflags,
+                timeout=20,
+            )
+            return proc.returncode == 0
+    except Exception:
+        return False
+
+
 def _smoke_test() -> int:
     """Verify packaged resources without opening the operator window."""
     missing = [path for path in (streams_file_path(), app_icon_path()) if not path.exists()]
@@ -32,6 +73,8 @@ def _smoke_test() -> int:
         ffmpeg_path = ""
     if not ffmpeg_path or not os.path.exists(ffmpeg_path):
         missing.append("imageio_ffmpeg ffmpeg executable")
+    elif not _recording_smoke_test(ffmpeg_path):
+        missing.append("packaged MP4 recorder smoke test")
     return 1 if missing else 0
 
 
