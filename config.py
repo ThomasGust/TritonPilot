@@ -12,6 +12,8 @@ import socket
 from app_paths import streams_file_path
 
 DEFAULT_ROV_HOST = os.environ.get("TRITON_ROV_DEFAULT_HOST", "192.168.1.4")
+TETHER_ROV_HOST = os.environ.get("TRITON_TETHER_ROV_HOST", DEFAULT_ROV_HOST)
+TETHER_WINDOWS_HOST = os.environ.get("TRITON_TETHER_WINDOWS_HOST", "192.168.1.1")
 
 
 def _env_bool(name: str, default: bool) -> bool:
@@ -57,8 +59,11 @@ def _tcp_reachable_host(host: str, port: int, timeout_s: float) -> str | None:
 def _auto_detect_rov_host() -> str:
     """Pick a reachable ROV host without forcing a stale tether IP.
 
-    The preferred path is still the wired tether at 192.168.1.4. If that route
-    is down, fall back to mDNS so bench testing can continue over the Pi's Wi-Fi.
+    The preferred path is still the wired tether at 192.168.1.4. By default the
+    pilot app does not silently fall back to the Pi's Wi-Fi address: seeing
+    heartbeat over Wi-Fi while video is unavailable is more confusing than a
+    clear tether-down state. Bench Wi-Fi fallback can be enabled explicitly with
+    TRITON_ROV_ALLOW_WIFI_FALLBACK=1 or by providing TRITON_ROV_HOSTS.
     Explicit ROV_HOST/ROV_* endpoint environment variables still win.
     """
     explicit = os.environ.get("ROV_HOST", "").strip()
@@ -69,7 +74,13 @@ def _auto_detect_rov_host() -> str:
     if not _env_bool("TRITON_ROV_AUTO_DETECT", True):
         return default_host
 
-    candidates = _split_hosts(os.environ.get("TRITON_ROV_HOSTS", f"{default_host},tritonpi.local"))
+    raw_hosts = os.environ.get("TRITON_ROV_HOSTS", "").strip()
+    if raw_hosts:
+        candidates = _split_hosts(raw_hosts)
+    elif _env_bool("TRITON_ROV_ALLOW_WIFI_FALLBACK", False):
+        candidates = _split_hosts(f"{default_host},tritonpi.local")
+    else:
+        candidates = [default_host]
     ports = (6001, 5556)
     timeout_s = float(os.environ.get("TRITON_ROV_HOST_PROBE_TIMEOUT", "0.25"))
     for host in candidates:

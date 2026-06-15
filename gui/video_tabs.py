@@ -115,6 +115,8 @@ class VideoTabs(QWidget):
         self._pane_count: int = 4
         self._active_pane_index: int = 0
         self._rov_link_status: str = "NO DATA"
+        self._tether_video_ready: bool = True
+        self._tether_status_message: str = ""
         self._warmup_index: int = 0
         self._warmup_timer = QTimer(self)
         self._warmup_timer.setSingleShot(True)
@@ -435,7 +437,34 @@ class VideoTabs(QWidget):
     def _stream_autostart_enabled(self) -> bool:
         if not VIDEO_DEFER_STREAMS_UNTIL_LINK:
             return True
-        return self._rov_link_status == "OK"
+        return self._effective_link_status() == "OK"
+
+    def _effective_link_status(self) -> str:
+        if self._rov_link_status != "OK":
+            return self._rov_link_status
+        if not self._tether_video_ready:
+            return "TETHER"
+        return "OK"
+
+    def _apply_link_status_to_widget(self, widget: QWidget | None, status_key: str | None = None) -> None:
+        if widget is None:
+            return
+        setter = getattr(widget, "set_rov_link_status", None)
+        if callable(setter):
+            try:
+                setter(status_key or self._effective_link_status())
+            except Exception:
+                pass
+
+    def _sync_effective_link_status(self, *, previous_effective: str | None = None) -> None:
+        effective = self._effective_link_status()
+        if effective == "OK" and previous_effective != "OK":
+            for name in self.visible_stream_names():
+                self._ensure_stream_started(name)
+        for widget in list(self._widgets.values()):
+            self._apply_link_status_to_widget(widget, effective)
+        if effective == "OK":
+            self._stop_hidden_streams()
 
     def _refresh_widget_geometry(self, widget: QWidget | None) -> None:
         if widget is None:
@@ -551,12 +580,9 @@ class VideoTabs(QWidget):
             lay.addWidget(vw)
         self._widgets[name] = vw
         if self._rov_link_status != "OK":
-            setter = getattr(vw, "set_rov_link_status", None)
-            if callable(setter):
-                try:
-                    setter(self._rov_link_status)
-                except Exception:
-                    pass
+            self._apply_link_status_to_widget(vw)
+        elif not self._tether_video_ready:
+            self._apply_link_status_to_widget(vw)
         if self._water_correction_enabled:
             vw.set_water_correction(True)
         self._apply_square_display_to_widget(vw)
@@ -849,22 +875,15 @@ class VideoTabs(QWidget):
         status_key = str(status or "").strip().upper()
         if not status_key:
             status_key = "NO DATA"
-        prev_status = self._rov_link_status
+        prev_effective = self._effective_link_status()
         self._rov_link_status = status_key
-        if status_key == "OK" and prev_status != "OK":
-            for name in self.visible_stream_names():
-                self._ensure_stream_started(name)
-        for widget in list(self._widgets.values()):
-            if widget is None:
-                continue
-            setter = getattr(widget, "set_rov_link_status", None)
-            if callable(setter):
-                try:
-                    setter(status_key)
-                except Exception:
-                    pass
-        if status_key == "OK":
-            self._stop_hidden_streams()
+        self._sync_effective_link_status(previous_effective=prev_effective)
+
+    def set_tether_status(self, ready: bool, message: str = "") -> None:
+        prev_effective = self._effective_link_status()
+        self._tether_video_ready = bool(ready)
+        self._tether_status_message = str(message or "")
+        self._sync_effective_link_status(previous_effective=prev_effective)
 
     def stop_all(self) -> None:
         try:

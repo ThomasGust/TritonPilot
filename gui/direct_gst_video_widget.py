@@ -162,7 +162,8 @@ def _resolve_windows_host(manager: RemoteCameraManager, stream_opts: dict[str, A
     configured = getattr(manager, "windows_host", None)
     if configured:
         return str(configured)
-    rov_host, rov_port = parse_zmq_endpoint(VIDEO_RPC_ENDPOINT)
+    endpoint = str(getattr(getattr(manager, "rov", None), "endpoint", VIDEO_RPC_ENDPOINT) or VIDEO_RPC_ENDPOINT)
+    rov_host, rov_port = parse_zmq_endpoint(endpoint)
     return choose_video_receive_ip(
         remote_host=rov_host,
         remote_port=int(rov_port),
@@ -1066,9 +1067,11 @@ class DirectGstVideoWidget(QWidget):
 
     def set_rov_link_status(self, status: str) -> None:
         status_key = str(status or "").strip().upper()
-        if status_key in {"LOST", "NO DATA"}:
+        if status_key in {"LOST", "NO DATA", "TETHER", "TETHER LOST", "TETHER UNREACHABLE"}:
             if status_key == "NO DATA":
                 self._rov_link_wait_message = f"{self.stream_name}\nWaiting for ROV heartbeat..."
+            elif status_key.startswith("TETHER"):
+                self._rov_link_wait_message = f"{self.stream_name}\nTETHER NETWORK UNREACHABLE\nWaiting for tether..."
             else:
                 self._rov_link_wait_message = f"{self.stream_name}\nROV link lost.\nWaiting for heartbeat..."
             if self._rov_link_lost:

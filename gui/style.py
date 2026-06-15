@@ -66,6 +66,48 @@ def apply_modern_style(app: QApplication) -> None:
         background: #482525;
         border: 1px solid #b65a5a;
     }
+    QLabel#tetherStatusPill {
+        padding: 5px 10px;
+        border-radius: 8px;
+        border: 1px solid #3d465a;
+        background: #1d2430;
+        color: #dfe8ff;
+        font-weight: 800;
+    }
+    QLabel#tetherStatusPill[tone="ok"] {
+        color: #d9ffea;
+        background: #1f3b2a;
+        border: 1px solid #3f9b62;
+    }
+    QLabel#tetherStatusPill[tone="warn"] {
+        color: #ffe6ae;
+        background: #332b1d;
+        border: 1px solid #a07e34;
+    }
+    QLabel#tetherStatusPill[tone="alert"] {
+        color: #fff0f0;
+        background: #5a2020;
+        border: 1px solid #d45f5f;
+    }
+    QLabel#tetherStatusBanner {
+        padding: 8px 12px;
+        border-radius: 6px;
+        font-size: 15px;
+        font-weight: 900;
+        background: #5a2020;
+        color: #fff0f0;
+        border: 1px solid #e36b6b;
+    }
+    QLabel#tetherStatusBanner[tone="ok"] {
+        background: #1f3b2a;
+        color: #d9ffea;
+        border: 1px solid #3f9b62;
+    }
+    QLabel#tetherStatusBanner[tone="warn"] {
+        background: #332b1d;
+        color: #ffe6ae;
+        border: 1px solid #a07e34;
+    }
     QStatusBar { border-top: 1px solid #2a2a32; }
     QStatusBar QLabel[tone="alert"] {
         color: #ffb3b3;

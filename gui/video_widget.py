@@ -458,9 +458,11 @@ class VideoWidget(QWidget):
 
     def set_rov_link_status(self, status: str) -> None:
         status_key = str(status or "").strip().upper()
-        if status_key in {"LOST", "NO DATA"}:
+        if status_key in {"LOST", "NO DATA", "TETHER", "TETHER LOST", "TETHER UNREACHABLE"}:
             if status_key == "NO DATA":
                 self._rov_link_wait_message = f"{self.stream_name}\nWaiting for ROV heartbeat..."
+            elif status_key.startswith("TETHER"):
+                self._rov_link_wait_message = f"{self.stream_name}\nTETHER NETWORK UNREACHABLE\nWaiting for tether..."
             else:
                 self._rov_link_wait_message = f"{self.stream_name}\nROV link lost.\nWaiting for heartbeat..."
             if self._rov_link_lost:

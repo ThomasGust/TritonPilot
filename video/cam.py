@@ -25,6 +25,10 @@ from video.rov_streams import ROVStreams
 logger = logging.getLogger(__name__)
 
 
+def _endpoint_for_rov(rov: ROVStreams) -> str:
+    return str(getattr(rov, "endpoint", VIDEO_RPC_ENDPOINT) or VIDEO_RPC_ENDPOINT)
+
+
 @dataclass(frozen=True)
 class CameraFramePacket:
     """Decoded camera frame with receiver-side timing metadata."""
@@ -77,7 +81,7 @@ class RemoteCv2Camera:
         # preferring wired/tether when possible.
         if windows_host is None:
             try:
-                rov_host, rov_port = parse_zmq_endpoint(VIDEO_RPC_ENDPOINT)
+                rov_host, rov_port = parse_zmq_endpoint(_endpoint_for_rov(rov))
                 prefer_wired = bool(stream_opts.get("tether_prefer_wired", True)) if stream_opts else True
                 windows_host = choose_video_receive_ip(
                     remote_host=rov_host,
@@ -89,7 +93,7 @@ class RemoteCv2Camera:
                 # fallback to the OS-chosen route (still better than 8.8.8.8)
                 s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
                 try:
-                    rov_host, _rov_port = parse_zmq_endpoint(VIDEO_RPC_ENDPOINT)
+                    rov_host, _rov_port = parse_zmq_endpoint(_endpoint_for_rov(rov))
                     s.connect((rov_host, 9))
                     windows_host = s.getsockname()[0]
                 finally:
@@ -449,6 +453,29 @@ class RemoteCameraManager:
         # racing on shared bookkeeping and on the single ROV video RPC REQ socket.
         self._mgr_lock = threading.RLock()
 
+    def set_rpc_endpoint(self, endpoint: str, *, windows_host: str | None = None) -> bool:
+        """Retarget future video RPC/capture opens to a new ROV endpoint."""
+
+        endpoint = str(endpoint or "").strip()
+        if not endpoint:
+            return False
+        with self._mgr_lock:
+            current_endpoint = str(getattr(self.rov, "endpoint", "") or "")
+            current_host = str(self.windows_host or "")
+            next_host = None if windows_host is None else str(windows_host).strip()
+            if endpoint == current_endpoint and (next_host is None or next_host == current_host):
+                return False
+            old_rov = self.rov
+            self.rov = ROVStreams(endpoint=endpoint)
+            if next_host:
+                self.windows_host = next_host
+        try:
+            old_rov.close()
+        except Exception:
+            pass
+        trace_event("camera_manager_rpc_endpoint_changed", endpoint=endpoint, windows_host=self.windows_host)
+        return True
+
     def list_available(self):
         """Return enabled stream names in the configured default pane order."""
         enabled_names = [
@@ -552,7 +579,7 @@ class RemoteCameraManager:
     def _stream_start_kwargs_for_capture(self, stream_opts: dict, capture_port: int) -> dict:
         host = self.windows_host
         if host is None:
-            rov_host, rov_port = parse_zmq_endpoint(VIDEO_RPC_ENDPOINT)
+            rov_host, rov_port = parse_zmq_endpoint(_endpoint_for_rov(self.rov))
             host = choose_video_receive_ip(
                 remote_host=rov_host,
                 remote_port=int(rov_port),

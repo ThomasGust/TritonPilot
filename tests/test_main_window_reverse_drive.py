@@ -173,6 +173,7 @@ class _FakeVideoPanel(QWidget):
         self.restore_layout_snapshot_calls = []
         self.set_current_stream_calls = []
         self.rov_link_statuses = []
+        self.tether_statuses = []
         self.square_display_enabled = False
         self.refresh_layout_count = 0
 
@@ -238,6 +239,9 @@ class _FakeVideoPanel(QWidget):
 
     def set_rov_link_status(self, status):
         self.rov_link_statuses.append(str(status))
+
+    def set_tether_status(self, ready, message=""):
+        self.tether_statuses.append((bool(ready), str(message)))
 
     def stop_all(self):
         return None
@@ -638,6 +642,66 @@ def test_heartbeat_loss_and_recovery_notify_video_panel(monkeypatch, tmp_path):
         win._handle_sensor_msg_on_ui({"type": "heartbeat", "sensor": "heartbeat", "armed": False})
         win._update_link_status()
         assert panel.rov_link_statuses[-1] == "OK"
+    finally:
+        win.close()
+        app.processEvents()
+
+
+def test_tether_banner_blocks_video_until_tether_recovers(monkeypatch, tmp_path):
+    app = _app()
+    streams_path = tmp_path / "streams.json"
+    streams_path.write_text("{}", encoding="utf-8")
+
+    monkeypatch.setattr(main_window, "QSettings", lambda *args, **kwargs: _FakeSettings())
+    monkeypatch.setattr(main_window, "PilotPublisherService", _FakePilotService)
+    monkeypatch.setattr(main_window, "SensorSubscriberService", _FakeSensorService)
+    monkeypatch.setattr(main_window, "RemoteCameraManager", _FakeRemoteCameraManager)
+    monkeypatch.setattr(main_window, "VideoTabs", _FakeVideoPanel)
+    monkeypatch.setattr(main_window, "HoldTestPanel", _SimplePage)
+    monkeypatch.setattr(main_window, "ManagementPage", _SimplePage)
+    monkeypatch.setattr(main_window.threading, "Thread", _NoopThread)
+
+    win = main_window.MainWindow(str(streams_path))
+    try:
+        app.processEvents()
+        panel = win.video_panel
+        assert panel is not None
+
+        win._set_tether_status_snapshot(
+            {
+                "ts": 1.0,
+                "ready": False,
+                "host": "192.168.1.4",
+                "local_ip": None,
+                "iface": None,
+                "port": None,
+                "reason": "local tether IP 192.168.1.1 missing",
+            }
+        )
+        win._refresh_tether_status_ui()
+
+        assert "TETHER NETWORK UNREACHABLE" in win._tether_banner.text()
+        assert win._tether_banner.isHidden() is False
+        assert win._tether_top_lbl.property("tone") == "alert"
+        assert panel.tether_statuses[-1][0] is False
+
+        win._set_tether_status_snapshot(
+            {
+                "ts": 2.0,
+                "ready": True,
+                "host": "192.168.1.4",
+                "local_ip": "192.168.1.1",
+                "iface": "Ethernet 8",
+                "port": 5555,
+                "reason": "",
+            }
+        )
+        win._refresh_tether_status_ui()
+
+        assert "Tether: OK" in win._tether_top_lbl.text()
+        assert win._tether_banner.isHidden() is True
+        assert win._tether_top_lbl.property("tone") == "ok"
+        assert panel.tether_statuses[-1][0] is True
     finally:
         win.close()
         app.processEvents()

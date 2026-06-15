@@ -51,3 +51,20 @@ def test_config_auto_detects_reachable_fallback(monkeypatch):
     monkeypatch.setattr("socket.create_connection", fake_create_connection)
     cfg = _reload_config(monkeypatch)
     assert cfg.ROV_HOST == "10.0.7.192"
+
+
+def test_config_does_not_silently_use_wifi_fallback_by_default(monkeypatch):
+    monkeypatch.delenv("ROV_HOST", raising=False)
+    monkeypatch.delenv("TRITON_ROV_HOSTS", raising=False)
+    monkeypatch.delenv("TRITON_ROV_ALLOW_WIFI_FALLBACK", raising=False)
+    monkeypatch.setenv("TRITON_ROV_AUTO_DETECT", "1")
+
+    def fake_create_connection(addr, timeout=0):
+        host, _port = addr
+        if host == "tritonpi.local":
+            return _FakeSocket("10.0.7.192")
+        raise OSError("tether down")
+
+    monkeypatch.setattr("socket.create_connection", fake_create_connection)
+    cfg = _reload_config(monkeypatch)
+    assert cfg.ROV_HOST == "192.168.1.4"

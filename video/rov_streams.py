@@ -71,6 +71,12 @@ class ROVStreams:
             pass
         self.sock = self._make_sock()
 
+    def close(self) -> None:
+        try:
+            self.sock.close(0)
+        except Exception:
+            pass
+
     def _call(self, cmd: str, **args):
         with self._rpc_lock:
                 try:

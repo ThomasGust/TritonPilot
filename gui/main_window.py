@@ -44,6 +44,7 @@ from config import (
     PILOT_PUB_ENDPOINT,
     SENSOR_SUB_ENDPOINT,
     MANAGEMENT_RPC_ENDPOINT,
+    VIDEO_RPC_ENDPOINT,
     CONTROLLER_DEADZONE,
     CONTROLLER_INDEX,
     CONTROLLER_DEBUG,
@@ -58,6 +59,8 @@ from config import (
     REVERSE_TOGGLE_BUTTON,
     REVERSE_TOGGLE_SHORTCUT,
     ARM_KEYBOARD_RAMP_RATE,
+    TETHER_ROV_HOST,
+    TETHER_WINDOWS_HOST,
 )
 
 from input.pilot_service import PilotPublisherService
@@ -76,7 +79,7 @@ from gui.stereo_page import StereoPage
 from gui.transect_page import TransectPage
 from gui.ssh_page import SshConsolePage, default_pilot_ssh_presets
 from gui.responsive import resize_to_available_screen, vertical_scroll_area
-from network.net_select import LocalAddr, list_local_ipv4_addrs
+from network.net_select import LocalAddr, list_local_ipv4_addrs, parse_zmq_endpoint
 from tools.analysis_transfer_server import DEFAULT_STABLE_SECONDS, build_index, create_server, start_server_in_thread
 
 
@@ -136,6 +139,21 @@ class MainWindow(QMainWindow):
         elif is_wifi is True:
             score -= 4
         return (score, ip_text)
+
+    @staticmethod
+    def _parse_tether_probe_ports(raw: str | None) -> list[int]:
+        ports: list[int] = []
+        for part in str(raw or "").replace(";", ",").split(","):
+            text = part.strip()
+            if not text:
+                continue
+            try:
+                port = int(text)
+            except Exception:
+                continue
+            if 0 < port < 65536 and port not in ports:
+                ports.append(port)
+        return ports or [5555, 6001, 6000, 5556]
 
     @classmethod
     def _default_analysis_transfer_advertise_host(cls) -> str:
@@ -871,12 +889,48 @@ class MainWindow(QMainWindow):
         self._last_net: dict = {}
         self._route_cache = {"ts": 0.0, "iface": None, "src_ip": None, "is_wifi": None, "err": None}
         self._rov_host = str(ROV_HOST)
+        self._tether_host = str(TETHER_ROV_HOST or "192.168.1.4")
+        self._tether_windows_host = str(TETHER_WINDOWS_HOST or "192.168.1.1")
+        self._tether_probe_ports = self._parse_tether_probe_ports(
+            os.environ.get("TRITON_TETHER_PROBE_PORTS", "5555,6001,6000,5556")
+        )
+        self._tether_probe_timeout_s = float(os.environ.get("TRITON_TETHER_PROBE_TIMEOUT", "0.25") or "0.25")
+        self._tether_probe_interval_s = float(os.environ.get("TRITON_TETHER_PROBE_INTERVAL", "1.0") or "1.0")
+        self._tether_status_lock = threading.Lock()
+        self._tether_status: dict = {
+            "ts": 0.0,
+            "ready": False,
+            "host": self._tether_host,
+            "local_ip": None,
+            "iface": None,
+            "port": None,
+            "reason": "checking tether network",
+        }
+        self._tether_video_ready = False
+        self._tether_ui_ready_last: bool | None = None
+        self._tether_probe_stop = threading.Event()
         self._netdiag_port = int(os.environ.get("TRITON_NETDIAG_PORT", "7700"))
         self._netdiag_stop = threading.Event()
         self._netdiag_lock = threading.Lock()
         self._netdiag = {"ts": 0.0, "ok": False, "last_rtt_ms": None, "avg_rtt_ms": None, "jitter_ms": None, "loss_pct": None, "err": None}
         self._netdiag_thread = threading.Thread(target=self._netdiag_probe_loop, daemon=True)
         self._netdiag_thread.start()
+        self._tether_probe_thread = threading.Thread(target=self._tether_probe_loop, daemon=True)
+        self._tether_probe_thread.start()
+
+        self._tether_top_lbl = QLabel("Tether: checking")
+        self._tether_top_lbl.setObjectName("tetherStatusPill")
+        self._tether_top_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._tether_top_lbl.setMinimumWidth(230)
+        self._tether_top_lbl.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+
+        self._tether_banner = QLabel("TETHER NETWORK: checking", self)
+        self._tether_banner.setObjectName("tetherStatusBanner")
+        self._tether_banner.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._tether_banner.setWordWrap(True)
+        self._tether_banner.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        self._set_status_tone(self._tether_top_lbl, "warn")
+        self._set_status_tone(self._tether_banner, "warn")
 
         # Keep the piloting status bar compact and focused on the essentials.
         for _lbl, _w in [
@@ -899,6 +953,10 @@ class MainWindow(QMainWindow):
         self._analysis_transfer_timer = QTimer(self)
         self._analysis_transfer_timer.timeout.connect(self._refresh_analysis_transfer_status)
         self._analysis_transfer_timer.start(2000)
+
+        self._tether_ui_timer = QTimer(self)
+        self._tether_ui_timer.timeout.connect(self._refresh_tether_status_ui)
+        self._tether_ui_timer.start(300)
 
         # connect signals to slots
         self.sensor_msg_sig.connect(self._handle_sensor_msg_on_ui)
@@ -1032,6 +1090,12 @@ class MainWindow(QMainWindow):
         self._pilot_layout_count_restore = 4
         if self.video_panel is not None:
             self._pilot_layout_count_restore = int(self.video_panel.layout_count())
+            tether_setter = getattr(self.video_panel, "set_tether_status", None)
+            if callable(tether_setter):
+                try:
+                    tether_setter(False, "checking tether network")
+                except Exception:
+                    pass
         self._stereo_layout_restore_snapshot: dict | None = None
         self._transect_layout_restore_snapshot: dict | None = None
         self._stereo_capture_warm_names: set[str] = set()
@@ -1061,12 +1125,14 @@ class MainWindow(QMainWindow):
         top_bar_lay.setSpacing(6)
         top_bar_lay.addWidget(self._page_tabs, 0)
         top_bar_lay.addStretch(1)
+        top_bar_lay.addWidget(self._tether_top_lbl, 0)
         self._arm_disarm_btn = QPushButton()
         self._arm_disarm_btn.setObjectName("armDisarmButton")
         self._arm_disarm_btn.setMinimumWidth(132)
         self._arm_disarm_btn.clicked.connect(self._toggle_arm_disarm_from_ui)
         top_bar_lay.addWidget(self._arm_disarm_btn, 0)
         root.addWidget(top_bar, 0)
+        root.addWidget(self._tether_banner, 0)
 
         self._page_stack = QStackedWidget()
         root.addWidget(self._page_stack, 1)
@@ -1168,6 +1234,7 @@ class MainWindow(QMainWindow):
         self._refresh_arm_disarm_button()
         self._refresh_drive_status()
         self._refresh_video_status()
+        self._refresh_tether_status_ui()
         if self._analysis_transfer_autostart:
             QTimer.singleShot(0, self._start_analysis_transfer_server)
         else:
@@ -2061,6 +2128,218 @@ class MainWindow(QMainWindow):
         except Exception:
             return {}
 
+    def _tether_prefix(self) -> str:
+        parts = str(self._tether_host or "").split(".")
+        if len(parts) >= 3:
+            return ".".join(parts[:3]) + "."
+        return "192.168.1."
+
+    def _tether_local_candidates(self) -> list[LocalAddr]:
+        prefix = self._tether_prefix()
+        expected = str(self._tether_windows_host or "").strip()
+        remote = str(self._tether_host or "").strip()
+        candidates: list[LocalAddr] = []
+        for addr in list_local_ipv4_addrs():
+            ip_text = str(getattr(addr, "ip", "") or "").strip()
+            if not ip_text or ip_text == remote:
+                continue
+            if ip_text == expected or ip_text.startswith(prefix):
+                candidates.append(addr)
+
+        def score(addr: LocalAddr) -> tuple[int, str]:
+            ip_text = str(getattr(addr, "ip", "") or "")
+            iface = str(getattr(addr, "iface", "") or "").lower()
+            value = 0
+            if ip_text == expected:
+                value += 100
+            if getattr(addr, "is_wifi", None) is False:
+                value += 20
+            elif getattr(addr, "is_wifi", None) is True:
+                value -= 40
+            if any(token in iface for token in ("ethernet", "asix", "usb", "gbe", "lan")):
+                value += 8
+            return (value, ip_text)
+
+        candidates.sort(key=score, reverse=True)
+        return candidates
+
+    @staticmethod
+    def _tcp_probe_from(local_ip: str, remote_host: str, remote_port: int, timeout_s: float) -> tuple[bool, str | None]:
+        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        try:
+            sock.settimeout(max(0.05, float(timeout_s)))
+            sock.bind((str(local_ip), 0))
+            sock.connect((str(remote_host), int(remote_port)))
+            return True, None
+        except Exception as exc:
+            return False, str(exc)
+        finally:
+            try:
+                sock.close()
+            except Exception:
+                pass
+
+    def _probe_tether_once(self) -> dict:
+        now = time.time()
+        snapshot = {
+            "ts": now,
+            "ready": False,
+            "host": self._tether_host,
+            "local_ip": None,
+            "iface": None,
+            "port": None,
+            "reason": "",
+        }
+        try:
+            candidates = self._tether_local_candidates()
+        except Exception as exc:
+            snapshot["reason"] = f"could not inspect local adapters: {exc}"
+            return snapshot
+
+        if not candidates:
+            snapshot["reason"] = f"local tether IP {self._tether_windows_host} missing"
+            return snapshot
+
+        first = candidates[0]
+        snapshot["local_ip"] = str(getattr(first, "ip", "") or "")
+        snapshot["iface"] = str(getattr(first, "iface", "") or "")
+        last_error = ""
+        for candidate in candidates:
+            local_ip = str(getattr(candidate, "ip", "") or "").strip()
+            if not local_ip:
+                continue
+            for port in self._tether_probe_ports:
+                ok, err = self._tcp_probe_from(
+                    local_ip,
+                    self._tether_host,
+                    int(port),
+                    self._tether_probe_timeout_s,
+                )
+                if ok:
+                    snapshot.update(
+                        {
+                            "ready": True,
+                            "local_ip": local_ip,
+                            "iface": str(getattr(candidate, "iface", "") or ""),
+                            "port": int(port),
+                            "reason": "",
+                        }
+                    )
+                    return snapshot
+                if err:
+                    last_error = err
+
+        ports = ",".join(str(port) for port in self._tether_probe_ports)
+        detail = f"{self._tether_host} not reachable on ports {ports}"
+        if last_error:
+            detail += f" ({last_error})"
+        snapshot["reason"] = detail
+        return snapshot
+
+    def _set_tether_status_snapshot(self, snapshot: dict) -> None:
+        try:
+            with self._tether_status_lock:
+                self._tether_status = dict(snapshot or {})
+        except Exception:
+            pass
+
+    def _get_tether_status_snapshot(self) -> dict:
+        try:
+            with self._tether_status_lock:
+                return dict(self._tether_status)
+        except Exception:
+            return {}
+
+    def _tether_probe_loop(self) -> None:
+        while not self._tether_probe_stop.is_set():
+            try:
+                self._set_tether_status_snapshot(self._probe_tether_once())
+            except Exception as exc:
+                self._set_tether_status_snapshot(
+                    {
+                        "ts": time.time(),
+                        "ready": False,
+                        "host": self._tether_host,
+                        "local_ip": None,
+                        "iface": None,
+                        "port": None,
+                        "reason": str(exc),
+                    }
+                )
+            self._tether_probe_stop.wait(max(0.2, float(self._tether_probe_interval_s)))
+
+    def _retarget_video_to_tether(self, local_ip: str | None) -> None:
+        if self.cam_mgr is None:
+            return
+        try:
+            _host, port = parse_zmq_endpoint(VIDEO_RPC_ENDPOINT)
+        except Exception:
+            port = 5555
+        endpoint = f"tcp://{self._tether_host}:{int(port)}"
+        setter = getattr(self.cam_mgr, "set_rpc_endpoint", None)
+        if not callable(setter):
+            return
+        try:
+            changed = bool(setter(endpoint, windows_host=(str(local_ip).strip() if local_ip else None)))
+        except Exception as exc:
+            trace_event("pilot_tether_video_endpoint_failed", endpoint=endpoint, error=str(exc))
+            return
+        if changed:
+            trace_event("pilot_tether_video_endpoint_applied", endpoint=endpoint, windows_host=local_ip)
+
+    def _refresh_tether_status_ui(self) -> None:
+        snapshot = self._get_tether_status_snapshot()
+        ready = bool(snapshot.get("ready", False))
+        host = str(snapshot.get("host") or self._tether_host)
+        local_ip = str(snapshot.get("local_ip") or "").strip()
+        iface = str(snapshot.get("iface") or "").strip()
+        port = snapshot.get("port")
+        reason = str(snapshot.get("reason") or "").strip()
+
+        if ready:
+            route = f"{local_ip} -> {host}:{port}" if local_ip and port else host
+            if iface:
+                route += f" ({iface})"
+            pill_text = f"Tether: OK {local_ip}" if local_ip else "Tether: OK"
+            banner_text = f"Tether: OK {route}"
+            tone = "ok"
+            self._retarget_video_to_tether(local_ip)
+        else:
+            detail = reason or f"{host} is not reachable on the tether"
+            pill_text = "TETHER NETWORK UNREACHABLE"
+            banner_text = f"TETHER NETWORK UNREACHABLE | {detail}"
+            tone = "alert"
+
+        self._set_status(self._tether_top_lbl, pill_text)
+        try:
+            self._tether_top_lbl.setToolTip(banner_text)
+        except Exception:
+            pass
+        self._set_status_tone(self._tether_top_lbl, tone)
+        self._set_status(self._tether_banner, banner_text)
+        self._set_status_tone(self._tether_banner, tone)
+        try:
+            self._tether_banner.setVisible(not ready)
+        except Exception:
+            pass
+
+        try:
+            if self.video_panel is not None:
+                setter = getattr(self.video_panel, "set_tether_status", None)
+                if callable(setter):
+                    setter(ready, banner_text)
+        except Exception:
+            pass
+
+        previous = self._tether_ui_ready_last
+        self._tether_ui_ready_last = ready
+        if previous is None:
+            return
+        if ready and previous is False:
+            self.statusBar().showMessage("Tether network ready; reconnecting video on the tether", 4500)
+        elif (not ready) and previous is True:
+            self.statusBar().showMessage("TETHER NETWORK UNREACHABLE - video waits for the tether", 7000)
+
     def _iface_is_wifi_linux(self, iface: str) -> bool:
         try:
             import os
@@ -2692,7 +2971,7 @@ class MainWindow(QMainWindow):
                 app.removeEventFilter(self)
         except Exception:
             pass
-        for timer_name in ("_link_timer", "_analysis_transfer_timer", "_sensor_ui_timer"):
+        for timer_name in ("_link_timer", "_analysis_transfer_timer", "_sensor_ui_timer", "_tether_ui_timer"):
             try:
                 timer = getattr(self, timer_name, None)
                 if timer is not None:
@@ -2714,6 +2993,10 @@ class MainWindow(QMainWindow):
 
         try:
             self._netdiag_stop.set()
+        except Exception:
+            pass
+        try:
+            self._tether_probe_stop.set()
         except Exception:
             pass
         try:

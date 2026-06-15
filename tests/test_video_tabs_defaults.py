@@ -435,6 +435,37 @@ def test_video_tabs_defers_video_autostart_until_link_ok(monkeypatch):
         app.processEvents()
 
 
+def test_video_tabs_waits_for_tether_even_when_heartbeat_is_ok(monkeypatch):
+    app = _app()
+    fake_settings = _FakeSettings({"video/layout_count": 2})
+    monkeypatch.setattr("gui.video_tabs.QSettings", lambda *args, **kwargs: fake_settings)
+    monkeypatch.setattr("gui.video_tabs.VideoWidget", _DummyVideoWidget)
+    monkeypatch.setattr("gui.video_tabs.VIDEO_DEFER_STREAMS_UNTIL_LINK", True)
+
+    tabs = VideoTabs(
+        _DummyManager(default_pane_order=["Primary Camera", "Aux Camera"]),
+        stream_names=["Primary Camera", "Aux Camera"],
+    )
+    try:
+        app.processEvents()
+        visible_widgets = [tabs._widgets[name] for name in tabs.visible_stream_names()]
+
+        tabs.set_tether_status(False, "TETHER NETWORK UNREACHABLE")
+        tabs.set_rov_link_status("OK")
+        app.processEvents()
+
+        assert all(widget.rov_link_statuses[-1] == "TETHER" for widget in visible_widgets)
+
+        tabs.set_tether_status(True, "Tether ready")
+        app.processEvents()
+
+        assert all(widget.rov_link_statuses[-1] == "OK" for widget in visible_widgets)
+    finally:
+        tabs.close()
+        tabs.deleteLater()
+        app.processEvents()
+
+
 def test_video_tabs_refreshes_widget_geometry_after_layout_switch(monkeypatch):
     app = _app()
     fake_settings = _FakeSettings({"video/layout_count": 4})
