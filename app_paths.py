@@ -62,10 +62,13 @@ def user_documents_dir() -> Path:
 def default_recordings_dir() -> Path:
     """Return TritonPilot's default recording root.
 
-    Use Documents instead of the repository so packaged pilot builds behave like
-    normal desktop software and source runs do not fill the checkout by default.
+    Packaged pilot builds behave like normal desktop software and write under
+    Documents. Source checkout runs write to the repo-local ignored recordings
+    directory so development captures stay near the code.
     """
     override = os.environ.get("TRITON_RECORDINGS_DIR", "").strip()
     if override:
         return Path(override).expanduser()
+    if not is_packaged_app():
+        return project_root() / "recordings"
     return user_documents_dir() / APP_NAME / "Recordings"

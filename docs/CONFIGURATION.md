@@ -322,7 +322,8 @@ The GUI lets the operator choose a recording directory. If that directory is
 unavailable, `recording/save_location.py` falls back to the app default:
 
 ```text
-%USERPROFILE%\Documents\TritonPilot\Recordings
+source checkout: <repo>\recordings
+packaged app:    %USERPROFILE%\Documents\TritonPilot\Recordings
 ```
 
 Set `TRITON_RECORDINGS_DIR` to override the default without using the GUI.
@@ -330,6 +331,19 @@ Set `TRITON_STREAMS_FILE` to point a source run or packaged app at a different
 camera stream configuration file.
 
 Use clear session names and preserve original media for TritonAnalysis.
+
+## UI Responsiveness Diagnostics
+
+If the Qt shell feels sticky during a bench run, enable the event-loop lag
+probe:
+
+```powershell
+$env:TRITON_UI_LAG_PROBE="1"
+$env:TRITON_UI_LAG_WARN_MS="120"
+```
+
+The probe logs when the UI thread falls behind. Pair it with
+`TRITON_CAPTURE_TRACE=1` when you want those lag samples in the capture trace.
 
 ## Startup Window Mode
 

@@ -793,6 +793,11 @@ class VideoTabs(QWidget):
             return None
         return self._widgets.get(name)
 
+    def video_widget_for_stream(self, name: str | None) -> QWidget | None:
+        if not name:
+            return None
+        return self._widgets.get(str(name))
+
     def set_layout_controls_enabled(self, enabled: bool) -> None:
         self._layout_combo.setEnabled(bool(enabled))
 

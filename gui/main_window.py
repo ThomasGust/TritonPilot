@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import os
 import ipaddress
+import logging
 import math
 import socket
 import threading
@@ -83,6 +84,9 @@ from network.net_select import LocalAddr, list_local_ipv4_addrs, parse_zmq_endpo
 from tools.analysis_transfer_server import DEFAULT_STABLE_SECONDS, build_index, create_server, start_server_in_thread
 
 
+logger = logging.getLogger(__name__)
+
+
 class MainWindow(QMainWindow):
     """Topside control window for live piloting and data capture."""
 
@@ -94,9 +98,33 @@ class MainWindow(QMainWindow):
     pilot_status_sig = pyqtSignal(dict)
     pilot_msg_sig = pyqtSignal(dict)
 
+    @staticmethod
+    def _env_truthy(name: str, default: bool = False) -> bool:
+        raw = os.environ.get(name)
+        if raw is None:
+            return bool(default)
+        text = str(raw).strip().lower()
+        if not text:
+            return bool(default)
+        return text in {"1", "true", "yes", "on", "debug"}
+
+    @staticmethod
+    def _env_float(name: str, default: float, *, min_value: float, max_value: float) -> float:
+        raw = os.environ.get(name, "").strip()
+        if not raw:
+            return float(default)
+        try:
+            value = float(raw)
+        except Exception:
+            return float(default)
+        return max(float(min_value), min(float(max_value), value))
+
     def _set_status(self, lbl: QLabel, text: str) -> None:
         """Set status text + tooltip (so truncated UI still preserves full info)."""
         try:
+            text = str(text)
+            if lbl.text() == text and lbl.toolTip() == text:
+                return
             lbl.setText(text)
             lbl.setToolTip(text)
         except Exception:
@@ -104,12 +132,67 @@ class MainWindow(QMainWindow):
 
     def _set_status_tone(self, lbl: QLabel, tone: str | None = None) -> None:
         try:
-            lbl.setProperty("tone", tone or "")
+            tone_key = tone or ""
+            if lbl.property("tone") == tone_key:
+                return
+            lbl.setProperty("tone", tone_key)
             lbl.style().unpolish(lbl)
             lbl.style().polish(lbl)
             lbl.update()
         except Exception:
             pass
+
+    def _start_ui_lag_probe_if_requested(self) -> None:
+        if not self._env_truthy("TRITON_UI_LAG_PROBE", False):
+            return
+        interval_ms = int(self._env_float("TRITON_UI_LAG_PROBE_INTERVAL_MS", 100.0, min_value=50.0, max_value=1000.0))
+        self._ui_lag_probe_interval_s = interval_ms / 1000.0
+        self._ui_lag_warn_ms = self._env_float("TRITON_UI_LAG_WARN_MS", 120.0, min_value=10.0, max_value=5000.0)
+        self._ui_lag_last_tick_s = time.monotonic()
+        self._ui_lag_last_report_s = 0.0
+        self._ui_lag_timer = QTimer(self)
+        self._ui_lag_timer.setTimerType(Qt.TimerType.PreciseTimer)
+        self._ui_lag_timer.setInterval(interval_ms)
+        self._ui_lag_timer.timeout.connect(self._on_ui_lag_probe_tick)
+        self._ui_lag_timer.start()
+        logger.info(
+            "UI lag probe enabled: interval=%sms warn=%sms",
+            interval_ms,
+            self._ui_lag_warn_ms,
+        )
+
+    def _on_ui_lag_probe_tick(self) -> None:
+        now_s = time.monotonic()
+        previous_s = float(getattr(self, "_ui_lag_last_tick_s", now_s))
+        expected_s = float(getattr(self, "_ui_lag_probe_interval_s", 0.1))
+        self._ui_lag_last_tick_s = now_s
+        lag_ms = max(0.0, (now_s - previous_s - expected_s) * 1000.0)
+        warn_ms = float(getattr(self, "_ui_lag_warn_ms", 120.0))
+        if lag_ms < warn_ms:
+            return
+        last_report_s = float(getattr(self, "_ui_lag_last_report_s", 0.0))
+        if now_s - last_report_s < 1.0:
+            return
+        self._ui_lag_last_report_s = now_s
+        popup = False
+        try:
+            app = QApplication.instance()
+            popup = bool(app is not None and app.activePopupWidget() is not None)
+        except Exception:
+            popup = False
+        trace_event(
+            "qt_ui_event_loop_lag",
+            lag_ms=lag_ms,
+            warn_ms=warn_ms,
+            active_page=getattr(self, "_active_page_name", ""),
+            popup_active=popup,
+        )
+        logger.warning(
+            "Qt UI event loop lag %.1f ms (page=%s popup=%s)",
+            lag_ms,
+            getattr(self, "_active_page_name", ""),
+            popup,
+        )
 
     @staticmethod
     def _analysis_transfer_host_score(addr: LocalAddr) -> tuple[int, str]:
@@ -210,7 +293,14 @@ class MainWindow(QMainWindow):
         self._set_status(self._mode_lbl, " | ".join(parts))
         self._set_status_tone(self._mode_lbl, "alert" if self._reverse_enabled else None)
 
-    def _refresh_video_status(self) -> None:
+    def _refresh_video_status(self, *, force: bool = True) -> None:
+        if not force:
+            now_mono = time.monotonic()
+            min_interval = max(0.1, float(getattr(self, "_video_status_min_interval_s", 0.5)))
+            last = float(getattr(self, "_video_status_last_refresh_s", 0.0))
+            if now_mono - last < min_interval:
+                return
+            self._video_status_last_refresh_s = now_mono
         if self.video_panel is None:
             self._set_status(self._video_lbl, "Camera: -")
             self._set_status_tone(self._video_lbl, None)
@@ -477,7 +567,66 @@ class MainWindow(QMainWindow):
         except Exception:
             pass
 
+    def _stream_uses_viewport_frame_pipe(self, stream_name: str) -> bool:
+        try:
+            stream = dict(getattr(self.cam_mgr, "stream_defs", {}).get(stream_name, {}) or {})
+        except Exception:
+            stream = {}
+        requested = False
+        for key in (
+            "receiver_viewport_frame_pipe",
+            "viewport_frame_pipe",
+            "direct_viewport_frame_pipe",
+            "direct_viewport_frames",
+        ):
+            if key in stream:
+                value = stream.get(key)
+                if isinstance(value, bool):
+                    requested = value
+                else:
+                    requested = str(value).strip().lower() in {"1", "true", "yes", "on"}
+                break
+        env_value = os.environ.get("TRITON_DIRECT_VIEWPORT_FRAMES")
+        if env_value is not None:
+            requested = str(env_value).strip().lower() in {"1", "true", "yes", "on"}
+        return bool(requested)
+
+    def _video_frame_source(self, stream_name: str, *, require_packet: bool = True):
+        panel = self.video_panel
+        if panel is None:
+            return None
+        try:
+            getter = getattr(panel, "video_widget_for_stream", None)
+            widget = getter(stream_name) if callable(getter) else None
+            if widget is None and str(stream_name) == str(getattr(panel, "current_stream_name", lambda: None)()):
+                widget = panel.current_video_widget()
+            if widget is None:
+                return None
+            latest = getattr(widget, "latest_frame_packet", None)
+            recent = getattr(widget, "recent_frame_packets", None)
+            if not callable(latest):
+                return None
+            if require_packet:
+                packet = latest()
+                if packet is None:
+                    return None
+            if not callable(recent):
+                return None
+            return widget
+        except Exception:
+            return None
+
     def _latest_camera_packet(self, stream_name: str):
+        try:
+            source = self._video_frame_source(stream_name, require_packet=True)
+            if source is not None:
+                latest = getattr(source, "latest_frame_packet", None)
+                if callable(latest):
+                    packet = latest()
+                    if packet is not None:
+                        return packet
+        except Exception:
+            pass
         try:
             cam = getattr(self.cam_mgr, "_opened", {}).get(stream_name)
             if cam is None:
@@ -740,7 +889,11 @@ class MainWindow(QMainWindow):
 
     def _warm_stereo_capture_receivers(self, *stream_names: str) -> None:
         previous = set(getattr(self, "_stereo_capture_warm_names", set()) or set())
-        desired = {str(name) for name in stream_names if name}
+        desired = {
+            str(name)
+            for name in stream_names
+            if name and not self._stream_uses_viewport_frame_pipe(str(name))
+        }
         opener = getattr(self.cam_mgr, "open_capture", None)
         closer = getattr(self.cam_mgr, "close_capture", None)
         if callable(closer):
@@ -945,6 +1098,16 @@ class MainWindow(QMainWindow):
                 _lbl.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
             except Exception:
                 pass
+
+        self._video_status_last_refresh_s = 0.0
+        self._video_status_min_interval_s = self._env_float(
+            "TRITON_VIDEO_STATUS_REFRESH_INTERVAL_S",
+            0.5,
+            min_value=0.1,
+            max_value=5.0,
+        )
+        self._ui_lag_timer: QTimer | None = None
+        self._start_ui_lag_probe_if_requested()
 
         self._link_timer = QTimer(self)
         self._link_timer.timeout.connect(self._update_link_status)
@@ -1187,6 +1350,7 @@ class MainWindow(QMainWindow):
             manager=self.cam_mgr,
             output_root_provider=lambda: self._app_session_output_dir()[0],
             packet_provider=self._latest_camera_packet,
+            frame_source_provider=lambda name: self._video_frame_source(name, require_packet=True),
         )
         self._stereo_page.pairSelectionChanged.connect(self._on_stereo_pair_changed)
         self._stereo_page.statusMessage.connect(lambda msg, timeout: self.statusBar().showMessage(msg, int(timeout)))
@@ -2038,7 +2202,7 @@ class MainWindow(QMainWindow):
             pass
 
         try:
-            self._refresh_video_status()
+            self._refresh_video_status(force=False)
         except Exception:
             self._set_status(self._video_lbl, "Camera: -")
 
@@ -2971,7 +3135,7 @@ class MainWindow(QMainWindow):
                 app.removeEventFilter(self)
         except Exception:
             pass
-        for timer_name in ("_link_timer", "_analysis_transfer_timer", "_sensor_ui_timer", "_tether_ui_timer"):
+        for timer_name in ("_link_timer", "_analysis_transfer_timer", "_sensor_ui_timer", "_tether_ui_timer", "_ui_lag_timer"):
             try:
                 timer = getattr(self, timer_name, None)
                 if timer is not None:

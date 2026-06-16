@@ -119,6 +119,50 @@ def test_stereo_capture_session_writes_pair_and_manifest(tmp_path: Path):
     assert set(manager.closed) == {"Left", "Right"}
 
 
+def test_stereo_capture_session_can_use_external_frame_sources(tmp_path: Path):
+    streams_path = tmp_path / "streams.json"
+    streams_path.write_text(
+        json.dumps(
+            {
+                "streams": [{"name": "Left"}, {"name": "Right"}],
+                "stereo_pairs": [
+                    {
+                        "name": "Forward",
+                        "left": "Left",
+                        "right": "Right",
+                        "rig_id": "rig-a",
+                        "max_pair_delta_ms": 20,
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    pair = load_stereo_pairs(streams_path)[0]
+    manager = _FakeManager()
+    external_sources = {
+        "Left": _FakeCamera("Left", 11, 20.000),
+        "Right": _FakeCamera("Right", 12, 20.010),
+    }
+    session = StereoCaptureSession(
+        manager,  # type: ignore[arg-type]
+        pair,
+        output_root=tmp_path,
+        session_name="external-session",
+        close_on_stop=True,
+        frame_source_provider=lambda name: external_sources.get(name),
+    )
+
+    session.start()
+    record = session.capture_once(wait_s=0.1)
+    session.stop()
+
+    assert record["left"]["seq"] == 11
+    assert record["right"]["seq"] == 12
+    assert record["pair_delta_ms"] == pytest.approx(10.0)
+    assert manager.closed == []
+
+
 def test_stereo_capture_session_appends_existing_manifest(tmp_path: Path):
     streams_path = tmp_path / "streams.json"
     streams_path.write_text(

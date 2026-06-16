@@ -42,12 +42,14 @@ class StereoCaptureSession:
         output_root: str | Path | None = None,
         session_name: str | None = None,
         close_on_stop: bool = False,
+        frame_source_provider: Callable[[str], object | None] | None = None,
     ):
         self.manager = manager
         self.pair = pair
         self.output_root = Path(output_root or DEFAULT_RECORDINGS_DIR)
         self.session_name = session_name or time.strftime("%Y%m%d-%H%M%S")
         self.close_on_stop = bool(close_on_stop)
+        self.frame_source_provider = frame_source_provider
         self.session_dir = self.output_root / "stereo_sessions" / safe_filename_component(self.session_name, "session")
         self.left_dir = self.session_dir / "left"
         self.right_dir = self.session_dir / "right"
@@ -63,6 +65,7 @@ class StereoCaptureSession:
         self._last_manifest_write_ts = 0.0
         self._manifest_flush_interval_s = 1.0
         self._using_capture_receivers = False
+        self._using_external_frame_sources = False
         self._save_executor: ThreadPoolExecutor | None = None
         self._save_futures: list[Future] = []
         self._save_lock = threading.Lock()
@@ -85,15 +88,31 @@ class StereoCaptureSession:
         self.left_dir.mkdir(parents=True, exist_ok=True)
         self.right_dir.mkdir(parents=True, exist_ok=True)
         self._started_wall_ts = time.time()
-        open_capture = getattr(self.manager, "open_capture", None)
-        if callable(open_capture):
-            self._left_camera = open_capture(self.pair.left)
-            self._right_camera = open_capture(self.pair.right)
-            self._using_capture_receivers = True
-        else:
-            self._left_camera = self.manager.open(self.pair.left)
-            self._right_camera = self.manager.open(self.pair.right)
+        external_left = None
+        external_right = None
+        if callable(self.frame_source_provider):
+            try:
+                external_left = self.frame_source_provider(self.pair.left)
+                external_right = self.frame_source_provider(self.pair.right)
+            except Exception:
+                external_left = None
+                external_right = None
+        if external_left is not None and external_right is not None:
+            self._left_camera = external_left
+            self._right_camera = external_right
             self._using_capture_receivers = False
+            self._using_external_frame_sources = True
+        else:
+            open_capture = getattr(self.manager, "open_capture", None)
+            if callable(open_capture):
+                self._left_camera = open_capture(self.pair.left)
+                self._right_camera = open_capture(self.pair.right)
+                self._using_capture_receivers = True
+            else:
+                self._left_camera = self.manager.open(self.pair.left)
+                self._right_camera = self.manager.open(self.pair.right)
+                self._using_capture_receivers = False
+            self._using_external_frame_sources = False
         self._manifest = self._load_existing_manifest() or self._base_manifest()
         self._resume_frame_state()
         self._write_manifest()
@@ -102,6 +121,7 @@ class StereoCaptureSession:
             pair=self.pair.name,
             session_dir=self.session_dir,
             using_capture_receivers=self._using_capture_receivers,
+            using_external_frame_sources=self._using_external_frame_sources,
             dt_ms=(time.monotonic() - start_s) * 1000.0,
         )
         return self.session_dir
@@ -121,7 +141,9 @@ class StereoCaptureSession:
             self._manifest["ended_wall_ts"] = time.time()
             self._manifest_dirty = True
             self._write_manifest()
-        if self.close_on_stop:
+        if self._using_external_frame_sources:
+            pass
+        elif self.close_on_stop:
             for stream_name in (self.pair.left, self.pair.right):
                 try:
                     if self._using_capture_receivers and callable(getattr(self.manager, "close_capture", None)):

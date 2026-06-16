@@ -16,17 +16,18 @@ from typing import Any
 
 import numpy as np
 from PyQt6.QtCore import Qt, QThread, QTimer, pyqtSignal
-from PyQt6.QtWidgets import QLabel, QSizePolicy, QVBoxLayout, QWidget
+from PyQt6.QtWidgets import QApplication, QLabel, QSizePolicy, QVBoxLayout, QWidget
 
 from config import VIDEO_RPC_ENDPOINT
 from network.net_select import choose_video_receive_ip, parse_zmq_endpoint
 from recording.capture_trace import trace_event
 from recording.capture_paths import timestamped_camera_stem, unique_capture_path
 from recording.save_location import DEFAULT_RECORDINGS_DIR
+from recording.compressed_stream_recorder import CompressedRtpRecorder
 from recording.video_recorder import VideoRecorder, save_snapshot
 from video.gst_receiver import _suppress_gst_stderr_line, _win_kill_udp_port_users
 from video.gst_runtime import bootstrap_gstreamer_env
-from video.cam import RemoteCameraManager
+from video.cam import CameraFramePacket, RemoteCameraManager
 
 
 logger = logging.getLogger(__name__)
@@ -48,6 +49,9 @@ class DirectReceiverConfig:
     h264_decoder: str = "decodebin"
     sink: str = "d3d11videosink"
     square_crop: bool = False
+    frame_pipe: bool = False
+    record_rtp_port: int = 0
+    record_rtp_host: str = "127.0.0.1"
 
 
 def _find_gst_launch() -> str:
@@ -97,6 +101,61 @@ def _square_crop_chain(cfg: DirectReceiverConfig) -> list[str]:
     return ["!", "videocrop", "left=0", "right=0", f"top={top}", f"bottom={bottom}"]
 
 
+def _receiver_output_dimensions(cfg: DirectReceiverConfig) -> tuple[int, int]:
+    width = max(0, int(cfg.width or 0))
+    height = max(0, int(cfg.height or 0))
+    if width <= 0 or height <= 0:
+        return 0, 0
+    if bool(cfg.square_crop) and width != height:
+        side = min(width, height)
+        return side, side
+    return width, height
+
+
+def _raw_frame_caps(width: int, height: int) -> str:
+    return (
+        f"video/x-raw,format=BGR,width={int(width)},height={int(height)},"
+        "colorimetry=1:4:0:0,range=full"
+    )
+
+
+def _render_output_chain(cfg: DirectReceiverConfig) -> list[str]:
+    sink = str(cfg.sink or "d3d11videosink").strip() or "d3d11videosink"
+    sink_props = ["sync=false", "async=false"]
+    if sink.lower() not in {"fakesink", "appsink", "filesink"}:
+        sink_props.append("force-aspect-ratio=true")
+    return [
+        "!", "queue", "max-size-buffers=1", "max-size-bytes=0",
+        "max-size-time=0", "leaky=downstream",
+        "!", sink, *sink_props,
+    ]
+
+
+def _frame_pipe_output_chain(cfg: DirectReceiverConfig) -> list[str]:
+    width, height = _receiver_output_dimensions(cfg)
+    if width <= 0 or height <= 0:
+        return []
+    return [
+        "viewport_t.", "!", "queue", "max-size-buffers=1", "max-size-bytes=0",
+        "max-size-time=0", "leaky=downstream",
+        "!", "videoconvert",
+        "!", _raw_frame_caps(width, height),
+        "!", "fdsink", "fd=1", "sync=false", "async=false",
+    ]
+
+
+def _rtp_record_forward_chain(cfg: DirectReceiverConfig) -> list[str]:
+    port = int(cfg.record_rtp_port or 0)
+    if port <= 0:
+        return []
+    host = str(cfg.record_rtp_host or "127.0.0.1").strip() or "127.0.0.1"
+    return [
+        "rtp_t.", "!", "queue", "max-size-buffers=0", "max-size-bytes=0",
+        "max-size-time=0",
+        "!", "udpsink", f"host={host}", f"port={port}", "sync=false", "async=false",
+    ]
+
+
 def build_direct_receiver_cmd(gst_launch: str, cfg: DirectReceiverConfig) -> list[str]:
     """Build a direct-render RTP receiver pipeline.
 
@@ -108,15 +167,20 @@ def build_direct_receiver_cmd(gst_launch: str, cfg: DirectReceiverConfig) -> lis
     base = [str(gst_launch), "--gst-disable-registry-fork", "-q"]
     udp_buffer_size = max(262144, int(cfg.udp_buffer_size))
     drop_on_latency = "true" if cfg.drop_on_latency else "false"
-    sink = str(cfg.sink or "d3d11videosink").strip() or "d3d11videosink"
-    sink_props = ["sync=false", "async=false", "force-aspect-ratio=true"]
     crop_chain = _square_crop_chain(cfg)
+    output_chain: list[str]
+    if bool(cfg.frame_pipe):
+        output_chain = ["!", "tee", "name=viewport_t", *_render_output_chain(cfg), *_frame_pipe_output_chain(cfg)]
+    else:
+        output_chain = _render_output_chain(cfg)
 
     if cfg.codec.lower() == "h264":
         caps = "application/x-rtp,media=video,encoding-name=H264,payload=96,clock-rate=90000"
-        pipeline = [
+        source_chain = [
             "udpsrc", f"address={cfg.bind_address}", "reuse=true", f"port={cfg.port}",
             f"buffer-size={udp_buffer_size}", f"caps={caps}",
+        ]
+        h264_display_chain = [
             "!", "rtpjitterbuffer", f"latency={cfg.latency_ms}",
             f"drop-on-latency={drop_on_latency}", "faststart-min-packets=1",
             "!", "rtph264depay",
@@ -124,10 +188,19 @@ def build_direct_receiver_cmd(gst_launch: str, cfg: DirectReceiverConfig) -> lis
             "!", *_h264_decoder_chain(cfg.h264_decoder),
             "!", "videoconvert",
             *crop_chain,
-            "!", "queue", "max-size-buffers=1", "max-size-bytes=0",
-            "max-size-time=0", "leaky=downstream",
-            "!", sink, *sink_props,
+            *output_chain,
         ]
+        if int(cfg.record_rtp_port or 0) > 0:
+            pipeline = [
+                *source_chain,
+                "!", "tee", "name=rtp_t",
+                "rtp_t.", "!", "queue", "max-size-buffers=1", "max-size-bytes=0",
+                "max-size-time=0", "leaky=downstream",
+                *h264_display_chain,
+                *_rtp_record_forward_chain(cfg),
+            ]
+        else:
+            pipeline = [*source_chain, *h264_display_chain]
     else:
         caps = "application/x-rtp,media=video,encoding-name=JPEG,payload=26,clock-rate=90000"
         pipeline = [
@@ -139,11 +212,214 @@ def build_direct_receiver_cmd(gst_launch: str, cfg: DirectReceiverConfig) -> lis
             "!", "jpegdec",
             "!", "videoconvert",
             *crop_chain,
-            "!", "queue", "max-size-buffers=1", "max-size-bytes=0",
-            "max-size-time=0", "leaky=downstream",
-            "!", sink, *sink_props,
+            *output_chain,
         ]
     return base + pipeline
+
+
+def _env_truthy(name: str, default: bool = False) -> bool:
+    value = os.environ.get(name)
+    if value is None:
+        return bool(default)
+    return _truthy(value, default=default)
+
+
+def _viewport_frame_pipe_requested(stream_opts: dict[str, Any]) -> bool:
+    requested = False
+    for key in (
+        "receiver_viewport_frame_pipe",
+        "viewport_frame_pipe",
+        "direct_viewport_frame_pipe",
+        "direct_viewport_frames",
+    ):
+        if key in stream_opts:
+            requested = _truthy(stream_opts.get(key))
+            break
+    return _env_truthy("TRITON_DIRECT_VIEWPORT_FRAMES", requested)
+
+
+def _compressed_recording_requested(stream_opts: dict[str, Any]) -> bool:
+    requested = False
+    for key in (
+        "receiver_compressed_recording",
+        "compressed_recording",
+        "direct_compressed_recording",
+    ):
+        if key in stream_opts:
+            requested = _truthy(stream_opts.get(key), default=True)
+            break
+    return _env_truthy("TRITON_DIRECT_COMPRESSED_RECORDING", requested)
+
+
+def _compressed_recording_port(stream_opts: dict[str, Any], display_port: int) -> int:
+    for key in (
+        "receiver_compressed_record_port",
+        "compressed_record_port",
+        "direct_record_port",
+    ):
+        if key not in stream_opts or stream_opts.get(key) is None:
+            continue
+        try:
+            return int(stream_opts.get(key))
+        except Exception:
+            return 0
+    return 7000 + (int(display_port) % 1000)
+
+
+def _compressed_recording_latency_ms(stream_opts: dict[str, Any]) -> int:
+    for key in (
+        "receiver_compressed_record_latency_ms",
+        "compressed_record_latency_ms",
+        "record_latency_ms",
+    ):
+        if key not in stream_opts or stream_opts.get(key) is None:
+            continue
+        try:
+            return max(0, int(stream_opts.get(key)))
+        except Exception:
+            return 250
+    return 250
+
+
+@dataclass(frozen=True)
+class _StoredViewportFrame:
+    data: bytes
+    seq: int
+    monotonic_ts: float
+    wall_ts: float
+
+
+class _ViewportFramePipe:
+    """Reads the direct renderer tee and exposes viewport frames as camera packets."""
+
+    def __init__(self, source_name: str, width: int, height: int, *, history_size: int = 12):
+        self.source_name = str(source_name)
+        self.width = max(1, int(width))
+        self.height = max(1, int(height))
+        self._frame_size = self.width * self.height * 3
+        self._history: deque[_StoredViewportFrame] = deque(maxlen=max(1, int(history_size)))
+        self._lock = threading.Lock()
+        self._stop = threading.Event()
+        self._thread: threading.Thread | None = None
+        self._latest_seq = 0
+        self._last_delivered_seq = 0
+
+    def start(self, stream) -> None:
+        self.stop()
+        if stream is None:
+            return
+        self._stop.clear()
+        self._thread = threading.Thread(
+            target=self._reader_loop,
+            args=(stream,),
+            name=f"direct-video-viewport-pipe-{self.source_name}",
+            daemon=True,
+        )
+        self._thread.start()
+
+    def stop(self) -> None:
+        self._stop.set()
+        thread = self._thread
+        self._thread = None
+        if thread is not None and thread.is_alive():
+            try:
+                thread.join(timeout=0.1)
+            except Exception:
+                pass
+        with self._lock:
+            self._last_delivered_seq = self._latest_seq
+
+    def _reader_loop(self, stream) -> None:
+        trace_event(
+            "direct_viewport_frame_pipe_started",
+            stream=self.source_name,
+            width=self.width,
+            height=self.height,
+            frame_size=self._frame_size,
+        )
+
+        def _read_exact(size: int) -> bytes | None:
+            chunks: list[bytes] = []
+            remaining = int(size)
+            while remaining > 0 and not self._stop.is_set():
+                chunk = stream.read(remaining)
+                if not chunk:
+                    return None
+                chunks.append(chunk)
+                remaining -= len(chunk)
+            if remaining > 0:
+                return None
+            if len(chunks) == 1:
+                return chunks[0]
+            return b"".join(chunks)
+
+        while not self._stop.is_set():
+            data = _read_exact(self._frame_size)
+            if data is None:
+                break
+            now_wall = time.time()
+            now_mono = time.monotonic()
+            with self._lock:
+                self._latest_seq += 1
+                stored = _StoredViewportFrame(
+                    data=data,
+                    seq=self._latest_seq,
+                    monotonic_ts=now_mono,
+                    wall_ts=now_wall,
+                )
+                self._history.append(stored)
+                history_len = len(self._history)
+            trace_event(
+                "direct_viewport_frame_arrived",
+                stream=self.source_name,
+                seq=stored.seq,
+                history_len=history_len,
+                monotonic_ts=now_mono,
+                wall_ts=now_wall,
+            )
+        trace_event(
+            "direct_viewport_frame_pipe_stopped",
+            stream=self.source_name,
+            latest_seq=self._latest_seq,
+        )
+
+    def _packet_from_stored(self, stored: _StoredViewportFrame) -> CameraFramePacket:
+        frame = np.frombuffer(stored.data, dtype=np.uint8).reshape((self.height, self.width, 3)).copy()
+        return CameraFramePacket(
+            source_name=self.source_name,
+            frame_bgr=frame,
+            seq=stored.seq,
+            monotonic_ts=stored.monotonic_ts,
+            wall_ts=stored.wall_ts,
+        )
+
+    def _snapshot_packet(self, *, consume: bool) -> CameraFramePacket | None:
+        with self._lock:
+            stored = self._history[-1] if self._history else None
+            if stored is None:
+                return None
+            if consume:
+                if stored.seq == self._last_delivered_seq:
+                    return None
+                self._last_delivered_seq = stored.seq
+        return self._packet_from_stored(stored)
+
+    def read_frame_packet(self) -> CameraFramePacket | None:
+        return self._snapshot_packet(consume=True)
+
+    def latest_frame_packet(self) -> CameraFramePacket | None:
+        return self._snapshot_packet(consume=False)
+
+    def recent_frame_packets(self, *, max_age_s: float = 0.5) -> list[CameraFramePacket]:
+        now = time.monotonic()
+        max_age_s = max(0.0, float(max_age_s))
+        with self._lock:
+            frames = [
+                stored
+                for stored in self._history
+                if max_age_s <= 0.0 or (now - float(stored.monotonic_ts)) <= max_age_s
+            ]
+        return [self._packet_from_stored(stored) for stored in frames]
 
 
 def _stream_options(manager: RemoteCameraManager, stream_name: str) -> dict[str, Any]:
@@ -266,21 +542,34 @@ class _DirectConnectWorker(QThread):
                 )
             )
             sink = str(stream_opts.get("receiver_direct_sink", stream_opts.get("direct_sink", "d3d11videosink")))
+            width = int(stream_opts.get("width", start_kwargs.get("width", 0)) or 0)
+            height = int(stream_opts.get("height", start_kwargs.get("height", 0)) or 0)
+            requested_frame_pipe = _viewport_frame_pipe_requested(stream_opts)
+            frame_pipe = bool(requested_frame_pipe and width > 0 and height > 0)
+            record_rtp_host = "127.0.0.1"
+            record_rtp_port = 0
+            record_latency_ms = _compressed_recording_latency_ms(stream_opts)
+            if codec == "h264" and _compressed_recording_requested(stream_opts):
+                record_rtp_port = _compressed_recording_port(stream_opts, port)
 
             cfg = DirectReceiverConfig(
                 name=self.stream_name,
                 codec=codec,
                 port=port,
                 bind_address=host if bool(stream_opts.get("bind_receiver_to_host", True)) else "0.0.0.0",
-                width=int(stream_opts.get("width", start_kwargs.get("width", 0)) or 0),
-                height=int(stream_opts.get("height", start_kwargs.get("height", 0)) or 0),
+                width=width,
+                height=height,
                 latency_ms=int(stream_opts.get("latency_ms", 5)),
                 udp_buffer_size=int(stream_opts.get("receiver_udp_buffer_size", 4 * 1024 * 1024)),
                 drop_on_latency=bool(stream_opts.get("receiver_drop_on_latency", True)),
                 h264_decoder=h264_decoder,
                 sink=sink,
                 square_crop=bool(self.square_crop),
+                frame_pipe=frame_pipe,
+                record_rtp_port=record_rtp_port,
+                record_rtp_host=record_rtp_host,
             )
+            frame_width, frame_height = _receiver_output_dimensions(cfg)
             cmd = build_direct_receiver_cmd(_find_gst_launch(), cfg)
             env = dict(os.environ)
             bootstrap_gstreamer_env(env)
@@ -301,7 +590,16 @@ class _DirectConnectWorker(QThread):
                 startupinfo=startupinfo,
                 bufsize=0,
             )
-            self.receiver_started.emit(self.proc, 0)
+            receiver_info = {
+                "frame_pipe": bool(frame_pipe),
+                "frame_width": int(frame_width),
+                "frame_height": int(frame_height),
+                "codec": codec,
+                "record_rtp_host": record_rtp_host,
+                "record_rtp_port": int(record_rtp_port),
+                "record_latency_ms": int(record_latency_ms),
+            }
+            self.receiver_started.emit(self.proc, receiver_info)
 
             # Start the sender after the UDP listener exists.
             resp = self.manager.rov.start_stream(**start_kwargs)
@@ -556,7 +854,6 @@ class _CaptureBadgeOverlay(QWidget):
             Qt.WindowType.Tool
             | Qt.WindowType.FramelessWindowHint
             | Qt.WindowType.WindowDoesNotAcceptFocus
-            | Qt.WindowType.WindowStaysOnTopHint
         )
         super().__init__(owner, flags)
         self._owner = owner
@@ -580,6 +877,10 @@ class _CaptureBadgeOverlay(QWidget):
     def sync(self) -> None:
         owner = self._owner
         if not owner.isVisible() or owner.width() <= 1 or owner.height() <= 1:
+            self.hide()
+            return
+        app = QApplication.instance()
+        if app is not None and app.activePopupWidget() is not None:
             self.hide()
             return
         window = owner.window()
@@ -642,7 +943,13 @@ class DirectGstVideoWidget(QWidget):
         self._rov_link_wait_message = f"{self.stream_name}\nROV link lost.\nWaiting for heartbeat..."
         self._capture_camera = None
         self._capture_lock = threading.RLock()
-        self._rec: VideoRecorder | None = None
+        self._viewport_reader: _ViewportFramePipe | None = None
+        self._viewport_frame_pipe_enabled = False
+        self._compressed_recording_available = False
+        self._compressed_record_host = "127.0.0.1"
+        self._compressed_record_port = 0
+        self._compressed_record_latency_ms = 250
+        self._rec: object | None = None
         self._record_thread: threading.Thread | None = None
         self._record_stop = threading.Event()
         self._record_started_ts: float | None = None
@@ -754,18 +1061,28 @@ class DirectGstVideoWidget(QWidget):
 
     def _refresh_capture_indicators(self) -> None:
         now = time.time()
+        layout_needed = bool(self._capture_overlay.isVisible())
+        record_was_visible = not self._record_badge.isHidden()
+        snapshot_was_visible = not self._snapshot_badge.isHidden()
         if self._record_started_ts is not None and self._rec is not None:
             self._set_record_badge_elapsed(self._record_elapsed_from_clock())
+            layout_needed = True
         else:
-            self._record_badge.hide()
+            if record_was_visible:
+                self._record_badge.hide()
+                layout_needed = True
 
         if self._snapshot_indicator_until_ts > now:
             if self._snapshot_badge.text() != self._snapshot_indicator_text:
                 self._snapshot_badge.setText(self._snapshot_indicator_text)
             self._snapshot_badge.show()
+            layout_needed = True
         else:
-            self._snapshot_badge.hide()
-        self._layout_capture_badges()
+            if snapshot_was_visible:
+                self._snapshot_badge.hide()
+                layout_needed = True
+        if layout_needed:
+            self._layout_capture_badges()
 
     def _flash_snapshot_indicator(self, text: str = "SNAP") -> None:
         self._snapshot_indicator_text = str(text or "SNAP")
@@ -822,47 +1139,117 @@ class DirectGstVideoWidget(QWidget):
 
         _close()
 
-    def _capture_packet(self, *, wait_s: float = 0.0, consume: bool = False, allow_stale_latest: bool = True):
-        camera = self._ensure_capture_camera()
-        deadline = time.monotonic() + max(0.0, float(wait_s))
-        while True:
-            packet = None
-            if not consume:
-                latest = getattr(camera, "latest_frame_packet", None)
-                if callable(latest):
-                    try:
-                        packet = latest()
-                    except Exception:
-                        packet = None
-            if packet is None:
-                reader = getattr(camera, "read_frame_packet", None)
-                if callable(reader):
-                    try:
-                        packet = reader()
-                    except Exception:
-                        packet = None
-            if packet is None and consume and allow_stale_latest:
-                latest = getattr(camera, "latest_frame_packet", None)
-                if callable(latest) and time.monotonic() >= deadline:
-                    # Last resort for very short clips: return something rather
-                    # than failing to start a file before the next keyframe.
-                    try:
-                        packet = latest()
-                    except Exception:
-                        packet = None
-            if packet is not None:
-                self.last_frame = packet.frame_bgr
-                self.last_frame_ts = time.time()
+    def _stop_viewport_reader(self) -> None:
+        reader = self._viewport_reader
+        self._viewport_reader = None
+        self._viewport_frame_pipe_enabled = False
+        if reader is not None:
+            try:
+                reader.stop()
+            except Exception:
+                pass
+
+    def _clear_compressed_recording_route(self) -> None:
+        self._compressed_recording_available = False
+        self._compressed_record_host = "127.0.0.1"
+        self._compressed_record_port = 0
+        self._compressed_record_latency_ms = 250
+
+    def _source_packet(self, source, *, consume: bool, allow_stale_latest: bool):
+        packet = None
+        if not consume:
+            latest = getattr(source, "latest_frame_packet", None)
+            if callable(latest):
                 try:
-                    self.frame_buffer.append(packet.frame_bgr)
+                    packet = latest()
                 except Exception:
-                    pass
+                    packet = None
+        if packet is None:
+            reader = getattr(source, "read_frame_packet", None)
+            if callable(reader):
+                try:
+                    packet = reader()
+                except Exception:
+                    packet = None
+        if packet is None and consume and allow_stale_latest:
+            latest = getattr(source, "latest_frame_packet", None)
+            if callable(latest):
+                try:
+                    packet = latest()
+                except Exception:
+                    packet = None
+        return packet
+
+    def _store_packet(self, packet) -> None:
+        self.last_frame = packet.frame_bgr
+        self.last_frame_ts = time.time()
+        try:
+            self.frame_buffer.append(packet.frame_bgr)
+        except Exception:
+            pass
+
+    def _capture_packet(
+        self,
+        *,
+        wait_s: float = 0.0,
+        consume: bool = False,
+        allow_stale_latest: bool = True,
+        allow_capture_fallback: bool = True,
+    ):
+        deadline = time.monotonic() + max(0.0, float(wait_s))
+        fallback_opened = self._capture_camera is not None or self._viewport_reader is None
+        if fallback_opened and self._capture_camera is None and bool(allow_capture_fallback):
+            self._ensure_capture_camera()
+        while True:
+            packet = self._source_packet(
+                self._viewport_reader,
+                consume=consume,
+                allow_stale_latest=allow_stale_latest and time.monotonic() >= deadline,
+            ) if self._viewport_reader is not None else None
+            if packet is None and fallback_opened and self._capture_camera is not None:
+                packet = self._source_packet(
+                    self._capture_camera,
+                    consume=consume,
+                    allow_stale_latest=allow_stale_latest and time.monotonic() >= deadline,
+                )
+            if packet is not None:
+                self._store_packet(packet)
                 return packet
             if time.monotonic() >= deadline:
+                if bool(allow_capture_fallback) and not fallback_opened:
+                    try:
+                        self._ensure_capture_camera()
+                        fallback_opened = True
+                        deadline = time.monotonic() + max(0.25, min(0.5, float(wait_s) if wait_s else 0.25))
+                        continue
+                    except Exception:
+                        return None
                 return None
             time.sleep(0.02)
 
+    def _ensure_capture_source(self, *, wait_s: float = 0.25) -> str:
+        if self._viewport_reader is not None:
+            packet = self._capture_packet(
+                wait_s=max(0.0, float(wait_s)),
+                consume=False,
+                allow_stale_latest=True,
+                allow_capture_fallback=False,
+            )
+            if packet is not None:
+                return "viewport"
+        self._ensure_capture_camera()
+        return "capture"
+
     def latest_frame_packet(self):
+        if self._viewport_reader is not None:
+            latest = getattr(self._viewport_reader, "latest_frame_packet", None)
+            if callable(latest):
+                try:
+                    packet = latest()
+                    if packet is not None:
+                        return packet
+                except Exception:
+                    pass
         camera = self._capture_camera
         if camera is None:
             return None
@@ -875,6 +1262,15 @@ class DirectGstVideoWidget(QWidget):
             return None
 
     def recent_frame_packets(self, *, max_age_s: float = 0.5):
+        if self._viewport_reader is not None:
+            recent = getattr(self._viewport_reader, "recent_frame_packets", None)
+            if callable(recent):
+                try:
+                    packets = list(recent(max_age_s=max_age_s))
+                    if packets:
+                        return packets
+                except Exception:
+                    pass
         camera = self._capture_camera
         if camera is None:
             return []
@@ -918,8 +1314,50 @@ class DirectGstVideoWidget(QWidget):
         self._connect_attempt_active = True
         self._connect_worker.start()
 
-    def _on_receiver_started(self, proc: subprocess.Popen, embedded_hwnd: int = 0) -> None:
+    def _on_receiver_started(self, proc: subprocess.Popen, info: object = 0) -> None:
         self._proc = proc
+        embedded_hwnd = 0
+        frame_pipe = False
+        frame_width = 0
+        frame_height = 0
+        record_rtp_port = 0
+        record_rtp_host = "127.0.0.1"
+        record_latency_ms = 250
+        codec = ""
+        if isinstance(info, dict):
+            frame_pipe = bool(info.get("frame_pipe"))
+            try:
+                frame_width = int(info.get("frame_width") or 0)
+                frame_height = int(info.get("frame_height") or 0)
+            except Exception:
+                frame_width = 0
+                frame_height = 0
+            try:
+                record_rtp_port = int(info.get("record_rtp_port") or 0)
+                record_latency_ms = int(info.get("record_latency_ms") or 250)
+            except Exception:
+                record_rtp_port = 0
+                record_latency_ms = 250
+            record_rtp_host = str(info.get("record_rtp_host") or "127.0.0.1")
+            codec = str(info.get("codec") or "")
+        else:
+            try:
+                embedded_hwnd = int(info or 0)
+            except Exception:
+                embedded_hwnd = 0
+        self._stop_viewport_reader()
+        self._compressed_recording_available = codec.lower() == "h264" and record_rtp_port > 0
+        self._compressed_record_host = record_rtp_host or "127.0.0.1"
+        self._compressed_record_port = max(0, int(record_rtp_port))
+        self._compressed_record_latency_ms = max(0, int(record_latency_ms))
+        if frame_pipe and frame_width > 0 and frame_height > 0:
+            self._viewport_reader = _ViewportFramePipe(self.stream_name, frame_width, frame_height)
+            self._viewport_frame_pipe_enabled = True
+            try:
+                self._viewport_reader.start(proc.stdout)
+            except Exception as exc:
+                self._stop_viewport_reader()
+                logger.warning("Could not start viewport frame pipe for '%s': %s", self.stream_name, exc)
         if embedded_hwnd:
             self._embedded_hwnd = int(embedded_hwnd)
             self._hide_message()
@@ -947,7 +1385,8 @@ class DirectGstVideoWidget(QWidget):
             self._show_message(f"{self.stream_name}\nWaiting for Direct3D window...")
         if not self._embedded_hwnd and not self._embed_timer.isActive():
             self._embed_timer.start()
-        threading.Thread(target=self._log_stream, args=(proc.stdout, "OUT"), daemon=True).start()
+        if not self._viewport_frame_pipe_enabled:
+            threading.Thread(target=self._log_stream, args=(proc.stdout, "OUT"), daemon=True).start()
         threading.Thread(target=self._log_stream, args=(proc.stderr, "ERR"), daemon=True).start()
 
     def _on_connect_failed(self, error: str) -> None:
@@ -959,6 +1398,8 @@ class DirectGstVideoWidget(QWidget):
             pass
         self._proc = None
         self._embedded_hwnd = None
+        self._stop_viewport_reader()
+        self._clear_compressed_recording_route()
         self._last_error = error
         self._state = "waiting"
         self._retry_backoff_s = min(self._retry_backoff_s * 1.5, 5.0)
@@ -1030,6 +1471,8 @@ class DirectGstVideoWidget(QWidget):
         if proc is not None and proc.poll() is not None:
             self._proc = None
             self._embedded_hwnd = None
+            self._stop_viewport_reader()
+            self._clear_compressed_recording_route()
             try:
                 self._embed_timer.stop()
             except Exception:
@@ -1045,7 +1488,7 @@ class DirectGstVideoWidget(QWidget):
             self._show_message(f"{self.stream_name}\nRenderer stopped. Reconnecting...")
             return
 
-        if self._state == "playing":
+        if self._state == "playing" and self._embedded_hwnd is None:
             self._try_embed()
         elif self._state == "connecting":
             return
@@ -1145,6 +1588,53 @@ class DirectGstVideoWidget(QWidget):
                 retry_delay_s=0.05,
             )
 
+    def _start_compressed_recording(self, out_file: str, *, fps: float) -> str | None:
+        proc = self._proc
+        if (
+            not self._compressed_recording_available
+            or self._compressed_record_port <= 0
+            or proc is None
+            or proc.poll() is not None
+        ):
+            return None
+        recorder_start_s = time.monotonic()
+        rec = CompressedRtpRecorder(
+            out_file,
+            name=self.stream_name,
+            port=int(self._compressed_record_port),
+            bind_address=self._compressed_record_host,
+            latency_ms=int(self._compressed_record_latency_ms),
+        )
+        try:
+            target = rec.start()
+        except Exception as exc:
+            logger.warning("Could not start compressed recorder for '%s': %s", self.stream_name, exc)
+            trace_event(
+                "mono_compressed_recorder_start_failed",
+                stream=self.stream_name,
+                out_file=out_file,
+                port=int(self._compressed_record_port),
+                dt_ms=(time.monotonic() - recorder_start_s) * 1000.0,
+                error=str(exc),
+            )
+            return None
+        self._rec = rec
+        self._record_thread = None
+        self._record_stop.clear()
+        trace_event(
+            "mono_recorder_started",
+            stream=self.stream_name,
+            out_file=out_file,
+            target=target,
+            backend="compressed_h264_rtp",
+            port=int(self._compressed_record_port),
+            fps=fps,
+            dt_ms=(time.monotonic() - recorder_start_s) * 1000.0,
+        )
+        self._refresh_capture_indicators()
+        self._schedule_record_label_tick()
+        return str(target)
+
     def start_recording(self, out_dir: str | None = None, basename: str | None = None, fps: float = 30.0) -> str | None:
         if self._rec is not None:
             target = self._rec.target
@@ -1176,11 +1666,16 @@ class DirectGstVideoWidget(QWidget):
         self._set_record_badge_elapsed(0)
         self._schedule_record_label_tick()
 
+        compressed_target = self._start_compressed_recording(out_file, fps=fps)
+        if compressed_target is not None:
+            return compressed_target
+
         capture_open_s = time.monotonic()
+        source = "capture"
         try:
-            self._ensure_capture_camera()
+            source = self._ensure_capture_source(wait_s=0.35)
         except Exception as exc:
-            logger.warning("Could not open capture receiver for '%s': %s", self.stream_name, exc)
+            logger.warning("Could not prepare capture source for '%s': %s", self.stream_name, exc)
             trace_event(
                 "mono_capture_receiver_failed",
                 stream=self.stream_name,
@@ -1198,6 +1693,7 @@ class DirectGstVideoWidget(QWidget):
             "mono_capture_receiver_ready",
             stream=self.stream_name,
             out_file=out_file,
+            source=source,
             dt_ms=(time.monotonic() - capture_open_s) * 1000.0,
         )
 
@@ -1464,9 +1960,9 @@ class DirectGstVideoWidget(QWidget):
         out_path = unique_capture_path(out_dir, base, ".png")
 
         try:
-            self._ensure_capture_camera()
+            self._ensure_capture_source(wait_s=0.25)
         except Exception as exc:
-            logger.warning("Could not open capture receiver for snapshot '%s': %s", self.stream_name, exc)
+            logger.warning("Could not prepare capture source for snapshot '%s': %s", self.stream_name, exc)
             return None
 
         def _write_snapshot() -> None:
@@ -1516,6 +2012,8 @@ class DirectGstVideoWidget(QWidget):
         except Exception:
             pass
         self._release_capture_camera(async_release=bool(async_release))
+        self._stop_viewport_reader()
+        self._clear_compressed_recording_route()
         self._stop_connect_worker(async_release=bool(async_release))
         proc = self._proc
         self._proc = None

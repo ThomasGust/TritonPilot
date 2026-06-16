@@ -69,6 +69,7 @@ class _CaptureWorker(QThread):
         interval_s: float,
         wait_s: float,
         continuous: bool = False,
+        frame_source_provider: Callable[[str], object | None] | None = None,
         parent=None,
     ):
         super().__init__(parent)
@@ -80,6 +81,7 @@ class _CaptureWorker(QThread):
         self.interval_s = max(0.0, float(interval_s))
         self.wait_s = max(0.0, float(wait_s))
         self.continuous = bool(continuous)
+        self.frame_source_provider = frame_source_provider
 
     def run(self) -> None:
         trace_event(
@@ -98,6 +100,7 @@ class _CaptureWorker(QThread):
             output_root=self.output_root,
             session_name=self.session_name,
             close_on_stop=False,
+            frame_source_provider=self.frame_source_provider,
         )
         captured = 0
         stopped = False
@@ -241,6 +244,7 @@ class StereoPage(QWidget):
         manager=None,
         output_root_provider: Callable[[], Path] | None = None,
         packet_provider: Callable[[str], object | None] | None = None,
+        frame_source_provider: Callable[[str], object | None] | None = None,
         parent=None,
     ):
         super().__init__(parent)
@@ -248,6 +252,7 @@ class StereoPage(QWidget):
         self.manager = manager
         self.output_root_provider = output_root_provider or (lambda: Path(DEFAULT_RECORDINGS_DIR))
         self.packet_provider = packet_provider or (lambda _name: None)
+        self.frame_source_provider = frame_source_provider or (lambda _name: None)
         self._pairs: list[StereoPairConfig] = []
         self._capture_worker: _CaptureWorker | None = None
         self._capture_mode = ""
@@ -818,6 +823,7 @@ class StereoPage(QWidget):
             float(self.interval_spin.value() if interval_s is None else interval_s),
             float(self.wait_spin.value()),
             continuous=(mode == "recording"),
+            frame_source_provider=self.frame_source_provider,
             parent=self,
         )
         self._capture_mode = mode

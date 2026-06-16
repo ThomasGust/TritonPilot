@@ -10,6 +10,10 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 from PyQt6.QtCore import Qt
 from PyQt6.QtWidgets import QApplication
 
+from recording.compressed_stream_recorder import (
+    H264RtpMp4RecordConfig,
+    build_h264_rtp_mp4_record_cmd,
+)
 from gui.direct_gst_video_widget import (
     DirectGstVideoWidget,
     DirectReceiverConfig,
@@ -35,6 +39,9 @@ def test_direct_h264_receiver_renders_with_direct3d_without_raw_pipe():
     assert "rtph264depay" in cmd
     assert "decodebin" in cmd
     assert "d3d11videosink" in cmd
+    assert "tee" not in cmd
+    assert "rtp_t." not in cmd
+    assert "udpsink" not in cmd
     assert "fdsink" not in cmd
     assert "video/x-raw,format=BGR" not in cmd
     assert "sync=false" in cmd
@@ -78,6 +85,86 @@ def test_direct_receiver_can_center_crop_to_square():
     assert "right=420" in cmd
     assert cmd.index("videocrop") > cmd.index("videoconvert")
     assert cmd.index("videocrop") < cmd.index("d3d11videosink")
+
+
+def test_direct_receiver_can_tee_viewport_frames_to_raw_pipe():
+    cmd = build_direct_receiver_cmd(
+        "gst-launch-1.0",
+        DirectReceiverConfig(
+            name="Primary Camera",
+            codec="h264",
+            port=5000,
+            bind_address="192.168.1.1",
+            width=1920,
+            height=1080,
+            square_crop=True,
+            frame_pipe=True,
+        ),
+    )
+
+    assert "tee" in cmd
+    assert "name=viewport_t" in cmd
+    assert "viewport_t." in cmd
+    assert "fdsink" in cmd
+    assert "fd=1" in cmd
+    assert "d3d11videosink" in cmd
+    assert "video/x-raw,format=BGR,width=1080,height=1080,colorimetry=1:4:0:0,range=full" in cmd
+
+
+def test_direct_h264_receiver_can_forward_compressed_rtp_for_recording():
+    cmd = build_direct_receiver_cmd(
+        "gst-launch-1.0",
+        DirectReceiverConfig(
+            name="Aux Camera",
+            codec="h264",
+            port=5002,
+            bind_address="192.168.1.1",
+            latency_ms=5,
+            record_rtp_port=7002,
+        ),
+    )
+
+    assert "tee" in cmd
+    assert "name=rtp_t" in cmd
+    assert "rtp_t." in cmd
+    assert "udpsink" in cmd
+    assert "host=127.0.0.1" in cmd
+    assert "port=7002" in cmd
+    record_branch_start = len(cmd) - list(reversed(cmd)).index("rtp_t.") - 1
+    record_branch = cmd[record_branch_start:]
+    assert "max-size-buffers=0" in record_branch
+    assert "leaky=downstream" not in record_branch
+    assert "rtph264depay" in cmd
+    assert "d3d11videosink" in cmd
+    assert "fdsink" not in cmd
+
+
+def test_compressed_h264_record_command_copies_without_decoding(tmp_path):
+    target = tmp_path / "compressed.partial.ts"
+    sdp = tmp_path / "compressed.sdp"
+    cmd = build_h264_rtp_mp4_record_cmd(
+        "ffmpeg",
+        H264RtpMp4RecordConfig(
+            name="Aux Camera",
+            port=7002,
+            out_path=target,
+            sdp_path=sdp,
+            latency_ms=250,
+        ),
+    )
+
+    assert cmd[0] == "ffmpeg"
+    assert "-protocol_whitelist" in cmd
+    assert "file,udp,rtp" in cmd
+    assert str(sdp.resolve()).replace("\\", "/") in cmd
+    assert "-c:v" in cmd
+    assert "copy" in cmd
+    assert "-f" in cmd
+    assert "mpegts" in cmd
+    assert str(target.resolve()).replace("\\", "/") in cmd
+    assert "decodebin" not in cmd
+    assert "videoconvert" not in cmd
+    assert "video/x-raw" not in cmd
 
 
 def test_video_tabs_selects_direct_widget_for_direct3d_stream():
@@ -156,6 +243,33 @@ class _FakeRecorder:
         self.stopped = True
 
 
+class _FakeCompressedRecorder:
+    instances = []
+
+    def __init__(self, out_path, *, name, port, bind_address="127.0.0.1", latency_ms=250):
+        self.out_path = Path(out_path)
+        self.name = name
+        self.port = int(port)
+        self.bind_address = bind_address
+        self.latency_ms = int(latency_ms)
+        self.target = self.out_path
+        self.stopped = False
+        self.stop_timeout_s = None
+        _FakeCompressedRecorder.instances.append(self)
+
+    def start(self):
+        self.out_path.parent.mkdir(parents=True, exist_ok=True)
+        self.out_path.touch()
+        return self.target
+
+    def stop(self, timeout_s=5.0, *, drain_pending=True):
+        self.stop_timeout_s = timeout_s
+        self.stopped = True
+
+    def queue_size(self):
+        return 0
+
+
 def test_direct_widget_snapshot_and_recording_use_capture_receiver(monkeypatch, tmp_path):
     app = _app()
     monkeypatch.setattr("gui.direct_gst_video_widget.DirectGstVideoWidget._start_connect", lambda self: None)
@@ -201,6 +315,7 @@ def test_direct_widget_snapshot_and_recording_use_capture_receiver(monkeypatch, 
         assert widget._snapshot_badge.parent() is widget._capture_overlay
         assert widget._record_badge.parent() is widget._capture_overlay
         assert widget._capture_overlay.isWindow() is True
+        assert not bool(widget._capture_overlay.windowFlags() & Qt.WindowType.WindowStaysOnTopHint)
         assert widget._capture_overlay.isVisible() is True
         assert widget._snapshot_badge.isVisible() is True
 
@@ -215,6 +330,119 @@ def test_direct_widget_snapshot_and_recording_use_capture_receiver(monkeypatch, 
         assert rec.stopped is True
         assert rec.stop_timeout_s == 10.0
         assert rec.stop_drain_pending is True
+    finally:
+        widget.close()
+        widget.deleteLater()
+        app.processEvents()
+
+
+def test_direct_widget_prefers_compressed_rtp_recording(monkeypatch, tmp_path):
+    app = _app()
+    monkeypatch.setattr("gui.direct_gst_video_widget.DirectGstVideoWidget._start_connect", lambda self: None)
+    monkeypatch.setattr("gui.direct_gst_video_widget.CompressedRtpRecorder", _FakeCompressedRecorder)
+    _FakeCompressedRecorder.instances = []
+
+    class _FakeProc:
+        def poll(self):
+            return None
+
+    manager = _FakeManager()
+    widget = DirectGstVideoWidget(manager, "Aux Camera")
+    widget._proc = _FakeProc()
+    widget._compressed_recording_available = True
+    widget._compressed_record_port = 7002
+    widget._compressed_record_host = "127.0.0.1"
+    widget._compressed_record_latency_ms = 250
+    try:
+        target = widget.start_recording(out_dir=str(tmp_path), basename="aux", fps=30.0)
+        assert target is not None
+        assert widget.is_recording() is True
+        assert manager.opened == 0
+        assert len(_FakeCompressedRecorder.instances) == 1
+        rec = _FakeCompressedRecorder.instances[0]
+        assert rec.port == 7002
+        assert rec.latency_ms == 250
+        assert widget._record_thread is None
+
+        widget.stop_recording()
+        deadline = time.monotonic() + 1.0
+        while not rec.stopped and time.monotonic() < deadline:
+            app.processEvents()
+            time.sleep(0.01)
+        assert rec.stopped is True
+        assert rec.stop_timeout_s == 10.0
+        assert widget.is_recording() is False
+    finally:
+        widget.close()
+        widget.deleteLater()
+        app.processEvents()
+
+
+def test_direct_widget_prefers_viewport_frame_pipe_for_capture(monkeypatch, tmp_path):
+    app = _app()
+    monkeypatch.setattr("gui.direct_gst_video_widget.DirectGstVideoWidget._start_connect", lambda self: None)
+    monkeypatch.setattr("gui.direct_gst_video_widget.VideoRecorder", _FakeRecorder)
+
+    def _fake_save_snapshot(frame, out_path):
+        Path(out_path).parent.mkdir(parents=True, exist_ok=True)
+        Path(out_path).touch()
+
+    monkeypatch.setattr("gui.direct_gst_video_widget.save_snapshot", _fake_save_snapshot)
+
+    frame = np.zeros((16, 24, 3), dtype=np.uint8)
+    frame[:, :, 0] = 90
+    packet = SimpleNamespace(
+        frame_bgr=frame,
+        seq=7,
+        monotonic_ts=time.monotonic(),
+        wall_ts=time.time(),
+    )
+
+    class _FakeViewportReader:
+        def latest_frame_packet(self):
+            return packet
+
+        def read_frame_packet(self):
+            return packet
+
+        def recent_frame_packets(self, *, max_age_s=0.5):
+            return [packet]
+
+    manager = _FakeManager()
+    widget = DirectGstVideoWidget(manager, "Primary Camera")
+    widget._viewport_reader = _FakeViewportReader()
+    widget._viewport_frame_pipe_enabled = True
+    try:
+        target = widget.start_recording(out_dir=str(tmp_path), basename="primary", fps=30.0)
+        assert target is not None
+        assert manager.opened == 0
+
+        rec = widget._rec
+        deadline = time.monotonic() + 1.0
+        while rec is not None and not rec.frames and time.monotonic() < deadline:
+            app.processEvents()
+            time.sleep(0.01)
+        assert rec is not None
+        assert rec.frames
+        assert int(rec.frames[0][0, 0, 0]) == 90
+        assert manager.opened == 0
+
+        snap_path = widget.save_snapshot(out_dir=str(tmp_path), basename="viewport-snap")
+        deadline = time.monotonic() + 1.0
+        while snap_path and not Path(snap_path).exists() and time.monotonic() < deadline:
+            app.processEvents()
+            time.sleep(0.01)
+        assert snap_path is not None
+        assert Path(snap_path).exists()
+        assert manager.opened == 0
+
+        widget.stop_recording()
+        deadline = time.monotonic() + 1.0
+        while rec is not None and not rec.stopped and time.monotonic() < deadline:
+            app.processEvents()
+            time.sleep(0.01)
+        assert rec is not None
+        assert rec.stopped is True
     finally:
         widget.close()
         widget.deleteLater()
