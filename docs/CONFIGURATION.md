@@ -99,6 +99,16 @@ The multi-camera value applies to three- and four-pane layouts. Lowering it can
 make quad view feel smoother on a loaded laptop because the UI stops trying to
 scale and repaint every pane at full camera rate.
 
+Stereo recording uses the 30 fps camera streams but saves timestamped left/right
+pairs at a lower cadence for TritonAnalysis. The default is 5 fps, which gives
+photogrammetry a denser path than the old sparse capture while avoiding an
+unbounded image-write load:
+
+```powershell
+$env:TRITON_STEREO_RECORD_FPS="5"
+$env:TRITON_STEREO_RECORD_FPS_MAX="15"
+```
+
 Video recording uses the full decoded capture frame, not the scaled viewport
 pixmap. MP4 output defaults to the bundled ffmpeg/libx264 writer with a
 high-quality CRF of `15`; OpenCV is only a final rescue backend because its MP4

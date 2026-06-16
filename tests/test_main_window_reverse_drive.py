@@ -1126,6 +1126,44 @@ def test_stereo_page_omits_disparity_preview_controls(tmp_path):
         app.processEvents()
 
 
+def test_stereo_page_defaults_to_denser_recording_fps(tmp_path):
+    app = _app()
+    from config import STEREO_RECORD_FPS_DEFAULT, STEREO_RECORD_FPS_MAX
+    from gui.stereo_page import StereoPage
+
+    streams_path = tmp_path / "streams.json"
+    streams_path.write_text(
+        json.dumps(
+            {
+                "streams": [{"name": "Primary Camera"}, {"name": "Aux Camera"}],
+                "stereo_pairs": [
+                    {
+                        "name": "Forward Stereo",
+                        "left": "Primary Camera",
+                        "right": "Aux Camera",
+                        "rig_id": "rig-a",
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    page = StereoPage(
+        streams_path=str(streams_path),
+        manager=_FakeRemoteCameraManager(str(streams_path)),
+    )
+    try:
+        app.processEvents()
+        assert page.record_fps_spin.value() == pytest.approx(
+            min(STEREO_RECORD_FPS_DEFAULT, STEREO_RECORD_FPS_MAX)
+        )
+        assert page.record_fps_spin.maximum() == pytest.approx(STEREO_RECORD_FPS_MAX)
+    finally:
+        page.close()
+        app.processEvents()
+
+
 def test_stereo_page_scrolls_control_column_independently(tmp_path):
     app = _app()
     from gui.stereo_page import StereoPage

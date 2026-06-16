@@ -42,6 +42,16 @@ Stereo pairs live in `data/streams.json` under `stereo_pairs`:
 The stream names must match entries in the normal `streams` list. The stereo
 configuration does not change the normal pilot video layout.
 
+The camera streams currently run at 1080p30. In-app stereo recording defaults
+to saving paired frames at 5 fps so photogrammetry receives a denser path while
+still leaving room for image encoding and disk writes. For a pool test, override
+the default without editing code:
+
+```powershell
+$env:TRITON_STEREO_RECORD_FPS="8"
+$env:TRITON_STEREO_RECORD_FPS_MAX="15"
+```
+
 ## Capture Workflow
 
 In TritonPilot's main pilot view, press `C` to route controller capture through

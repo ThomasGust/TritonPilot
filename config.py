@@ -155,6 +155,8 @@ VIDEO_STOP_HIDDEN_STREAMS = os.environ.get("TRITON_VIDEO_STOP_HIDDEN_STREAMS", "
 VIDEO_DISPLAY_FPS_SINGLE = _float_env("TRITON_VIDEO_DISPLAY_FPS_SINGLE", 30.0, min_value=1.0, max_value=60.0)
 VIDEO_DISPLAY_FPS_DUAL = _float_env("TRITON_VIDEO_DISPLAY_FPS_DUAL", 30.0, min_value=1.0, max_value=60.0)
 VIDEO_DISPLAY_FPS_MULTI = _float_env("TRITON_VIDEO_DISPLAY_FPS_MULTI", 30.0, min_value=1.0, max_value=60.0)
+STEREO_RECORD_FPS_DEFAULT = _float_env("TRITON_STEREO_RECORD_FPS", 5.0, min_value=0.1, max_value=15.0)
+STEREO_RECORD_FPS_MAX = _float_env("TRITON_STEREO_RECORD_FPS_MAX", 15.0, min_value=1.0, max_value=30.0)
 
 # Where your JSON with stream definitions lives.
 STREAMS_FILE = streams_file_path()

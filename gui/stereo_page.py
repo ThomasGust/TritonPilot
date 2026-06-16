@@ -28,6 +28,7 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 
+from config import STEREO_RECORD_FPS_DEFAULT, STEREO_RECORD_FPS_MAX
 from recording.capture_trace import trace_event
 from recording.save_location import DEFAULT_RECORDINGS_DIR
 from stereo.capture import StereoCaptureInterrupted, StereoCaptureSession
@@ -428,11 +429,11 @@ class StereoPage(QWidget):
         record_grid.setHorizontalSpacing(8)
         record_grid.setVerticalSpacing(6)
         self.record_fps_spin = QDoubleSpinBox()
-        self.record_fps_spin.setRange(0.1, 10.0)
+        self.record_fps_spin.setRange(0.1, max(1.0, float(STEREO_RECORD_FPS_MAX)))
         self.record_fps_spin.setDecimals(1)
         self.record_fps_spin.setSingleStep(0.5)
         self.record_fps_spin.setSuffix(" fps")
-        self.record_fps_spin.setValue(2.5)
+        self.record_fps_spin.setValue(min(float(STEREO_RECORD_FPS_DEFAULT), self.record_fps_spin.maximum()))
         record_grid.addWidget(QLabel("Record FPS"), 0, 0)
         record_grid.addWidget(self.record_fps_spin, 1, 0)
         capture_card.body.addLayout(record_grid)
