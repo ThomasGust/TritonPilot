@@ -117,7 +117,8 @@ Tool scripts are intentionally direct and practical:
 - Controller probes inspect joystick mappings.
 - Sensor subscriber tools verify telemetry without the full GUI.
 - Network diagnostics measure tether health.
-- Water-correction and RealityScan helpers process recorded media.
+- Water-correction helpers process recorded media; RealityScan reconstruction
+  lives in the sibling TritonAnalysis checkout.
 - Tether NAT setup helps the pilot computer share internet with the ROV.
 
 Tools may be more specialized than library code, but they should still avoid
