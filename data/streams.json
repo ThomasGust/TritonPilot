@@ -40,6 +40,9 @@
       "h264_gop": 15,
       "rtp_mtu": 1200,
       "latency_ms": 5,
+      "receiver_capture_latency_ms": 250,
+      "receiver_capture_drop_on_latency": false,
+      "receiver_capture_udp_buffer_size": 8388608,
       "extra": {
         "udp_qos_dscp": 34,
         "sender_leaky_queues": true,
@@ -69,6 +72,9 @@
       "h264_gop": 15,
       "rtp_mtu": 1200,
       "latency_ms": 5,
+      "receiver_capture_latency_ms": 250,
+      "receiver_capture_drop_on_latency": false,
+      "receiver_capture_udp_buffer_size": 8388608,
       "extra": {
         "udp_qos_dscp": 34,
         "sender_leaky_queues": true,
@@ -98,6 +104,9 @@
       "h264_gop": 15,
       "rtp_mtu": 1200,
       "latency_ms": 5,
+      "receiver_capture_latency_ms": 250,
+      "receiver_capture_drop_on_latency": false,
+      "receiver_capture_udp_buffer_size": 8388608,
       "extra": {
         "udp_qos_dscp": 34,
         "sender_leaky_queues": true,
@@ -127,6 +136,9 @@
       "h264_gop": 15,
       "rtp_mtu": 1200,
       "latency_ms": 5,
+      "receiver_capture_latency_ms": 250,
+      "receiver_capture_drop_on_latency": false,
+      "receiver_capture_udp_buffer_size": 8388608,
       "extra": {
         "udp_qos_dscp": 34,
         "sender_leaky_queues": true,

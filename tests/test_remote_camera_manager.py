@@ -170,6 +170,82 @@ def test_capture_receiver_can_close_async_after_refcount_reaches_zero(monkeypatc
     assert released.wait(timeout=1.0)
 
 
+def test_h264_capture_receiver_uses_capture_grade_jitter_defaults(monkeypatch):
+    started = []
+
+    class _FakeReceiverProcess:
+        def __init__(self, cfg):
+            self.cfg = cfg
+            started.append(cfg)
+
+        def start(self):
+            pass
+
+        def stop(self, grace_s=0.15):
+            pass
+
+    monkeypatch.setattr(cam_module, "ReceiverProcess", _FakeReceiverProcess)
+
+    cam_module.RemoteCaptureCamera(
+        name="Front",
+        width=1920,
+        height=1080,
+        fps=30,
+        video_format="h264",
+        port=6000,
+        latency_ms=5,
+        windows_host="192.168.1.1",
+        stream_opts={"name": "Front", "video_format": "h264", "latency_ms": 5},
+    )
+
+    assert len(started) == 1
+    cfg = started[0]
+    assert cfg.latency_ms == 250
+    assert cfg.drop_on_latency is False
+    assert cfg.udp_buffer_size == 8 * 1024 * 1024
+
+
+def test_h264_capture_receiver_honors_capture_specific_overrides(monkeypatch):
+    started = []
+
+    class _FakeReceiverProcess:
+        def __init__(self, cfg):
+            self.cfg = cfg
+            started.append(cfg)
+
+        def start(self):
+            pass
+
+        def stop(self, grace_s=0.15):
+            pass
+
+    monkeypatch.setattr(cam_module, "ReceiverProcess", _FakeReceiverProcess)
+
+    cam_module.RemoteCaptureCamera(
+        name="Front",
+        width=1920,
+        height=1080,
+        fps=30,
+        video_format="h264",
+        port=6000,
+        latency_ms=5,
+        windows_host="192.168.1.1",
+        stream_opts={
+            "name": "Front",
+            "video_format": "h264",
+            "latency_ms": 5,
+            "receiver_capture_latency_ms": 120,
+            "receiver_capture_drop_on_latency": True,
+            "receiver_capture_udp_buffer_size": 1234567,
+        },
+    )
+
+    cfg = started[0]
+    assert cfg.latency_ms == 120
+    assert cfg.drop_on_latency is True
+    assert cfg.udp_buffer_size == 1234567
+
+
 def test_restart_capture_stream_preserves_capture_mirror(monkeypatch, tmp_path):
     calls = []
 
@@ -262,3 +338,43 @@ def test_capture_camera_decode_rejects_green_startup_artifact():
 
     assert decoded is not None
     assert decoded.seq == 3
+
+
+def test_capture_camera_decode_rejects_textured_green_channel_collapse():
+    camera = cam_module.RemoteCaptureCamera.__new__(cam_module.RemoteCaptureCamera)
+    camera.name = "Front"
+    camera.width = 64
+    camera.height = 48
+    camera._last_rejected_artifact_seq = None
+
+    y = np.linspace(55, 210, camera.height, dtype=np.uint8)[:, None]
+    x = np.linspace(0, 35, camera.width, dtype=np.uint8)[None, :]
+    artifact = np.zeros((camera.height, camera.width, 3), dtype=np.uint8)
+    artifact[:, :, 1] = np.clip(y + x, 0, 255)
+    artifact[::8, ::8, 0] = 8
+    artifact[5::9, 4::7, 2] = 10
+    artifact_packet = SimpleNamespace(
+        data=artifact.tobytes(),
+        seq=4,
+        monotonic_ts=time.monotonic(),
+        wall_ts=time.time(),
+    )
+
+    assert camera._decode_packet(artifact_packet) is None
+
+    normal = np.zeros((camera.height, camera.width, 3), dtype=np.uint8)
+    normal[:, :, 0] = 150
+    normal[:, :, 1] = 158
+    normal[:, :, 2] = 142
+    normal[::2, ::2, :] = 210
+    normal_packet = SimpleNamespace(
+        data=normal.tobytes(),
+        seq=5,
+        monotonic_ts=time.monotonic(),
+        wall_ts=time.time(),
+    )
+
+    decoded = camera._decode_packet(normal_packet)
+
+    assert decoded is not None
+    assert decoded.seq == 5

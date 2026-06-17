@@ -30,6 +30,32 @@ def looks_like_green_startup_artifact(frame: np.ndarray) -> bool:
         return False
 
 
+def looks_like_green_channel_collapse_artifact(frame: np.ndarray) -> bool:
+    """Detect H.264 loss artifacts where almost all luminance lands in green."""
+
+    try:
+        arr = np.asarray(frame)
+        if arr.ndim != 3 or arr.shape[2] < 3:
+            return False
+        h, w = int(arr.shape[0]), int(arr.shape[1])
+        sample = arr[:: max(1, h // 120), :: max(1, w // 160), :3].astype(np.float32, copy=False)
+        flat = sample.reshape(-1, 3)
+        mean_b, mean_g, mean_r = [float(v) for v in flat.mean(axis=0)]
+        if mean_g < 45.0:
+            return False
+        max_non_green = max(mean_b, mean_r)
+        if max_non_green > 35.0 or (mean_g - max_non_green) < 40.0:
+            return False
+        b = flat[:, 0]
+        g = flat[:, 1]
+        r = flat[:, 2]
+        greenish = ((g > r * 1.35 + 12.0) & (g > b * 1.35 + 12.0) & (g > 45.0)).mean()
+        dead_rb = ((r < 24.0) & (b < 24.0) & (g > 45.0)).mean()
+        return bool(greenish > 0.92 and dead_rb > 0.80)
+    except Exception:
+        return False
+
+
 def looks_like_blank_startup_artifact(frame: np.ndarray) -> bool:
     """Detect near-black/blank frames that are not useful camera captures."""
 
@@ -56,6 +82,8 @@ def looks_like_blank_startup_artifact(frame: np.ndarray) -> bool:
 def capture_frame_rejection_reason(frame: np.ndarray) -> str | None:
     if looks_like_green_startup_artifact(frame):
         return "green_startup_artifact"
+    if looks_like_green_channel_collapse_artifact(frame):
+        return "green_channel_collapse_artifact"
     if looks_like_blank_startup_artifact(frame):
         return "blank_startup_artifact"
     return None

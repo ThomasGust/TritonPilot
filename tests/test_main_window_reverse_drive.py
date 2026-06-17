@@ -791,8 +791,8 @@ def test_stereo_page_applies_configured_pair_layout(monkeypatch, tmp_path):
         assert panel.controls_enabled is False
         assert win._stereo_page.rig_lbl.text() == "rig-a"
         assert win._stereo_page.baseline_lbl.text() == "120 mm"
-        assert panel.video_widget_for_stream("Primary Camera").capture_frame_pipe_enabled is True
-        assert panel.video_widget_for_stream("Aux Camera").capture_frame_pipe_enabled is True
+        assert panel.video_widget_for_stream("Primary Camera").capture_frame_pipe_enabled is False
+        assert panel.video_widget_for_stream("Aux Camera").capture_frame_pipe_enabled is False
         assert win._video_frame_source("Primary Camera", require_packet=True) is None
         assert sorted(win.cam_mgr.capture_opened) == ["Aux Camera", "Primary Camera"]
 
@@ -803,6 +803,62 @@ def test_stereo_page_applies_configured_pair_layout(monkeypatch, tmp_path):
         assert panel.video_widget_for_stream("Primary Camera").capture_frame_pipe_enabled is False
         assert panel.video_widget_for_stream("Aux Camera").capture_frame_pipe_enabled is False
         assert sorted(win.cam_mgr.capture_closed) == ["Aux Camera", "Primary Camera"]
+    finally:
+        win.close()
+        app.processEvents()
+
+
+def test_stereo_page_can_opt_into_viewport_frame_pipe(monkeypatch, tmp_path):
+    app = _app()
+    streams_path = tmp_path / "streams.json"
+    streams_path.write_text(
+        """
+        {
+          "streams": [
+            {"name": "Primary Camera"},
+            {"name": "Aux Camera"}
+          ],
+          "stereo_pairs": [
+            {
+              "name": "Forward Stereo",
+              "left": "Primary Camera",
+              "right": "Aux Camera",
+              "rig_id": "rig-a"
+            }
+          ]
+        }
+        """,
+        encoding="utf-8",
+    )
+
+    monkeypatch.setattr(main_window, "QSettings", lambda *args, **kwargs: _FakeSettings())
+    monkeypatch.setattr(main_window, "PilotPublisherService", _FakePilotService)
+    monkeypatch.setattr(main_window, "SensorSubscriberService", _FakeSensorService)
+    monkeypatch.setattr(main_window, "RemoteCameraManager", _FakeRemoteCameraManager)
+    monkeypatch.setattr(main_window, "VideoTabs", _FakeVideoPanel)
+    monkeypatch.setattr(main_window, "HoldTestPanel", _SimplePage)
+    monkeypatch.setattr(main_window, "ManagementPage", _SimplePage)
+    monkeypatch.setattr(main_window.threading, "Thread", _NoopThread)
+
+    win = main_window.MainWindow(str(streams_path))
+    try:
+        app.processEvents()
+        panel = win.video_panel
+        assert panel is not None
+        win.cam_mgr.stream_defs["Primary Camera"]["receiver_viewport_frame_pipe"] = True
+        win.cam_mgr.stream_defs["Aux Camera"]["receiver_viewport_frame_pipe"] = True
+        panel.video_widget_for_stream("Primary Camera").packet = object()
+        panel.video_widget_for_stream("Aux Camera").packet = object()
+
+        win._set_center_page("stereo", announce=False)
+        app.processEvents()
+
+        assert panel.video_widget_for_stream("Primary Camera").capture_frame_pipe_enabled is True
+        assert panel.video_widget_for_stream("Aux Camera").capture_frame_pipe_enabled is True
+        assert win._video_frame_source("Primary Camera", require_packet=True) is panel.video_widget_for_stream(
+            "Primary Camera"
+        )
+        assert win.cam_mgr.capture_opened == []
     finally:
         win.close()
         app.processEvents()

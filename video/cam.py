@@ -26,6 +26,32 @@ from video.rov_streams import ROVStreams
 logger = logging.getLogger(__name__)
 
 
+def _stream_int(stream_opts: dict, *names: str, default: int) -> int:
+    for name in names:
+        if name not in stream_opts or stream_opts.get(name) is None:
+            continue
+        try:
+            return int(float(stream_opts.get(name)))
+        except Exception:
+            continue
+    return int(default)
+
+
+def _stream_bool(stream_opts: dict, *names: str, default: bool) -> bool:
+    for name in names:
+        if name not in stream_opts or stream_opts.get(name) is None:
+            continue
+        value = stream_opts.get(name)
+        if isinstance(value, bool):
+            return bool(value)
+        text = str(value).strip().lower()
+        if text in {"1", "true", "yes", "on"}:
+            return True
+        if text in {"0", "false", "no", "off"}:
+            return False
+    return bool(default)
+
+
 def _endpoint_for_rov(rov: ROVStreams) -> str:
     return str(getattr(rov, "endpoint", VIDEO_RPC_ENDPOINT) or VIDEO_RPC_ENDPOINT)
 
@@ -341,6 +367,27 @@ class RemoteCaptureCamera:
             str(stream_opts.get("video_format", video_format)).lower() == "h264"
             or str(stream_opts.get("encode", "")).lower() == "h264"
         )
+        display_latency_ms = _stream_int(stream_opts, "latency_ms", default=self.latency_ms)
+        display_drop_on_latency = _stream_bool(stream_opts, "receiver_drop_on_latency", default=True)
+        capture_latency_ms = _stream_int(
+            stream_opts,
+            "receiver_capture_latency_ms",
+            "capture_latency_ms",
+            default=max(250 if tx_is_h264 else display_latency_ms, display_latency_ms),
+        )
+        capture_drop_on_latency = _stream_bool(
+            stream_opts,
+            "receiver_capture_drop_on_latency",
+            "capture_drop_on_latency",
+            default=False if tx_is_h264 else display_drop_on_latency,
+        )
+        capture_udp_buffer_size = _stream_int(
+            stream_opts,
+            "receiver_capture_udp_buffer_size",
+            "capture_udp_buffer_size",
+            "receiver_udp_buffer_size",
+            default=8 * 1024 * 1024 if tx_is_h264 else 4 * 1024 * 1024,
+        )
 
         bind_rx = bool(stream_opts.get("bind_receiver_to_host", True))
         rx_extra = {}
@@ -370,13 +417,13 @@ class RemoteCaptureCamera:
             codec="h264" if tx_is_h264 else "jpeg",
             port=self.port,
             bind_address=self.windows_host if bind_rx else "0.0.0.0",
-            latency_ms=int(stream_opts.get("latency_ms", self.latency_ms)),
+            latency_ms=int(capture_latency_ms),
             mode="raw",
             width=self.width,
             height=self.height,
             channel_order=self.channel_order,
-            udp_buffer_size=int(stream_opts.get("receiver_udp_buffer_size", 4 * 1024 * 1024)),
-            drop_on_latency=bool(stream_opts.get("receiver_drop_on_latency", True)),
+            udp_buffer_size=int(capture_udp_buffer_size),
+            drop_on_latency=bool(capture_drop_on_latency),
             extra=rx_extra,
         )
         self.rx = ReceiverProcess(rx_cfg)
@@ -387,6 +434,9 @@ class RemoteCaptureCamera:
             port=self.port,
             windows_host=self.windows_host,
             codec=rx_cfg.codec,
+            latency_ms=rx_cfg.latency_ms,
+            drop_on_latency=rx_cfg.drop_on_latency,
+            udp_buffer_size=rx_cfg.udp_buffer_size,
         )
 
     def read(self):

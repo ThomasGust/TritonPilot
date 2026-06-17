@@ -878,7 +878,12 @@ class MainWindow(QMainWindow):
                 active_name=pair.left,
                 emit=True,
             )
-            self._set_stereo_viewport_capture_streams(pair.left, pair.right)
+            viewport_sources = [
+                name
+                for name in (pair.left, pair.right)
+                if self._stream_uses_viewport_frame_pipe(name)
+            ]
+            self._set_stereo_viewport_capture_streams(*viewport_sources)
             self._warm_stereo_capture_receivers(pair.left, pair.right)
             self._resume_video_panel()
         except Exception:
