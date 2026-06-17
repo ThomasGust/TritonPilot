@@ -115,6 +115,9 @@ Per-stream receiver options in `data/streams.json`:
   use `30` in the checked-in profile so ROV-side stereo still captures can wait
   for fresh paired samples without the 4 FPS still-photo default becoming the
   limiting factor
+- `extra.rov_snapshot_jpeg_quality`: onboard JPEG encoder quality for ROV-side
+  snapshots. Primary and Aux use `98` so the still-save path adds minimal extra
+  compression after the camera stream has already been decoded.
 - `extra.v4l2_controls.exposure_dynamic_framerate`: set to `0` to prevent the
   camera from lowering frame rate for exposure, which can look like video lag
 
@@ -134,7 +137,9 @@ Top-level stream layout knobs:
 - `stereo_pairs`: configured left/right still-capture pairs. The checked-in
   pair is `Forward Stereo`, with `Primary Camera` as left and `Aux Camera` as
   right. TritonPilot uses this for keyboard stereo capture mode and preserves
-  the historical `stereo_sessions/<session>/manifest.json` schema.
+  the historical `stereo_sessions/<session>/manifest.json` schema. The default
+  `max_pair_delta_ms` is `20`, which keeps accepted pairs tighter while still
+  leaving room for best-effort software sync at 30 FPS.
 
 The current default streams are:
 

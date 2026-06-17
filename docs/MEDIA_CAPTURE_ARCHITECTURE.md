@@ -21,17 +21,27 @@ asks TritonOS to pull the latest image from that stream's local `appsink`
 snapshot branch. The branch is built into the running camera pipeline with a
 `tee`, so the normal RTP display sender does not need to be stopped, restarted,
 or read back from the GUI. H.264 streams are decoded at a low snapshot rate and
-encoded to JPEG locally on the ROV; TritonPilot saves those compressed bytes as
-`<stream>_<timestamp>.jpg` under the app session folder. If the ROV does not
-support the RPC yet, Pilot can fall back to the older top-side mirror tap and
-save a decoded source-frame PNG.
+encoded to high-quality JPEG locally on the ROV; TritonPilot saves those
+compressed bytes as `<stream>_<timestamp>.jpg` under the app session folder. If
+the ROV does not support the RPC yet, Pilot can fall back to the older top-side
+mirror tap and save a decoded source-frame PNG.
 
 Stereo still capture uses the same onboard snapshot branches but asks TritonOS
 to capture the left and right streams together. The ROV drains stale samples,
 waits for fresh left/right samples in parallel, records common-process monotonic
-timestamps, and rejects pairs outside the configured `max_pair_delta_ms`.
+timestamps immediately after each appsink pull, and rejects pairs outside the
+configured `max_pair_delta_ms`. The checked-in forward stereo pair currently
+uses a `20` ms gate.
 TritonPilot writes the returned images under
 `stereo_sessions/<session>/left` and `right`, and keeps the
 `tritonpilot.stereo_capture_manifest` schema used by older app sessions.
 Keyboard `C` toggles between standard snapshot mode and stereo mode. Keyboard
 `N` starts a new stereo session inside the active app session folder.
+
+The current onboard still branch is clean and display-safe, but it is still
+fed by the live camera H.264 stream for these cameras. Raising the ROV JPEG
+quality prevents the capture-save path from adding much extra loss, but motion
+compression that already exists in the camera's H.264 frame cannot be removed.
+The next quality step for calibration-grade stills is a camera-native MJPEG or
+raw still source that can run alongside the display stream without stealing the
+device.

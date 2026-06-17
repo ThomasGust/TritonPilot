@@ -11,6 +11,7 @@ def test_checked_in_streams_use_direct3d_display_profile_with_onboard_snapshots(
     assert config["stereo_pairs"][0]["name"] == "Forward Stereo"
     assert config["stereo_pairs"][0]["left"] == "Primary Camera"
     assert config["stereo_pairs"][0]["right"] == "Aux Camera"
+    assert config["stereo_pairs"][0]["max_pair_delta_ms"] == 20
     assert config["snapshot_prewarm_count"] == 0
     assert "receiver_snapshot_output_fps" not in config
 
@@ -22,6 +23,7 @@ def test_checked_in_streams_use_direct3d_display_profile_with_onboard_snapshots(
         assert stream["latency_ms"] == 5
         assert stream["receiver_h264_decoder"] == "openh264dec"
         assert stream["extra"].get("rov_snapshot_fps") == (30 if is_stereo_stream else None)
+        assert stream["extra"].get("rov_snapshot_jpeg_quality") == (98 if is_stereo_stream else None)
         assert stream["extra"]["sender_leaky_queues"] is True
         assert stream["extra"]["sender_queue_max_buffers"] == 1
         assert stream["extra"]["sender_queue_max_time_ms"] == 0

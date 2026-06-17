@@ -16,7 +16,7 @@
       "right": "Aux Camera",
       "rig_id": "explorehd_forward_v1",
       "calibration_id": null,
-      "max_pair_delta_ms": 50,
+      "max_pair_delta_ms": 20,
       "apply_stream_rotation": true,
       "enabled": true,
       "metadata": {
@@ -100,6 +100,7 @@
       "extra": {
         "udp_qos_dscp": 34,
         "rov_snapshot_fps": 30,
+        "rov_snapshot_jpeg_quality": 98,
         "sender_leaky_queues": true,
         "sender_queue_max_buffers": 1,
         "sender_queue_max_time_ms": 0,
@@ -129,6 +130,7 @@
       "extra": {
         "udp_qos_dscp": 34,
         "rov_snapshot_fps": 30,
+        "rov_snapshot_jpeg_quality": 98,
         "sender_leaky_queues": true,
         "sender_queue_max_buffers": 1,
         "sender_queue_max_time_ms": 0,
