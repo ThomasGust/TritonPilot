@@ -3,14 +3,14 @@
 TritonPilot is the topside operator application for Triton's ROV. It runs on
 the pilot computer, reads the game controller, publishes pilot commands to the
 ROV, receives live telemetry, starts and stops onboard camera streams, displays
-GStreamer video panes, records sensor/video data, and exposes operator-facing
+GStreamer video panes, records stream/sensor logs, and exposes operator-facing
 management tools.
 
 Mission-specific analysis applets are intentionally not part of this
 repository. During competition, detection, measurement, and scoring workflows
 run from the sibling `TritonAnalysis` repository on a separate analysis
 computer. TritonPilot should stay focused on live vehicle operation and data
-capture.
+logging.
 
 ## What Runs On The Pilot Computer
 
@@ -24,7 +24,7 @@ services:
 - Management/calibration tools through the TritonOS management RPC endpoint on
   port `5556`
 - Local UDP video receive pipelines using GStreamer
-- Snapshot, video, stream-log, and raw-sensor CSV recording
+- Stream-log and raw-sensor CSV recording
 
 The normal runtime relationship is:
 
@@ -54,8 +54,8 @@ gui/                PyQt windows, panels, video tabs, instruments, raw sensors
 input/              Controller discovery and PilotFrame publishing
 telemetry/          Sensor subscriber and topside attitude estimator
 video/              GStreamer receive path, camera manager, frame correction
-recording/          Video writer, snapshots, JSONL logs, raw CSV capture
-stereo/             Stereo pair configuration and capture-session writer
+recording/          JSONL stream logs, raw CSV telemetry, save locations
+stereo/             Stereo calibration and disparity helpers
 network/            Management RPC, local network selection, ZMQ helpers
 schema/             Shared pilot-control wire schema
 tools/              Controller, telemetry, video, and tether diagnostics
@@ -125,27 +125,23 @@ requirements, stream ports, and diagnostics.
 
 ## Competition Workflow
 
-Use TritonPilot to operate the vehicle and save data. Use TritonAnalysis to
-interpret mission-specific images, video files, and manually entered task data.
+Use TritonPilot to operate the vehicle and save operational data. Use
+TritonAnalysis to interpret mission-specific images, videos, measurements, and
+manually entered task data.
 A healthy workflow is:
 
 1. Start TritonOS on the ROV.
 2. Start TritonPilot on the pilot computer.
 3. Verify controller, telemetry, management RPC, and video.
-4. Record the mission data needed by the team.
-5. Hand saved captures or measurements to the analysis computer, either by
-   USB drive or the integrated read-only
+4. Record the stream/raw sensor logs needed by the team.
+5. Hand saved logs or measurements to the analysis computer, either by USB
+   drive or the integrated read-only
    [Analysis Transfer Link](docs/ANALYSIS_TRANSFER.md). TritonPilot shows the
    transfer server state as `Analysis Share` in the status bar.
 
 TritonPilot is allowed to display raw data and diagnostics, but it should not
 grow mission-scoring applets. That separation keeps the piloting station
 predictable under competition pressure.
-
-Stereo capture is an operator capture mode in the main pilot view, not a
-scoring applet. It lets operators save timestamped stereo sessions for
-TritonAnalysis calibration while keeping live camera layouts in the driver
-window.
 
 ## Safety Notes
 

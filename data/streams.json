@@ -8,24 +8,6 @@
     "Arm Camera",
     "Back Gripper Camera"
   ],
-  "stereo_pairs": [
-    {
-      "name": "Forward Stereo",
-      "left": "Primary Camera",
-      "right": "Aux Camera",
-      "rig_id": "explorehd_forward_v1",
-      "calibration_id": null,
-      "max_pair_delta_ms": 50,
-      "apply_stream_rotation": true,
-      "enabled": true,
-      "metadata": {
-        "camera_model": "DeepWater Exploration exploreHD 3.0",
-        "baseline_mm": null,
-        "mount_notes": "Final baseline and toe angle are pending the stereo mount.",
-        "sync_notes": "Best-effort software pairing only; exploreHD uses rolling shutter and has no external trigger."
-      }
-    }
-  ],
   "streams": [
     {
       "name": "Arm Camera",
@@ -40,9 +22,6 @@
       "h264_gop": 15,
       "rtp_mtu": 1200,
       "latency_ms": 5,
-      "receiver_capture_latency_ms": 250,
-      "receiver_capture_drop_on_latency": false,
-      "receiver_capture_udp_buffer_size": 8388608,
       "extra": {
         "udp_qos_dscp": 34,
         "sender_leaky_queues": true,
@@ -56,7 +35,6 @@
       "receiver_h264_decoder": "openh264dec",
       "receiver_output_fps": 30,
       "port": 5001,
-      "capture_port": 6001,
       "enabled": true
     },
     {
@@ -72,9 +50,6 @@
       "h264_gop": 15,
       "rtp_mtu": 1200,
       "latency_ms": 5,
-      "receiver_capture_latency_ms": 250,
-      "receiver_capture_drop_on_latency": false,
-      "receiver_capture_udp_buffer_size": 8388608,
       "extra": {
         "udp_qos_dscp": 34,
         "sender_leaky_queues": true,
@@ -88,7 +63,6 @@
       "receiver_h264_decoder": "openh264dec",
       "receiver_output_fps": 30,
       "port": 5003,
-      "capture_port": 6003,
       "enabled": true
     },
     {
@@ -104,9 +78,6 @@
       "h264_gop": 15,
       "rtp_mtu": 1200,
       "latency_ms": 5,
-      "receiver_capture_latency_ms": 250,
-      "receiver_capture_drop_on_latency": false,
-      "receiver_capture_udp_buffer_size": 8388608,
       "extra": {
         "udp_qos_dscp": 34,
         "sender_leaky_queues": true,
@@ -120,7 +91,6 @@
       "receiver_h264_decoder": "openh264dec",
       "receiver_output_fps": 30,
       "port": 5000,
-      "capture_port": 6000,
       "enabled": true
     },
     {
@@ -136,9 +106,6 @@
       "h264_gop": 15,
       "rtp_mtu": 1200,
       "latency_ms": 5,
-      "receiver_capture_latency_ms": 250,
-      "receiver_capture_drop_on_latency": false,
-      "receiver_capture_udp_buffer_size": 8388608,
       "extra": {
         "udp_qos_dscp": 34,
         "sender_leaky_queues": true,
@@ -152,7 +119,6 @@
       "receiver_h264_decoder": "openh264dec",
       "receiver_output_fps": 30,
       "port": 5002,
-      "capture_port": 6002,
       "enabled": true
     }
   ]

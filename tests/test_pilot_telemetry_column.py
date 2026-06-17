@@ -8,7 +8,6 @@ pytest.importorskip("PyQt6")
 
 from PyQt6.QtWidgets import QApplication
 
-from gui import instruments
 from gui.instruments import PilotTelemetryColumn
 
 
@@ -19,67 +18,16 @@ def _app() -> QApplication:
     return app
 
 
-def test_pilot_telemetry_column_shows_stereo_capture_activity(monkeypatch):
+def test_pilot_telemetry_column_shows_analysis_share_status():
     app = _app()
-    monkeypatch.setattr(instruments.time, "time", lambda: 110.0)
     column = PilotTelemetryColumn()
     column.show()
     try:
         app.processEvents()
 
-        column.set_capture_mode("camera")
-        assert column.capture_activity_text.text() == ""
-        assert "C toggles" in column.capture_mode_text.text()
-
-        column.set_capture_mode("stereo")
-        assert column.capture_activity_text.text() == "STEREO READY"
-        assert "C toggles" in column.capture_mode_text.text()
-
-        column.set_capture_activity({"state": "single", "mode": "single", "count": 0})
-        assert column.capture_activity_text.text() == "STEREO CAPTURE | 0 pairs"
-
-        column.set_capture_activity(
-            {"state": "recording", "mode": "recording", "count": 3, "started_ts": 45.0}
-        )
-        assert column.capture_activity_text.text() == "STEREO REC 01:05 | 3 pairs"
-
-        column.set_capture_activity({"state": "stopping", "mode": "recording", "count": 3})
-        assert column.capture_activity_text.text() == "STEREO FINALIZING | 3 pairs"
-
-        column.set_capture_activity({"state": "completed", "count": 1, "manifest_path": "manifest.json"})
-        assert column.capture_activity_text.text() == "STEREO SAVED | 1 pair"
-        assert column.capture_activity_text.toolTip() == "manifest.json"
-    finally:
-        column.close()
-        column.deleteLater()
-        app.processEvents()
-
-
-def test_pilot_telemetry_column_prefers_monotonic_stereo_elapsed(monkeypatch):
-    app = _app()
-    now = {"monotonic": 250.0}
-    monkeypatch.setattr(instruments.time, "time", lambda: 10_000.0)
-    monkeypatch.setattr(instruments.time, "monotonic", lambda: now["monotonic"])
-    column = PilotTelemetryColumn()
-    column.show()
-    try:
-        app.processEvents()
-
-        column.set_capture_mode("stereo")
-        column.set_capture_activity(
-            {
-                "state": "recording",
-                "mode": "recording",
-                "count": 1,
-                "started_ts": 1.0,
-                "started_monotonic_s": 215.0,
-            }
-        )
-        assert column.capture_activity_text.text() == "STEREO REC 00:35 | 1 pair"
-
-        now["monotonic"] = 251.0
-        column._refresh_capture_activity_text()
-        assert column.capture_activity_text.text() == "STEREO REC 00:36 | 1 pair"
+        column.set_analysis_share("Analysis Share: ON http://10.77.0.1:8765", "warn")
+        assert "10.77.0.1" in column.analysis_text.text()
+        assert column.analysis_text.toolTip() == column.analysis_text.text()
     finally:
         column.close()
         column.deleteLater()

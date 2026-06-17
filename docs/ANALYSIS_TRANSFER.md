@@ -163,7 +163,7 @@ files.
 ## Field Notes
 
 - Start the transfer server before the run and leave it open.
-- Pull from TritonAnalysis after a capture/session completes.
+- Pull from TritonAnalysis after a run/session completes.
 - Avoid making the pilot station depend on the analysis laptop.
 - Keep this analysis link on `10.77.0.x`; keep the ROV tether on
   `192.168.1.x`.

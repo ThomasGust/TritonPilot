@@ -1,7 +1,7 @@
 """Main TritonPilot window and top-level service composition.
 
 ``MainWindow`` is the operator shell. It starts controller publishing,
-telemetry subscription, video widgets, recording controls, raw sensor views,
+telemetry subscription, video widgets, raw sensor views,
 and management tools, then routes background-thread updates back onto Qt's UI
 thread.
 """
@@ -70,13 +70,11 @@ from video.cam import RemoteCameraManager
 from recording.capture_trace import trace_event
 from recording.stream_recorder import StreamRecorder
 from recording.save_location import DEFAULT_RECORDINGS_DIR, SaveLocation, is_available_directory, resolve_recordings_dir
-from recording.capture_paths import timestamped_camera_stem, unique_capture_path
 from gui.video_tabs import VideoTabs
 from gui.sensor_panel import SensorPanel
 from gui.instruments import InstrumentPanel, HoldTestPanel, PilotTelemetryColumn
 from gui.raw_sensor_page import RawSensorPage
 from gui.management_page import ManagementPage
-from gui.stereo_page import StereoPage
 from gui.transect_page import TransectPage
 from gui.ssh_page import SshConsolePage, default_pilot_ssh_presets
 from gui.responsive import resize_to_available_screen, vertical_scroll_area
@@ -88,7 +86,7 @@ logger = logging.getLogger(__name__)
 
 
 class MainWindow(QMainWindow):
-    """Topside control window for live piloting and data capture."""
+    """Topside control window for live piloting and data logging."""
 
     SAVE_DIR_SETTINGS_KEY = "recording/save_dir"
 
@@ -373,123 +371,6 @@ class MainWindow(QMainWindow):
     def _on_video_tab_changed(self, *_args) -> None:
         self._refresh_video_status()
 
-    def _capture_should_use_stereo(self) -> bool:
-        if getattr(self, "_active_page_name", "") == "transect":
-            return False
-        return getattr(self, "_capture_route_mode", "camera") == "stereo" or (
-            getattr(self, "_active_page_name", "") == "stereo" and getattr(self, "_stereo_page", None) is not None
-        )
-
-    def _set_capture_route_mode(self, mode: str, *, announce: bool = True) -> None:
-        mode_key = "stereo" if str(mode or "").strip().lower() == "stereo" else "camera"
-        if mode_key == getattr(self, "_capture_route_mode", "camera"):
-            return
-        previous = getattr(self, "_capture_route_mode", "camera")
-        self._capture_route_mode = mode_key
-        try:
-            self.pilot_telemetry_column.set_capture_mode(mode_key)
-        except Exception:
-            pass
-        self._refresh_capture_activity_indicator()
-        stereo_page = getattr(self, "_stereo_page", None)
-        if stereo_page is not None and previous != mode_key:
-            try:
-                stereo_page.prepare_next_still_session()
-            except Exception:
-                pass
-        if announce:
-            label = "stereo pairs" if mode_key == "stereo" else "active camera"
-            self.statusBar().showMessage(f"Capture mode: {label}", 3000)
-
-    def _toggle_capture_route_mode(self) -> None:
-        next_mode = "stereo" if getattr(self, "_capture_route_mode", "camera") != "stereo" else "camera"
-        self._set_capture_route_mode(next_mode)
-
-    def _refresh_capture_activity_indicator(self) -> None:
-        column = getattr(self, "pilot_telemetry_column", None)
-        if column is None:
-            return
-        if getattr(self, "_capture_route_mode", "camera") != "stereo":
-            try:
-                column.set_capture_activity({"state": "idle", "mode": "camera"})
-            except Exception:
-                pass
-            return
-        stereo_page = getattr(self, "_stereo_page", None)
-        try:
-            state = stereo_page.capture_state() if stereo_page is not None else {"state": "idle", "mode": "stereo"}
-            column.set_capture_activity(state)
-        except Exception:
-            pass
-
-    def _on_stereo_capture_state_changed(self, state: dict) -> None:
-        if getattr(self, "_capture_route_mode", "camera") != "stereo":
-            return
-        try:
-            self.pilot_telemetry_column.set_capture_activity(dict(state or {}))
-        except Exception:
-            pass
-
-    def _capture_still(self) -> None:
-        trace_event(
-            "capture_still_request",
-            route=getattr(self, "_capture_route_mode", "camera"),
-            use_stereo=self._capture_should_use_stereo(),
-        )
-        if self._capture_should_use_stereo():
-            stereo_page = getattr(self, "_stereo_page", None)
-            if stereo_page is not None:
-                stereo_page.capture_pair()
-            else:
-                self.statusBar().showMessage("Stereo capture is unavailable", 3000)
-            return
-        self._save_snapshot()
-
-    def _start_capture_recording(self) -> None:
-        trace_event(
-            "capture_recording_start_request",
-            route=getattr(self, "_capture_route_mode", "camera"),
-            use_stereo=self._capture_should_use_stereo(),
-        )
-        if self._capture_should_use_stereo():
-            stereo_page = getattr(self, "_stereo_page", None)
-            if stereo_page is not None:
-                stereo_page.start_recording()
-            else:
-                self.statusBar().showMessage("Stereo recording is unavailable", 3000)
-            return
-        self._start_video_recording()
-
-    def _stop_capture_recording(self) -> None:
-        trace_event(
-            "capture_recording_stop_request",
-            route=getattr(self, "_capture_route_mode", "camera"),
-            use_stereo=self._capture_should_use_stereo(),
-        )
-        if self._capture_should_use_stereo():
-            stereo_page = getattr(self, "_stereo_page", None)
-            if stereo_page is not None:
-                stereo_page.stop_recording()
-            else:
-                self.statusBar().showMessage("Stereo recording is unavailable", 3000)
-            return
-        self._stop_video_recording()
-
-    def _toggle_capture_recording(self) -> None:
-        trace_event(
-            "capture_recording_toggle_request",
-            route=getattr(self, "_capture_route_mode", "camera"),
-            use_stereo=self._capture_should_use_stereo(),
-        )
-        if self._capture_should_use_stereo():
-            stereo_page = getattr(self, "_stereo_page", None)
-            if stereo_page is not None:
-                stereo_page.toggle_recording()
-            else:
-                self.statusBar().showMessage("Stereo recording is unavailable", 3000)
-            return
-        self._toggle_video_recording()
-
     def _make_center_placeholder(self, text: str) -> QLabel:
         lbl = QLabel(text)
         lbl.setObjectName("videoPanePlaceholder")
@@ -567,111 +448,6 @@ class MainWindow(QMainWindow):
         except Exception:
             pass
 
-    def _stream_uses_viewport_frame_pipe(self, stream_name: str) -> bool:
-        try:
-            stream = dict(getattr(self.cam_mgr, "stream_defs", {}).get(stream_name, {}) or {})
-        except Exception:
-            stream = {}
-        requested = False
-        for key in (
-            "receiver_viewport_frame_pipe",
-            "viewport_frame_pipe",
-            "direct_viewport_frame_pipe",
-            "direct_viewport_frames",
-        ):
-            if key in stream:
-                value = stream.get(key)
-                if isinstance(value, bool):
-                    requested = value
-                else:
-                    requested = str(value).strip().lower() in {"1", "true", "yes", "on"}
-                break
-        env_value = os.environ.get("TRITON_DIRECT_VIEWPORT_FRAMES")
-        if env_value is not None:
-            requested = str(env_value).strip().lower() in {"1", "true", "yes", "on"}
-        return bool(requested)
-
-    def _set_stereo_viewport_capture_streams(self, *stream_names: str) -> None:
-        previous = set(getattr(self, "_stereo_viewport_capture_names", set()) or set())
-        desired = {str(name) for name in stream_names if str(name or "").strip()}
-        panel = self.video_panel
-        if panel is None:
-            self._stereo_viewport_capture_names = set()
-            return
-        getter = getattr(panel, "video_widget_for_stream", None)
-        active: set[str] = set()
-        for name in sorted(previous - desired):
-            try:
-                widget = getter(name) if callable(getter) else None
-                setter = getattr(widget, "set_capture_frame_pipe_enabled", None)
-                if callable(setter):
-                    setter(False)
-            except Exception:
-                pass
-        for name in sorted(desired):
-            try:
-                widget = getter(name) if callable(getter) else None
-                setter = getattr(widget, "set_capture_frame_pipe_enabled", None)
-                if callable(setter):
-                    setter(True)
-                    active.add(name)
-            except Exception:
-                pass
-        self._stereo_viewport_capture_names = active
-
-    def _release_stereo_viewport_capture_streams(self) -> None:
-        self._set_stereo_viewport_capture_streams()
-
-    def _video_frame_source(self, stream_name: str, *, require_packet: bool = True):
-        panel = self.video_panel
-        if panel is None:
-            return None
-        try:
-            getter = getattr(panel, "video_widget_for_stream", None)
-            widget = getter(stream_name) if callable(getter) else None
-            if widget is None and str(stream_name) == str(getattr(panel, "current_stream_name", lambda: None)()):
-                widget = panel.current_video_widget()
-            if widget is None:
-                return None
-            latest = getattr(widget, "latest_frame_packet", None)
-            recent = getattr(widget, "recent_frame_packets", None)
-            if not callable(latest):
-                return None
-            if require_packet:
-                packet = latest()
-                if packet is None:
-                    return None
-            if not callable(recent):
-                return None
-            return widget
-        except Exception:
-            return None
-
-    def _latest_camera_packet(self, stream_name: str):
-        try:
-            source = self._video_frame_source(stream_name, require_packet=True)
-            if source is not None:
-                latest = getattr(source, "latest_frame_packet", None)
-                if callable(latest):
-                    packet = latest()
-                    if packet is not None:
-                        return packet
-        except Exception:
-            pass
-        try:
-            cam = getattr(self.cam_mgr, "_opened", {}).get(stream_name)
-            if cam is None:
-                latest_capture = getattr(self.cam_mgr, "latest_capture_packet", None)
-                if callable(latest_capture):
-                    return latest_capture(stream_name)
-                return None
-            latest = getattr(cam, "latest_frame_packet", None)
-            if callable(latest):
-                return latest()
-        except Exception:
-            return None
-        return None
-
     def _on_page_tab_changed(self, index: int) -> None:
         page_name = {
             0: "pilot",
@@ -685,25 +461,12 @@ class MainWindow(QMainWindow):
 
     def _set_center_page(self, page_name: str, *, announce: bool = True) -> None:
         page_name = str(page_name)
-        if page_name not in {"pilot", "transect", "stereo", "reverse_drive", "hold_test", "raw_sensors", "management", "ssh"}:
+        if page_name not in {"pilot", "transect", "reverse_drive", "hold_test", "raw_sensors", "management", "ssh"}:
             page_name = "pilot"
         if page_name == getattr(self, "_active_page_name", "pilot"):
             return
 
         previous_page = getattr(self, "_active_page_name", "")
-        if previous_page == "stereo" and page_name != "stereo":
-            self._release_stereo_viewport_capture_streams()
-            self._release_stereo_capture_receivers()
-            if self.video_panel is not None and getattr(self, "_stereo_layout_restore_snapshot", None) is not None:
-                try:
-                    self.video_panel.restore_layout_snapshot(
-                        self._stereo_layout_restore_snapshot,
-                        save=False,
-                        emit=True,
-                    )
-                except Exception:
-                    pass
-                self._stereo_layout_restore_snapshot = None
         if previous_page == "reverse_drive" and page_name != "reverse_drive":
             if self.video_panel is not None:
                 self._pilot_layout_count_restore = int(self.video_panel.layout_count())
@@ -742,20 +505,6 @@ class MainWindow(QMainWindow):
             else:
                 self._reverse_page_owns_mode = False
             self._page_stack.setCurrentWidget(self._reverse_page)
-        elif page_name == "stereo":
-            if self.video_panel is not None:
-                if self._active_page_name == "pilot":
-                    self._pilot_layout_count_restore = int(self.video_panel.layout_count())
-                try:
-                    self._stereo_layout_restore_snapshot = self.video_panel.layout_snapshot()
-                except Exception:
-                    self._stereo_layout_restore_snapshot = None
-                self.video_panel.set_layout_controls_visible(True)
-                self.video_panel.set_layout_controls_enabled(False)
-                self._resume_video_panel()
-                self._attach_shared_video_panel(self._stereo_page.video_host_layout)
-                self._apply_stereo_pair_view()
-            self._page_stack.setCurrentWidget(self._stereo_page)
         elif page_name == "transect":
             if self.video_panel is not None:
                 if self._active_page_name == "pilot":
@@ -764,7 +513,6 @@ class MainWindow(QMainWindow):
                     self._transect_layout_restore_snapshot = self.video_panel.layout_snapshot()
                 except Exception:
                     self._transect_layout_restore_snapshot = None
-                self._set_capture_route_mode("camera", announce=False)
                 self.video_panel.set_layout_controls_visible(False)
                 self.video_panel.set_layout_controls_enabled(False)
                 self._resume_video_panel()
@@ -852,7 +600,6 @@ class MainWindow(QMainWindow):
             label = {
                 "pilot": "Pilot",
                 "transect": "Transect",
-                "stereo": "Stereo",
                 "reverse_drive": "Reverse Drive",
                 "hold_test": "Hold Test",
                 "raw_sensors": "Raw Sensors",
@@ -860,34 +607,6 @@ class MainWindow(QMainWindow):
                 "ssh": "SSH",
             }.get(page_name, "Pilot")
             self.statusBar().showMessage(f"Switched to {label} page", 3000)
-
-    def _on_stereo_pair_changed(self, _pair) -> None:
-        if getattr(self, "_active_page_name", "") == "stereo":
-            self._apply_stereo_pair_view()
-
-    def _apply_stereo_pair_view(self) -> None:
-        if self.video_panel is None or self._stereo_page is None:
-            return
-        pair = self._stereo_page.current_pair()
-        if pair is None:
-            return
-        try:
-            self.video_panel.apply_temporary_layout(
-                2,
-                [pair.left, pair.right],
-                active_name=pair.left,
-                emit=True,
-            )
-            viewport_sources = [
-                name
-                for name in (pair.left, pair.right)
-                if self._stream_uses_viewport_frame_pipe(name)
-            ]
-            self._set_stereo_viewport_capture_streams(*viewport_sources)
-            self._warm_stereo_capture_receivers(pair.left, pair.right)
-            self._resume_video_panel()
-        except Exception:
-            pass
 
     def _on_transect_camera_changed(self, name: str) -> None:
         if getattr(self, "_active_page_name", "") == "transect":
@@ -924,40 +643,6 @@ class MainWindow(QMainWindow):
             self._resume_video_panel()
         except Exception:
             pass
-
-    def _warm_stereo_capture_receivers(self, *stream_names: str) -> None:
-        previous = set(getattr(self, "_stereo_capture_warm_names", set()) or set())
-        desired = {
-            str(name)
-            for name in stream_names
-            if name and not self._stream_uses_viewport_frame_pipe(str(name))
-        }
-        opener = getattr(self.cam_mgr, "open_capture", None)
-        closer = getattr(self.cam_mgr, "close_capture", None)
-        if callable(closer):
-            for name in sorted(previous - desired):
-                try:
-                    closer(name)
-                except Exception:
-                    pass
-        if callable(opener):
-            for name in sorted(desired - previous):
-                try:
-                    opener(name)
-                except Exception:
-                    pass
-        self._stereo_capture_warm_names = desired
-
-    def _release_stereo_capture_receivers(self) -> None:
-        names = set(getattr(self, "_stereo_capture_warm_names", set()) or set())
-        closer = getattr(self.cam_mgr, "close_capture", None)
-        if callable(closer):
-            for name in sorted(names):
-                try:
-                    closer(name)
-                except Exception:
-                    pass
-        self._stereo_capture_warm_names = set()
 
     def __init__(self, streams_path: str, parent=None):
         super().__init__(parent)
@@ -1227,12 +912,10 @@ class MainWindow(QMainWindow):
         self._record_dir: str | None = None
         self._app_session_dir: Path | None = None
         self._app_session_location: SaveLocation | None = None
-        self._capture_route_mode: str = "camera"
         # 2) sensor subscriber (ROV -> topside)
         self.sensor_panel = SensorPanel()
         self.instrument_panel = InstrumentPanel()
         self.pilot_telemetry_column = PilotTelemetryColumn()
-        self.pilot_telemetry_column.set_capture_mode(self._capture_route_mode)
         self.pilot_telemetry_scroll = vertical_scroll_area(
             self.pilot_telemetry_column,
             object_name="pilotTelemetryScroll",
@@ -1297,10 +980,7 @@ class MainWindow(QMainWindow):
                     tether_setter(False, "checking tether network")
                 except Exception:
                     pass
-        self._stereo_layout_restore_snapshot: dict | None = None
         self._transect_layout_restore_snapshot: dict | None = None
-        self._stereo_capture_warm_names: set[str] = set()
-        self._stereo_viewport_capture_names: set[str] = set()
         self._reverse_page_owns_mode: bool = False
         self._active_page_name = ""
 
@@ -1383,20 +1063,6 @@ class MainWindow(QMainWindow):
             )
         reverse_outer.addWidget(self._reverse_video_host, 1)
         self._page_stack.addWidget(self._reverse_page)
-
-        self._stereo_page = StereoPage(
-            streams_path=streams_path,
-            manager=self.cam_mgr,
-            output_root_provider=lambda: self._app_session_output_dir()[0],
-            packet_provider=self._latest_camera_packet,
-            frame_source_provider=lambda name: self._video_frame_source(name, require_packet=True),
-        )
-        self._stereo_page.pairSelectionChanged.connect(self._on_stereo_pair_changed)
-        self._stereo_page.statusMessage.connect(lambda msg, timeout: self.statusBar().showMessage(msg, int(timeout)))
-        self._stereo_page.captureStateChanged.connect(self._on_stereo_capture_state_changed)
-        if self.video_panel is None:
-            self._stereo_page.attach_video_placeholder("Video unavailable.")
-        self._page_stack.addWidget(self._stereo_page)
 
         self._hold_test_page = QWidget()
         hold_outer = QHBoxLayout(self._hold_test_page)
@@ -1705,9 +1371,6 @@ class MainWindow(QMainWindow):
                     if event.key() == Qt.Key.Key_R:
                         self._toggle_reverse_mode()
                         return True
-                    if event.key() == Qt.Key.Key_C:
-                        self._toggle_capture_route_mode()
-                        return True
                     try:
                         shortcut_text = self._lights_toggle_shortcut_text.upper()
                     except Exception:
@@ -1881,30 +1544,6 @@ class MainWindow(QMainWindow):
         try:
             self._last_pilot_msg_ts = time.time()
             self._last_pilot_msg = dict(msg or {})
-        except Exception:
-            pass
-
-        # Controller-local capture actions:
-        #   X -> snapshot / stereo pair
-        #   B -> start/stop active-camera or stereo recording
-        try:
-            edges = (msg or {}).get("edges", {}) or {}
-            if edges.get("x") == "down":
-                trace_event(
-                    "pilot_capture_edge",
-                    button="x",
-                    route=getattr(self, "_capture_route_mode", "camera"),
-                    center_page=getattr(self, "_center_page_key", ""),
-                )
-                self._capture_still()
-            if edges.get("b") == "down":
-                trace_event(
-                    "pilot_capture_edge",
-                    button="b",
-                    route=getattr(self, "_capture_route_mode", "camera"),
-                    center_page=getattr(self, "_center_page_key", ""),
-                )
-                self._toggle_capture_recording()
         except Exception:
             pass
 
@@ -2972,7 +2611,7 @@ class MainWindow(QMainWindow):
     def _make_recording_session_dir(self) -> tuple[Path, SaveLocation]:
         return self._app_session_output_dir()
 
-    def _capture_output_dir(self) -> tuple[Path, SaveLocation | None]:
+    def _log_output_dir(self) -> tuple[Path, SaveLocation | None]:
         if self._record_dir and self._stream_recorder is not None and is_available_directory(self._record_dir):
             return Path(self._record_dir), None
 
@@ -2998,13 +2637,13 @@ class MainWindow(QMainWindow):
             self._save_dir_act.setToolTip(summary)
         if self._reset_save_dir_act is not None:
             self._reset_save_dir_act.setEnabled(bool(self._preferred_save_dir))
-            self._reset_save_dir_act.setToolTip(f"Use {DEFAULT_RECORDINGS_DIR} for new recordings and snapshots.")
+            self._reset_save_dir_act.setToolTip(f"Use {DEFAULT_RECORDINGS_DIR} for new stream logs.")
 
     def _choose_save_directory(self) -> None:
         start_dir = str(self._recordings_location().path)
         selected_dir = QFileDialog.getExistingDirectory(
             self,
-            "Choose recordings and snapshots folder",
+            "Choose recordings folder",
             start_dir,
         )
         if not selected_dir:
@@ -3024,7 +2663,7 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(
                 self,
                 "Save Directory",
-                f"{location.reason}\n\nNew captures will use:\n{location.path}",
+                f"{location.reason}\n\nNew stream logs will use:\n{location.path}",
             )
         else:
             self.statusBar().showMessage(f"Save directory set: {location.path}", 5000)
@@ -3146,20 +2785,6 @@ class MainWindow(QMainWindow):
         stop_log.triggered.connect(self._stop_stream_log)
         rec_menu.addAction(stop_log)
 
-        rec_menu.addSeparator()
-
-        snap_act = QAction("Capture Still", self)
-        snap_act.triggered.connect(self._capture_still)
-        rec_menu.addAction(snap_act)
-
-        start_vid = QAction("Start Recording", self)
-        start_vid.triggered.connect(self._start_capture_recording)
-        rec_menu.addAction(start_vid)
-
-        stop_vid = QAction("Stop Recording", self)
-        stop_vid.triggered.connect(self._stop_capture_recording)
-        rec_menu.addAction(stop_vid)
-
         self._refresh_save_directory_actions()
         self._refresh_analysis_transfer_actions()
 
@@ -3188,7 +2813,7 @@ class MainWindow(QMainWindow):
             pass
         video_panel = self.video_panel
         self.video_panel = None
-        # stop recorders
+        # Stop stream/data logging.
         try:
             self._stop_stream_log()
         except Exception:
@@ -3220,10 +2845,6 @@ class MainWindow(QMainWindow):
         except Exception:
             pass
         try:
-            self._stereo_page.shutdown()
-        except Exception:
-            pass
-        try:
             self.hold_test_panel.shutdown()
         except Exception:
             pass
@@ -3235,18 +2856,6 @@ class MainWindow(QMainWindow):
             self._ssh_page.shutdown()
         except Exception:
             pass
-        try:
-            self._release_stereo_capture_receivers()
-        except Exception:
-            pass
-        try:
-            close_all_capture_async = getattr(self.cam_mgr, "close_all_capture_async", None)
-            if callable(close_all_capture_async):
-                close_all_capture_async()
-            else:
-                threading.Thread(target=self.cam_mgr.close_all_capture, daemon=True).start()
-        except Exception:
-            pass
         if video_panel is not None:
             try:
                 video_panel.setParent(None)
@@ -3255,34 +2864,21 @@ class MainWindow(QMainWindow):
                 pass
         super().closeEvent(event)
 
-    def _current_camera_name_for_file(self) -> str:
-        if self.video_panel is not None:
-            try:
-                name = self.video_panel.current_stream_name()
-                if name:
-                    return str(name)
-            except Exception:
-                pass
-            try:
-                vw = self.video_panel.current_video_widget()
-                name = getattr(vw, "stream_name", None)
-                if name:
-                    return str(name)
-            except Exception:
-                pass
-        return "camera"
-
     def _start_stream_log(self):
         if self._stream_recorder is not None:
             return
         try:
-            out_dir, location = self._capture_output_dir()
+            out_dir, location = self._log_output_dir()
         except Exception as exc:
             self.statusBar().showMessage(f"Could not prepare save directory: {exc}", 5000)
             return
         self._record_dir = str(out_dir)
-        stem = timestamped_camera_stem(self._current_camera_name_for_file(), "streams")
-        target = unique_capture_path(out_dir, stem, ".jsonl")
+        stamp = time.strftime("%Y%m%d-%H%M%S")
+        target = out_dir / f"{stamp}_streams.jsonl"
+        counter = 1
+        while target.exists():
+            counter += 1
+            target = out_dir / f"{stamp}_streams_{counter:02d}.jsonl"
         self._stream_recorder = StreamRecorder(target)
         try:
             self._stream_recorder.start()
@@ -3300,80 +2896,3 @@ class MainWindow(QMainWindow):
         self._stream_recorder.stop()
         self._stream_recorder = None
         self.statusBar().showMessage("Stream recording stopped", 3000)
-    def _current_video_widget(self):
-        if self.video_panel is None:
-            return None
-        try:
-            return self.video_panel.current_video_widget()
-        except Exception:
-            return None
-
-    def _save_snapshot(self):
-        if self.video_panel is None:
-            return
-        try:
-            out_dir, location = self._capture_output_dir()
-        except Exception as exc:
-            self.statusBar().showMessage(f"Could not prepare save directory: {exc}", 5000)
-            return
-        current_name = ""
-        try:
-            current_name = self.video_panel.current_stream_name()
-        except Exception:
-            current_name = ""
-        trace_event("mono_snapshot_request", stream=current_name, out_dir=out_dir)
-        path = self.video_panel.save_snapshot(out_dir=str(out_dir))
-        trace_event("mono_snapshot_result", stream=current_name, path=path)
-        if path:
-            self.statusBar().showMessage(f"Saving snapshot: {path}{self._save_location_note(location)}", 5000)
-        else:
-            self.statusBar().showMessage("No frame yet (snapshot not saved)", 3000)
-
-    def _start_video_recording(self):
-        vw = self._current_video_widget()
-        if vw is None:
-            return
-        if hasattr(vw, "is_recording") and vw.is_recording():
-            self.statusBar().showMessage("Video recording already active", 3000)
-            return
-        try:
-            out_dir, location = self._capture_output_dir()
-        except Exception as exc:
-            self.statusBar().showMessage(f"Could not prepare save directory: {exc}", 5000)
-            return
-        stream_name = getattr(vw, "stream_name", "")
-        trace_event("mono_video_recording_start_request", stream=stream_name, out_dir=out_dir, fps=30.0)
-        target = vw.start_recording(out_dir=str(out_dir), fps=30.0)
-        trace_event("mono_video_recording_start_result", stream=stream_name, target=target)
-        if target:
-            self.statusBar().showMessage(f"Video recording started -> {target}{self._save_location_note(location)}", 5000)
-        else:
-            self.statusBar().showMessage("Could not start video recording", 3000)
-
-    def _stop_video_recording(self):
-        vw = self._current_video_widget()
-        if vw is None:
-            return
-        if hasattr(vw, "is_recording") and not vw.is_recording():
-            self.statusBar().showMessage("Video recording is not active", 3000)
-            return
-        stream_name = getattr(vw, "stream_name", "")
-        trace_event("mono_video_recording_stop_request", stream=stream_name)
-        vw.stop_recording()
-        self.statusBar().showMessage("Video recording finalizing", 3000)
-
-    def _toggle_video_recording(self):
-        vw = self._current_video_widget()
-        if vw is None:
-            self.statusBar().showMessage("No active camera available for recording", 3000)
-            return
-        try:
-            is_recording = bool(vw.is_recording())
-        except Exception:
-            is_recording = False
-        if is_recording:
-            trace_event("mono_video_recording_toggle_state", stream=getattr(vw, "stream_name", ""), recording=True)
-            self._stop_video_recording()
-        else:
-            trace_event("mono_video_recording_toggle_state", stream=getattr(vw, "stream_name", ""), recording=False)
-            self._start_video_recording()

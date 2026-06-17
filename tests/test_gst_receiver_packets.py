@@ -88,7 +88,8 @@ def test_receiver_pipeline_uses_configured_udp_buffer_and_jitter(monkeypatch):
     assert "buffer-size=1234567" in cmd
     assert "latency=60" in cmd
     assert "drop-on-latency=false" in cmd
-    assert "decodebin" in cmd
+    assert "openh264dec" in cmd
+    assert "decodebin" not in cmd
     assert "avdec_h264" not in cmd
     assert "sync=false" in cmd
     assert "async=false" in cmd

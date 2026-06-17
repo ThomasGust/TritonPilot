@@ -15,19 +15,17 @@ stays close to the code.
 - [Pilot Tether Adapter Setup](PILOT_TETHER_SETUP.md) - Configure the Windows
   USB/Ethernet adapter for the live ROV tether once the adapter is connected.
 - [Analysis Transfer Link](ANALYSIS_TRANSFER.md) - Optional read-only
-  USB-Ethernet handoff from TritonPilot recordings to TritonAnalysis.
+  USB-Ethernet handoff from TritonPilot log directories to TritonAnalysis.
 - [Operations Guide](OPERATIONS.md) - Pilot-station startup, preflight,
-  controller use, recording, raw sensor checks, management tools, and shutdown.
+  controller use, data logging, raw sensor checks, management tools, and shutdown.
 - [Architecture Overview](ARCHITECTURE.md) - How GUI, controller, telemetry,
-  video, recording, and RPC services fit together.
-- [Media Capture Architecture](MEDIA_CAPTURE_ARCHITECTURE.md) - Display,
-  recording, and stereo capture timing boundaries.
+  video, data logging, and RPC services fit together.
+- [Media Capture Reset](MEDIA_CAPTURE_ARCHITECTURE.md) - The current
+  display-only baseline for rebuilding media capture later.
 - [Subsystem Reference](SUBSYSTEMS.md) - What each package/module owns and how
   maintainers should extend the code.
 - [Configuration Guide](CONFIGURATION.md) - Environment variables,
   `data/streams.json`, controller mapping, video correction, and save paths.
-- [Stereo Capture](STEREO_CAPTURE.md) - Stereo pair configuration, calibration
-  capture sessions, manifest format, and quality checklist.
 - [Testing And Troubleshooting](TESTING_AND_TROUBLESHOOTING.md) - Unit tests,
   focused diagnostics, and common failure symptoms.
 
@@ -37,7 +35,7 @@ stays close to the code.
 - `TritonAnalysis` runs standalone mission-analysis applets on a separate
   analysis computer.
 
-TritonPilot sits between those two worlds: it operates the ROV and records data
+TritonPilot sits between those two worlds: it operates the ROV and records logs
 that can be moved into analysis workflows, but it should not contain
 mission-specific scoring tools.
 

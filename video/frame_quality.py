@@ -1,4 +1,4 @@
-"""Frame-quality checks shared by capture and recording paths."""
+"""Frame-quality checks for live video display."""
 
 from __future__ import annotations
 
@@ -57,7 +57,7 @@ def looks_like_green_channel_collapse_artifact(frame: np.ndarray) -> bool:
 
 
 def looks_like_blank_startup_artifact(frame: np.ndarray) -> bool:
-    """Detect near-black/blank frames that are not useful camera captures."""
+    """Detect near-black/blank frames that are not useful live video frames."""
 
     try:
         arr = np.asarray(frame)
@@ -79,7 +79,7 @@ def looks_like_blank_startup_artifact(frame: np.ndarray) -> bool:
         return False
 
 
-def capture_frame_rejection_reason(frame: np.ndarray) -> str | None:
+def live_frame_rejection_reason(frame: np.ndarray) -> str | None:
     if looks_like_green_startup_artifact(frame):
         return "green_startup_artifact"
     if looks_like_green_channel_collapse_artifact(frame):
@@ -87,9 +87,3 @@ def capture_frame_rejection_reason(frame: np.ndarray) -> str | None:
     if looks_like_blank_startup_artifact(frame):
         return "blank_startup_artifact"
     return None
-
-
-def is_usable_capture_frame(frame: np.ndarray) -> bool:
-    """Return False for decoded frames that are not useful media captures."""
-
-    return capture_frame_rejection_reason(frame) is None

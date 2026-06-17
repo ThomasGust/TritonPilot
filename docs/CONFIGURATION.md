@@ -65,27 +65,14 @@ define:
 - `rtp_mtu`
 - `latency_ms`
 - `port`
-- `capture_port`
 - `enabled`
 
 For native H.264 cameras, TritonOS applies `h264_bitrate` and `h264_gop` as
 V4L2 camera encoder controls when the camera exposes matching controls. The
-current full-resolution four-camera pilot profile is 1080p30 H.264 at
-`8000000` bps per stream with `latency_ms` set to `5` on the tether. The pilot
-view uses `render_mode: "direct3d"` so GStreamer decodes and renders directly
-through the Windows Direct3D sink. This avoids copying full-resolution BGR
-frames through Python/Qt for live piloting.
-
-Direct3D streams can still save snapshots, single-camera video, and stereo
-pairs by using a second mirrored H.264 UDP destination. The normal display
-ports remain `5000-5003`; `capture_port` values such as `6000-6003` tell
-TritonOS to mirror the same compressed stream for capture-only receivers.
-Those receivers start only when capture or stereo tooling needs CPU frames, so
-the pilot display path stays smooth.
-
-The older raw-frame widget is still available by omitting `render_mode` or
-setting it to anything other than `direct3d`. Use that path for debugging or
-experiments that intentionally need every displayed frame inside Python.
+current checked-in four-camera pilot profile is Direct3D display at 1080p30
+H.264, `8000000` bps per stream, and `latency_ms` set to `5` on the tether.
+The profile pins H.264 receive decode to `openh264dec` to avoid Windows
+hardware decoder selection through `decodebin`.
 
 Display refresh can be capped separately from the camera stream rate:
 
@@ -99,51 +86,26 @@ The multi-camera value applies to three- and four-pane layouts. Lowering it can
 make quad view feel smoother on a loaded laptop because the UI stops trying to
 scale and repaint every pane at full camera rate.
 
-Stereo recording uses the 30 fps camera streams but saves timestamped left/right
-pairs at a lower cadence for TritonAnalysis. The default is 5 fps, which gives
-photogrammetry a denser path than the old sparse capture while avoiding an
-unbounded image-write load:
-
-```powershell
-$env:TRITON_STEREO_RECORD_FPS="5"
-$env:TRITON_STEREO_RECORD_FPS_MAX="15"
-```
-
-Video recording uses the full decoded capture frame, not the scaled viewport
-pixmap. MP4 output defaults to the bundled ffmpeg/libx264 writer with a
-high-quality CRF of `15`; OpenCV is only a final rescue backend because its MP4
-defaults can look blocky.
-
-Bench overrides:
-
-```powershell
-$env:TRITON_VIDEO_RECORDER_CRF="15"
-$env:TRITON_VIDEO_RECORDER_PRESET="veryfast"
-$env:TRITON_VIDEO_RECORDER_BACKEND="ffmpeg"
-```
-
-Lower CRF values make cleaner, larger files. Set
-`TRITON_VIDEO_RECORDER_BITRATE` only when you need a fixed bitrate target.
+Media capture is intentionally disabled in this baseline. There are no
+configured capture mirror ports, snapshot taps, MP4 writers, or stereo capture
+sessions. Use this Direct3D display profile as the starting point for rebuilding
+media capture cleanly.
 
 Per-stream receiver options in `data/streams.json`:
 
-- `render_mode`: set to `direct3d` for low-latency pilot viewing
-- `capture_port`: optional mirror UDP port for direct-mode snapshots,
-  recording, and stereo capture
-- `receiver_h264_decoder`: defaults to `openh264dec` for the checked-in
-  Direct3D H.264 streams because current DXVA/D3D hardware decoders can produce
-  green/corrupt frames on the pilot laptop; direct mode uses this decoder choice
+- `render_mode`: set to `direct3d` for the Direct3D sink path
+- `receiver_h264_decoder`: defaults to `openh264dec` because current DXVA/D3D
+  hardware decoder selection can produce green/corrupt frames on the pilot
+  laptop; set `decodebin` only when intentionally testing automatic decode
 - `receiver_output_fps`: drops decoded frames before the Python pipe; the stream
-  can stay 1080p30 while quad-view display work is capped; this only affects
-  the legacy raw-frame widget
+  can stay 1080p30 while quad-view display work is capped
 - `extra.udp_qos_dscp`: requests a DSCP marking from TritonOS' UDP sender;
   `34` is the current video-priority default
-- `extra.sender_leaky_queues`: keeps TritonOS from buffering stale camera frames
-  before RTP packetization; the low-latency default is `true`
+- `extra.sender_leaky_queues`: true for this low-latency Direct3D baseline
 - `extra.sender_queue_max_buffers`: whole-frame sender queue depth; the
-  low-latency default is `1`
+  low-latency queue depth is `1`
 - `extra.sender_v4l2_do_timestamp`: timestamps captured frames on the Pi before
-  RTP payloading; the low-latency default is `true`
+  RTP payloading; the stable default is `true`
 - `extra.v4l2_controls.exposure_dynamic_framerate`: set to `0` to prevent the
   camera from lowering frame rate for exposure, which can look like video lag
 

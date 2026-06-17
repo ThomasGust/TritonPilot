@@ -98,6 +98,7 @@ The install must include these elements:
 
 - `rtph264depay`
 - `h264parse`
+- `openh264dec`
 - `avdec_h264`
 - `rtpjpegdepay`
 - `jpegdec`

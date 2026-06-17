@@ -54,7 +54,7 @@ def _log_receiver_start(cfg: "RxConfig", cmd: List[str]) -> None:
         logger.info("Starting receiver '%s': %s", cfg.name, " ".join(cmd))
         return
     output_fps = cfg.extra.get("receiver_output_fps", cfg.extra.get("output_fps", "native"))
-    h264_decoder = cfg.extra.get("receiver_h264_decoder", cfg.extra.get("h264_decoder", "decodebin"))
+    h264_decoder = cfg.extra.get("receiver_h264_decoder", cfg.extra.get("h264_decoder", "openh264dec"))
     logger.info(
         "Starting receiver '%s' port=%s codec=%s mode=%s %dx%d latency=%sms udp_buffer=%s decoder=%s output_fps=%s",
         cfg.name,
@@ -483,7 +483,7 @@ class ReceiverProcess:
             wall_ts=stored.wall_ts,
         )
 
-    def _snapshot_packet(self, *, consume: bool) -> Optional[RawFramePacket]:
+    def _frame_packet(self, *, consume: bool) -> Optional[RawFramePacket]:
         if self.cfg.mode != "raw":
             raise RuntimeError("read_frame() only valid in mode='raw'")
 
@@ -524,17 +524,16 @@ class ReceiverProcess:
         consumes delivery state, so UI code can use it for stall detection.
         """
 
-        return self._snapshot_packet(consume=True)
+        return self._frame_packet(consume=True)
 
     def latest_frame_packet(self) -> Optional[RawFramePacket]:
         """
         Return the most recent frame without consuming delivery state.
 
-        Stereo capture uses this so it can share a live stream with the pilot UI
-        without stealing frames from the display worker.
+        Diagnostics can use this without stealing frames from the display worker.
         """
 
-        return self._snapshot_packet(consume=False)
+        return self._frame_packet(consume=False)
 
     def read_frame(self) -> Optional[bytes]:
         """
@@ -596,9 +595,9 @@ class ReceiverProcess:
             cfg.extra,
             "receiver_h264_decoder",
             "h264_decoder",
-            default=os.environ.get("TRITON_GST_H264_DECODER", "decodebin"),
-        ).lower()
-        if decoder in {"", "auto", "hardware", "decodebin"}:
+            default=os.environ.get("TRITON_GST_H264_DECODER", "openh264dec"),
+        ).lower() or "openh264dec"
+        if decoder in {"auto", "hardware", "decodebin"}:
             return ["decodebin"]
         return [decoder]
 

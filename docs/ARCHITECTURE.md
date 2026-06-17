@@ -13,7 +13,7 @@ TritonPilot owns:
 - Pilot command publication
 - Sensor telemetry display and logging
 - Camera stream control and local video receive
-- Recording and snapshot capture
+- Stream and raw sensor data logging
 - Management RPC client tools
 
 TritonPilot does not own:
@@ -39,7 +39,7 @@ shows `gui.main_window.MainWindow`.
 - `VideoTabs` and `VideoWidget` instances for display
 - `SensorPanel`, `InstrumentPanel`, `HoldTestPanel`, and `RawSensorPage`
 - `ManagementRpcService` and `ManagementPage`
-- Recording helpers for logs, snapshots, video, and CSV output
+- Recording helpers for stream logs and CSV telemetry
 
 Most UI updates are delivered through Qt signals so background threads do not
 directly mutate widgets.
@@ -128,22 +128,17 @@ not block the event loop.
 Use management RPC for operator setup and calibration tasks, not for high-rate
 control. High-rate control belongs in the PilotFrame stream.
 
-## Recording Flow
+## Data Logging Flow
 
-Recording is intentionally local to the pilot computer:
+Data logging is intentionally local to the pilot computer:
 
 - `recording/stream_recorder.py` writes JSONL event streams.
 - `recording/raw_sensor_csv.py` flattens raw telemetry into CSV rows.
-- `recording/video_recorder.py` writes video and snapshots.
-- `recording/capture_paths.py` builds safe timestamped file names.
 - `recording/save_location.py` resolves the active save directory.
 
-Captured media and data are the handoff point to TritonAnalysis.
-
-Stereo capture follows the same handoff rule. TritonPilot can save timestamped
-left/right image pairs and a `manifest.json` from configured stereo streams,
-while TritonAnalysis remains the owner for calibration, disparity, and
-measurement.
+Saved stream logs and raw CSV files are the handoff point to TritonAnalysis.
+Media capture has been removed from this baseline so it can be rebuilt without
+entangling the live display path.
 
 ## Threading Model
 

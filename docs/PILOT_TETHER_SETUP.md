@@ -41,9 +41,8 @@ The script will:
 - Set `192.168.1.1/24`.
 - Remove a default route from that adapter so it does not steal internet
   traffic.
-- Add Windows Firewall allows for display camera UDP ports `5000-5003`,
-  capture mirror UDP ports `6000-6003`, and the optional analysis-transfer TCP
-  port `8765`.
+- Add Windows Firewall allows for display camera UDP ports `5000-5003` and the
+  optional analysis-transfer TCP port `8765`.
 - Probe ROV TCP ports `6000`, `6001`, `5555`, and `5556` from the tether
   address.
 

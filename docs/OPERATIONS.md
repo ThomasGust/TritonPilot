@@ -88,25 +88,19 @@ view. Reverse drive flips translation commands so stick direction matches the
 camera perspective while yaw remains normal. Press `R` to toggle reverse drive
 from the main pilot view.
 
-## Recording
+## Data Logging
 
-Use the GUI recording controls to capture:
+Use the GUI recording controls for data logs:
 
-- Video files from visible streams
-- Still snapshots
 - Pilot/sensor JSONL stream logs
 - Raw sensor CSV time series
 
-In the main pilot view, press `C` to switch controller capture between the
-active camera and the configured stereo pair path.
-
-Recordings should go into the selected session directory. If the preferred save
+Logs should go into the selected session directory. If the preferred save
 location is unavailable, `recording/save_location.py` falls back to the default
 recordings directory in `Documents\TritonPilot\Recordings`.
 
-For analysis handoff, capture the clearest source media possible and note which
-camera, time, and mission task the file belongs to. TritonAnalysis should work
-from saved media or manually entered task data, not from live TritonPilot state.
+Media capture is currently disabled in TritonPilot. TritonAnalysis should work
+from saved logs or manually entered task data until the media pipeline is rebuilt.
 
 ## Management Page
 
@@ -136,7 +130,7 @@ At the end of a run:
 
 1. Disarm the ROV.
 2. Stop video and stream logging.
-3. Confirm recordings flushed to disk.
+3. Confirm logs flushed to disk.
 4. Close TritonPilot.
 5. Copy or move mission media to the analysis computer as needed.
 6. Stop or power down TritonOS only after the ROV is safe.

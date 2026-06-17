@@ -134,14 +134,6 @@ class ROVStreams:
         """Return ROV-side stream config plus timing diagnostics when supported."""
         return self._call("list_stream_status")
 
-    def capture_frame(self, **kwargs):
-        """Capture one image from an active ROV-side stream when supported."""
-        return self._call("capture_frame", **kwargs)
-
-    def capture_stereo_pair(self, **kwargs):
-        """Capture a timestamped left/right pair on the ROV when supported."""
-        return self._call("capture_stereo_pair", **kwargs)
-
     def net_info(self):
         """Return ROV-side interface/IP info (best-effort)."""
         return self._call("net_info")

@@ -39,7 +39,7 @@ class _VideoPane(QFrame):
         self.setProperty("active", False)
         self.setFrameShape(QFrame.Shape.NoFrame)
         self.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.setToolTip("Click to make this the active pane for controller snapshots and recording.")
+        self.setToolTip("Click to make this the active video pane.")
 
         self._layout = QVBoxLayout(self)
         self._layout.setContentsMargins(
@@ -515,15 +515,10 @@ class VideoTabs(QWidget):
         placeholder.setWordWrap(True)
         lay.addWidget(placeholder)
 
-    def _stop_stream_widget(self, name: str, *, placeholder: str | None = None, force: bool = False) -> bool:
+    def _stop_stream_widget(self, name: str, *, placeholder: str | None = None) -> bool:
         widget = self._widgets.get(name)
         if widget is None:
             return False
-        try:
-            if bool(widget.is_recording()) and not force:
-                return False
-        except Exception:
-            pass
         try:
             widget.shutdown()
         except Exception:
@@ -643,14 +638,6 @@ class VideoTabs(QWidget):
         self._stop_hidden_streams()
 
     def suspend_all(self) -> bool:
-        for widget in self._widgets.values():
-            if widget is None:
-                continue
-            try:
-                if bool(widget.is_recording()):
-                    return False
-            except Exception:
-                pass
         self.stop_all()
         return True
 
@@ -820,24 +807,6 @@ class VideoTabs(QWidget):
 
         return self._assign_stream_to_pane(self._active_pane_index, name, save=save, emit=emit)
 
-    def save_snapshot(self, out_dir: str | None = None, basename: str | None = None) -> str | None:
-        vw = self.current_video_widget()
-        if vw is None:
-            return None
-        return vw.save_snapshot(out_dir=out_dir, basename=basename)
-
-    def start_recording(self, out_dir: str | None = None, basename: str | None = None, fps: float = 30.0) -> str | None:
-        vw = self.current_video_widget()
-        if vw is None:
-            return None
-        return vw.start_recording(out_dir=out_dir, basename=basename, fps=fps)
-
-    def stop_recording(self) -> None:
-        vw = self.current_video_widget()
-        if vw is None:
-            return
-        vw.stop_recording()
-
     def set_water_correction(self, enabled: bool) -> None:
         self._water_correction_enabled = bool(enabled)
         for widget in self._widgets.values():
@@ -898,7 +867,7 @@ class VideoTabs(QWidget):
         for name, widget in list(self._widgets.items()):
             if widget is None:
                 continue
-            self._stop_stream_widget(name, placeholder=f"{name}\n(stopped)", force=True)
+            self._stop_stream_widget(name, placeholder=f"{name}\n(stopped)")
 
     def closeEvent(self, event) -> None:
         try:

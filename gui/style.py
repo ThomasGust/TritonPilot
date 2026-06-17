@@ -184,39 +184,6 @@ def apply_modern_style(app: QApplication) -> None:
         border: 1px solid #2a2a32;
         border-radius: 2px;
     }
-    QFrame#stereoSectionCard {
-        border: 1px solid #2a2a32;
-        border-radius: 10px;
-        background: #16161b;
-    }
-    QLabel#stereoSectionTitle {
-        font-size: 14px;
-        font-weight: 700;
-    }
-    QLabel#stereoMetaValue {
-        color: #d7dbe8;
-    }
-    QLabel#stereoPill {
-        border-radius: 10px;
-        padding: 4px 10px;
-        font-weight: 700;
-        background: #2c3648;
-    }
-    QLabel#stereoPill[tone="ok"] {
-        color: #d9ffea;
-        background: #204530;
-        border: 1px solid #2f7a4f;
-    }
-    QLabel#stereoPill[tone="warn"] {
-        color: #ffe6ae;
-        background: #332b1d;
-        border: 1px solid #a07e34;
-    }
-    QLabel#stereoPill[tone="error"] {
-        color: #ffd9d9;
-        background: #4a2424;
-        border: 1px solid #995252;
-    }
     QFrame#managementSectionCard {
         border: 1px solid #2a2a32;
         border-radius: 12px;

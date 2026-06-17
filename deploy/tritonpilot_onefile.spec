@@ -2,9 +2,6 @@
 
 from pathlib import Path
 
-from PyInstaller.utils.hooks import collect_data_files
-
-
 repo_root = Path(SPECPATH).parent
 icon_path = repo_root / "assets" / "tritonpilot_icon.ico"
 
@@ -12,11 +9,8 @@ datas = [
     (str(repo_root / "assets" / "tritonpilot_icon.ico"), "assets"),
     (str(repo_root / "data" / "streams.json"), "data"),
 ]
-datas += collect_data_files("imageio_ffmpeg", include_py_files=False)
 
 hiddenimports = [
-    "imageio.v2",
-    "imageio_ffmpeg",
     "cv2",
     "pygame",
     "zmq",

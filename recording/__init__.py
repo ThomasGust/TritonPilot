@@ -1,1 +1,1 @@
-"""Recording helpers for stream logs, CSV telemetry, snapshots, and video."""
+"""Recording helpers for stream logs and CSV telemetry."""

@@ -20,6 +20,7 @@ $script:GStreamerRootEnvNames = @(
 $script:GStreamerRequiredElements = @(
     "rtph264depay",
     "h264parse",
+    "openh264dec",
     "avdec_h264",
     "videoconvert",
     "fdsink",

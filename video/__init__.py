@@ -1,4 +1,4 @@
-"""Video stream control, receive, correction, and recording utilities."""
+"""Video stream control, receive, correction, and display utilities."""
 
 from video.cam import RemoteCameraManager, RemoteCv2Camera
 from video.gst_receiver import ReceiverManager, ReceiverProcess, RxConfig

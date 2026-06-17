@@ -1,4 +1,4 @@
-"""Low-overhead JSONL timing trace for camera capture/recording diagnostics."""
+"""Low-overhead JSONL timing trace for camera and UI diagnostics."""
 
 from __future__ import annotations
 

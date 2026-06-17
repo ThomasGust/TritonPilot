@@ -1,6 +1,4 @@
 import os
-import sys
-import types
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
@@ -43,25 +41,17 @@ def test_startup_custom_args_are_not_passed_to_qt():
     assert main_topside._qt_argv(argv) == ["main_topside.py", "-style", "Fusion"]
 
 
-def test_smoke_test_requires_ffmpeg_binary(monkeypatch, tmp_path):
+def test_smoke_test_requires_packaged_resources(monkeypatch, tmp_path):
     streams_path = tmp_path / "streams.json"
     icon_path = tmp_path / "tritonpilot_icon.ico"
-    ffmpeg_path = tmp_path / "ffmpeg.exe"
     streams_path.write_text("{}", encoding="utf-8")
     icon_path.write_bytes(b"icon")
-    ffmpeg_path.write_bytes(b"ffmpeg")
 
     monkeypatch.setattr(main_topside, "streams_file_path", lambda: streams_path)
     monkeypatch.setattr(main_topside, "app_icon_path", lambda: icon_path)
-    monkeypatch.setattr(main_topside, "_recording_smoke_test", lambda _ffmpeg_path: True)
-    monkeypatch.setitem(
-        sys.modules,
-        "imageio_ffmpeg",
-        types.SimpleNamespace(get_ffmpeg_exe=lambda: str(ffmpeg_path)),
-    )
 
     assert main_topside._smoke_test() == 0
 
-    ffmpeg_path.unlink()
+    icon_path.unlink()
 
     assert main_topside._smoke_test() == 1

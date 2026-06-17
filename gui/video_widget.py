@@ -1,4 +1,4 @@
-"""Single camera widget with connection, display, snapshot, and recording logic."""
+"""Single camera widget with connection and display logic."""
 
 from __future__ import annotations
 
@@ -6,7 +6,6 @@ import time
 import threading
 import logging
 from collections import deque
-from pathlib import Path
 
 from PyQt6.QtCore import Qt, QThread, pyqtSignal, QTimer
 from PyQt6.QtGui import QImage, QPixmap
@@ -14,9 +13,6 @@ from PyQt6.QtWidgets import QWidget, QLabel, QVBoxLayout, QSizePolicy
 
 import numpy as np
 
-from recording.video_recorder import VideoRecorder, save_snapshot
-from recording.save_location import DEFAULT_RECORDINGS_DIR
-from recording.capture_paths import timestamped_camera_stem, unique_capture_path
 from video.cam import RemoteCameraManager, RemoteCv2Camera
 from video.frame_correction import WaterCorrection
 from video.frame_rotation import rotate_frame
@@ -170,11 +166,6 @@ class VideoWidget(QWidget):
         self.last_frame_ts: float = 0.0
         self.frame_buffer: deque[np.ndarray] = deque(maxlen=1)
         self._connected_ts: float = 0.0
-        self._rec: VideoRecorder | None = None
-        self._record_started_ts: float | None = None
-        self._snapshot_indicator_until_ts: float = 0.0
-        self._snapshot_indicator_text: str = "SNAP"
-        self._snapshot_indicator_duration_s: float = 1.2
         self._display_fps: float = float(VIDEO_DISPLAY_FPS_SINGLE)
         self._square_display_enabled: bool = False
 
@@ -206,16 +197,6 @@ class VideoWidget(QWidget):
         lay.setSpacing(0)
         lay.addWidget(self.label)
 
-        self._record_badge = QLabel("REC 00:00", self)
-        self._record_badge.setObjectName("videoRecordBadge")
-        self._record_badge.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
-        self._record_badge.hide()
-
-        self._snapshot_badge = QLabel(self._snapshot_indicator_text, self)
-        self._snapshot_badge.setObjectName("videoSnapshotBadge")
-        self._snapshot_badge.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
-        self._snapshot_badge.hide()
-
         # Out-of-water lens correction (toggleable)
         self._correction: WaterCorrection | None = None
         self._correction_enabled: bool = False
@@ -234,7 +215,6 @@ class VideoWidget(QWidget):
             self._rov_link_wait_message = f"{self.stream_name}\nWaiting for ROV heartbeat..."
             self._schedule_retry(1.0)
             self._show_message(self._rov_link_wait_message)
-        self._refresh_capture_indicators()
 
     def _show_message(self, msg: str, *, clear_pixmap: bool | None = None) -> None:
         """Show status text reliably.
@@ -284,9 +264,6 @@ class VideoWidget(QWidget):
     def water_correction_enabled(self) -> bool:
         return bool(self._correction_enabled)
 
-    def is_recording(self) -> bool:
-        return self._rec is not None
-
     def display_fps(self) -> float:
         return float(self._display_fps)
 
@@ -313,56 +290,6 @@ class VideoWidget(QWidget):
             self._tick_timer.setInterval(interval_ms)
         except Exception:
             pass
-
-    def _format_elapsed(self, elapsed_s: float) -> str:
-        elapsed_s = max(0, int(elapsed_s))
-        minutes, seconds = divmod(elapsed_s, 60)
-        hours, minutes = divmod(minutes, 60)
-        if hours > 0:
-            return f"{hours:d}:{minutes:02d}:{seconds:02d}"
-        return f"{minutes:02d}:{seconds:02d}"
-
-    def _layout_capture_badges(self) -> None:
-        margin = 10
-        for badge, x_mode in (
-            (self._record_badge, "left"),
-            (self._snapshot_badge, "right"),
-        ):
-            if not badge.isVisible():
-                continue
-            badge.adjustSize()
-            y = margin
-            if x_mode == "left":
-                x = margin
-            else:
-                x = max(margin, self.width() - badge.width() - margin)
-            badge.move(x, y)
-            badge.raise_()
-
-    def _refresh_capture_indicators(self) -> None:
-        now = time.time()
-
-        if self._record_started_ts is not None and self._rec is not None:
-            text = f"REC {self._format_elapsed(now - self._record_started_ts)}"
-            if self._record_badge.text() != text:
-                self._record_badge.setText(text)
-            self._record_badge.show()
-        else:
-            self._record_badge.hide()
-
-        if self._snapshot_indicator_until_ts > now:
-            if self._snapshot_badge.text() != self._snapshot_indicator_text:
-                self._snapshot_badge.setText(self._snapshot_indicator_text)
-            self._snapshot_badge.show()
-        else:
-            self._snapshot_badge.hide()
-
-        self._layout_capture_badges()
-
-    def _flash_snapshot_indicator(self, text: str = "SNAP") -> None:
-        self._snapshot_indicator_text = str(text or "SNAP")
-        self._snapshot_indicator_until_ts = time.time() + self._snapshot_indicator_duration_s
-        self._refresh_capture_indicators()
 
     # --- connection / recovery ---
     def _schedule_retry(self, delay_s: float):
@@ -509,8 +436,6 @@ class VideoWidget(QWidget):
             elif now >= self._next_retry_ts:
                 self._start_connect()
 
-        self._refresh_capture_indicators()
-
     # --- frames ---
     def _on_frame(self, frame: np.ndarray):
         self.last_frame = frame
@@ -522,9 +447,6 @@ class VideoWidget(QWidget):
             self.frame_buffer.append(frame)
         except Exception:
             pass
-        if self._rec is not None:
-            self._rec.add_frame(frame)
-
         # Clear any status text (pixmap will be shown instead).
         try:
             if self.label.text():
@@ -567,7 +489,6 @@ class VideoWidget(QWidget):
         self.label.setPixmap(pix)
 
     def refresh_layout_geometry(self) -> None:
-        self._layout_capture_badges()
         if self.last_frame is None:
             return
         try:
@@ -587,107 +508,15 @@ class VideoWidget(QWidget):
             pass
         super().mouseDoubleClickEvent(event)
 
-    # --- recording / snapshot ---
-    def start_recording(self, out_dir: str | None = None, basename: str | None = None, fps: float = 30.0) -> str:
-        """Start recording the currently displayed stream.
-
-        Returns the output path (mp4 file when available; otherwise a frames directory).
-        """
-        if self._rec is not None:
-            target = self._rec.target
-            return str(target) if target is not None else str(Path(out_dir or DEFAULT_RECORDINGS_DIR) / f"{self.stream_name}.mp4")
-
-        if out_dir is None:
-            out_dir = str(DEFAULT_RECORDINGS_DIR)
-        Path(out_dir).mkdir(parents=True, exist_ok=True)
-
-        if basename is None:
-            base = timestamped_camera_stem(self.stream_name, "video")
-        else:
-            base = Path(basename).stem or self.stream_name
-
-        out_file = unique_capture_path(out_dir, base, ".mp4")
-
-        self._rec = VideoRecorder(out_file, fps=fps)
-        target = self._rec.start()
-        self._record_started_ts = time.time()
-        self._refresh_capture_indicators()
-        return str(target)
-
-    def stop_recording(self) -> None:
-        rec = self._rec
-        if rec is not None:
-            self._rec = None
-            self._record_started_ts = None
-            self._refresh_capture_indicators()
-
-            def _finish_recording() -> None:
-                try:
-                    rec.stop()
-                except Exception as exc:
-                    logger.warning("Video recording finalization failed for '%s': %s", self.stream_name, exc)
-
-            try:
-                threading.Thread(
-                    target=_finish_recording,
-                    name=f"video-rec-stop-{self.stream_name}",
-                ).start()
-            except Exception:
-                _finish_recording()
-
-    def save_snapshot(self, out_dir: str | None = None, basename: str | None = None) -> str | None:
-        """Save the most recent frame as a PNG. Returns path or None if no frame yet."""
-        if self.last_frame is None:
-            return None
-        try:
-            frame = np.array(self.last_frame, copy=True)
-        except Exception:
-            return None
-        if out_dir is None:
-            out_dir = str(DEFAULT_RECORDINGS_DIR)
-        Path(out_dir).mkdir(parents=True, exist_ok=True)
-
-        if basename is None:
-            base = timestamped_camera_stem(self.stream_name, "snapshot")
-        else:
-            base = Path(basename).stem or self.stream_name
-
-        out_path = unique_capture_path(out_dir, base, ".png")
-
-        def _write_snapshot() -> None:
-            try:
-                save_snapshot(frame, out_path)
-            except Exception as exc:
-                logger.warning("Snapshot write failed for '%s' -> %s: %s", self.stream_name, out_path, exc)
-
-        try:
-            threading.Thread(
-                target=_write_snapshot,
-                name=f"video-snapshot-{self.stream_name}",
-            ).start()
-        except Exception:
-            try:
-                _write_snapshot()
-            except Exception:
-                return None
-
-        self._flash_snapshot_indicator("SNAP")
-        return str(out_path)
-
     # --- lifecycle ---
     def shutdown(self, release_only: bool = True, *, async_release: bool = True):
-        """Stop decode/recording and release underlying stream resources.
+        """Stop decode and release underlying stream resources.
 
         release_only:
           - True (default): stop threads/camera but keep timers running so we can reconnect
           - False: used internally to reset state (same effect here)
         """
         self._stop_worker_only()
-        try:
-            self.stop_recording()
-        except Exception:
-            pass
-
         # Stop any in-flight connect attempt. The worker can be inside the
         # video RPC timeout path; deleting a running QThread can terminate the
         # process on Windows/PyQt, so wait for the bounded RPC attempt to exit.
@@ -733,7 +562,6 @@ class VideoWidget(QWidget):
                 # keep whatever error text we already set
                 pass
 
-        self._refresh_capture_indicators()
 
     def closeEvent(self, event):
         try:
@@ -745,4 +573,3 @@ class VideoWidget(QWidget):
 
     def resizeEvent(self, event) -> None:
         super().resizeEvent(event)
-        self._layout_capture_badges()

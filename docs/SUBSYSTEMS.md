@@ -87,16 +87,15 @@ in TritonOS.
 
 ## `recording/`
 
-Recording helpers write pilot-side artifacts:
+Recording helpers write pilot-side data logs:
 
 - `save_location.py` resolves an available destination.
-- `capture_paths.py` builds safe timestamped names.
-- `video_recorder.py` writes video files and snapshots.
 - `stream_recorder.py` writes JSONL event logs.
 - `raw_sensor_csv.py` writes spreadsheet-friendly telemetry rows.
 
-Avoid putting analysis logic here. The goal is to preserve data clearly for
-later interpretation.
+Avoid putting analysis logic here. The goal is to preserve operational data
+clearly for later interpretation. Media capture is intentionally absent from
+this baseline.
 
 ## `network/`
 
