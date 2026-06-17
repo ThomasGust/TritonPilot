@@ -20,6 +20,8 @@ stays close to the code.
   controller use, recording, raw sensor checks, management tools, and shutdown.
 - [Architecture Overview](ARCHITECTURE.md) - How GUI, controller, telemetry,
   video, recording, and RPC services fit together.
+- [Media Capture Architecture](MEDIA_CAPTURE_ARCHITECTURE.md) - Display,
+  recording, and stereo capture timing boundaries.
 - [Subsystem Reference](SUBSYSTEMS.md) - What each package/module owns and how
   maintainers should extend the code.
 - [Configuration Guide](CONFIGURATION.md) - Environment variables,

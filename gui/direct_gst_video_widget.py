@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import ctypes
+import base64
 import logging
 import os
 import signal
@@ -55,6 +56,7 @@ class DirectReceiverConfig:
     sink: str = "d3d11videosink"
     square_crop: bool = False
     frame_pipe: bool = False
+    frame_pipe_fps: float = 0.0
     record_rtp_port: int = 0
     record_rtp_host: str = "127.0.0.1"
 
@@ -124,7 +126,7 @@ def _raw_frame_caps(width: int, height: int) -> str:
     )
 
 
-def _render_output_chain(cfg: DirectReceiverConfig) -> list[str]:
+def _render_output_chain(cfg: DirectReceiverConfig, crop_chain: list[str] | None = None) -> list[str]:
     sink = str(cfg.sink or "d3d11videosink").strip() or "d3d11videosink"
     sink_props = ["sync=false", "async=false"]
     if sink.lower() not in {"fakesink", "appsink", "filesink"}:
@@ -132,21 +134,37 @@ def _render_output_chain(cfg: DirectReceiverConfig) -> list[str]:
     return [
         "!", "queue", "max-size-buffers=1", "max-size-bytes=0",
         "max-size-time=0", "leaky=downstream",
+        *(crop_chain or []),
         "!", sink, *sink_props,
     ]
 
 
 def _frame_pipe_output_chain(cfg: DirectReceiverConfig) -> list[str]:
-    width, height = _receiver_output_dimensions(cfg)
+    width = max(0, int(cfg.width or 0))
+    height = max(0, int(cfg.height or 0))
     if width <= 0 or height <= 0:
         return []
-    return [
-        "viewport_t.", "!", "queue", "max-size-buffers=1", "max-size-bytes=0",
+    chain = [
+        "frame_t.", "!", "queue", "max-size-buffers=1", "max-size-bytes=0",
         "max-size-time=0", "leaky=downstream",
-        "!", "videoconvert",
-        "!", _raw_frame_caps(width, height),
-        "!", "fdsink", "fd=1", "sync=false", "async=false",
     ]
+    try:
+        fps = float(cfg.frame_pipe_fps or 0.0)
+    except Exception:
+        fps = 0.0
+    if fps > 0.0:
+        rate = max(1, int(round(fps)))
+        chain.extend(
+            [
+                "!", "videoconvert",
+                "!", "videorate", "drop-only=true", f"max-rate={rate}",
+                "!", f"{_raw_frame_caps(width, height)},framerate={rate}/1",
+            ]
+        )
+    else:
+        chain.extend(["!", "videoconvert", "!", _raw_frame_caps(width, height)])
+    chain.extend(["!", "fdsink", "fd=1", "sync=false", "async=false"])
+    return chain
 
 
 def _rtp_record_forward_chain(cfg: DirectReceiverConfig) -> list[str]:
@@ -175,9 +193,13 @@ def build_direct_receiver_cmd(gst_launch: str, cfg: DirectReceiverConfig) -> lis
     crop_chain = _square_crop_chain(cfg)
     output_chain: list[str]
     if bool(cfg.frame_pipe):
-        output_chain = ["!", "tee", "name=viewport_t", *_render_output_chain(cfg), *_frame_pipe_output_chain(cfg)]
+        output_chain = [
+            "!", "tee", "name=frame_t",
+            *_render_output_chain(cfg, crop_chain),
+            *_frame_pipe_output_chain(cfg),
+        ]
     else:
-        output_chain = _render_output_chain(cfg)
+        output_chain = [*crop_chain, *_render_output_chain(cfg)]
 
     if cfg.codec.lower() == "h264":
         caps = "application/x-rtp,media=video,encoding-name=H264,payload=96,clock-rate=90000"
@@ -192,7 +214,6 @@ def build_direct_receiver_cmd(gst_launch: str, cfg: DirectReceiverConfig) -> lis
             "!", "h264parse", "config-interval=-1", "disable-passthrough=true",
             "!", *_h264_decoder_chain(cfg.h264_decoder),
             "!", "videoconvert",
-            *crop_chain,
             *output_chain,
         ]
         if int(cfg.record_rtp_port or 0) > 0:
@@ -216,7 +237,6 @@ def build_direct_receiver_cmd(gst_launch: str, cfg: DirectReceiverConfig) -> lis
             "!", "rtpjpegdepay",
             "!", "jpegdec",
             "!", "videoconvert",
-            *crop_chain,
             *output_chain,
         ]
     return base + pipeline
@@ -244,7 +264,7 @@ def _viewport_frame_pipe_requested(stream_opts: dict[str, Any]) -> bool:
 
 
 def _compressed_recording_requested(stream_opts: dict[str, Any]) -> bool:
-    requested = False
+    requested = True
     for key in (
         "receiver_compressed_recording",
         "compressed_recording",
@@ -254,6 +274,41 @@ def _compressed_recording_requested(stream_opts: dict[str, Any]) -> bool:
             requested = _truthy(stream_opts.get(key), default=True)
             break
     return _env_truthy("TRITON_DIRECT_COMPRESSED_RECORDING", requested)
+
+
+def _snapshot_frame_pipe_requested(stream_opts: dict[str, Any]) -> bool:
+    requested = True
+    for key in (
+        "receiver_snapshot_frame_pipe",
+        "snapshot_frame_pipe",
+        "direct_snapshot_frame_pipe",
+        "direct_snapshot_frames",
+    ):
+        if key in stream_opts:
+            requested = _truthy(stream_opts.get(key), default=True)
+            break
+    return _env_truthy("TRITON_DIRECT_SNAPSHOT_FRAMES", requested)
+
+
+def _snapshot_frame_pipe_fps(stream_opts: dict[str, Any]) -> float:
+    for key in (
+        "receiver_snapshot_frame_pipe_fps",
+        "snapshot_frame_pipe_fps",
+        "direct_snapshot_frame_pipe_fps",
+    ):
+        if key not in stream_opts or stream_opts.get(key) is None:
+            continue
+        try:
+            return max(0.25, min(30.0, float(stream_opts.get(key))))
+        except Exception:
+            return 2.0
+    raw = os.environ.get("TRITON_DIRECT_SNAPSHOT_FPS", "").strip()
+    if raw:
+        try:
+            return max(0.25, min(30.0, float(raw)))
+        except Exception:
+            return 2.0
+    return 2.0
 
 
 def _compressed_recording_port(stream_opts: dict[str, Any], display_port: int) -> int:
@@ -560,7 +615,10 @@ class _DirectConnectWorker(QThread):
             width = int(stream_opts.get("width", start_kwargs.get("width", 0)) or 0)
             height = int(stream_opts.get("height", start_kwargs.get("height", 0)) or 0)
             requested_frame_pipe = self.viewport_frame_pipe_requested or _viewport_frame_pipe_requested(stream_opts)
-            frame_pipe = bool(requested_frame_pipe and width > 0 and height > 0)
+            requested_snapshot_pipe = _snapshot_frame_pipe_requested(stream_opts)
+            frame_pipe = bool((requested_frame_pipe or requested_snapshot_pipe) and width > 0 and height > 0)
+            frame_pipe_mode = "capture" if requested_frame_pipe else ("snapshot" if requested_snapshot_pipe else "")
+            frame_pipe_fps = 0.0 if requested_frame_pipe else _snapshot_frame_pipe_fps(stream_opts)
             record_rtp_host = "127.0.0.1"
             record_rtp_port = 0
             record_latency_ms = _compressed_recording_latency_ms(stream_opts)
@@ -581,10 +639,12 @@ class _DirectConnectWorker(QThread):
                 sink=sink,
                 square_crop=bool(self.square_crop),
                 frame_pipe=frame_pipe,
+                frame_pipe_fps=frame_pipe_fps,
                 record_rtp_port=record_rtp_port,
                 record_rtp_host=record_rtp_host,
             )
-            frame_width, frame_height = _receiver_output_dimensions(cfg)
+            frame_width = int(width if frame_pipe else 0)
+            frame_height = int(height if frame_pipe else 0)
             cmd = build_direct_receiver_cmd(_find_gst_launch(), cfg)
             env = dict(os.environ)
             bootstrap_gstreamer_env(env)
@@ -607,6 +667,8 @@ class _DirectConnectWorker(QThread):
             )
             receiver_info = {
                 "frame_pipe": bool(frame_pipe),
+                "frame_pipe_mode": frame_pipe_mode,
+                "frame_pipe_fps": float(frame_pipe_fps),
                 "frame_width": int(frame_width),
                 "frame_height": int(frame_height),
                 "codec": codec,
@@ -936,6 +998,7 @@ class DirectGstVideoWidget(QWidget):
         self._capture_lock = threading.RLock()
         self._viewport_reader: _ViewportFramePipe | None = None
         self._viewport_frame_pipe_enabled = False
+        self._snapshot_frame_pipe_enabled = False
         self._capture_frame_pipe_requested = False
         self._last_rejected_capture_artifact_seq: int | None = None
         self._compressed_recording_available = False
@@ -1136,6 +1199,7 @@ class DirectGstVideoWidget(QWidget):
         reader = self._viewport_reader
         self._viewport_reader = None
         self._viewport_frame_pipe_enabled = False
+        self._snapshot_frame_pipe_enabled = False
         if reader is not None:
             try:
                 reader.stop()
@@ -1199,7 +1263,7 @@ class DirectGstVideoWidget(QWidget):
                 self._viewport_reader,
                 consume=consume,
                 allow_stale_latest=allow_stale_latest and time.monotonic() >= deadline,
-            ) if self._viewport_reader is not None else None
+            ) if self._viewport_reader is not None and self._viewport_frame_pipe_enabled else None
             if packet is None and fallback_opened and self._capture_camera is not None:
                 packet = self._source_packet(
                     self._capture_camera,
@@ -1240,7 +1304,7 @@ class DirectGstVideoWidget(QWidget):
             time.sleep(0.02)
 
     def _ensure_capture_source(self, *, wait_s: float = 0.25) -> str:
-        if self._viewport_reader is not None:
+        if self._viewport_reader is not None and self._viewport_frame_pipe_enabled:
             packet = self._capture_packet(
                 wait_s=max(0.0, float(wait_s)),
                 consume=False,
@@ -1269,16 +1333,28 @@ class DirectGstVideoWidget(QWidget):
     def _direct_render_snapshot_frame(self) -> tuple[np.ndarray, str] | None:
         """Grab a still frame without opening the separate capture receiver."""
 
-        if self._viewport_reader is not None:
-            packet = self._capture_packet(
-                wait_s=0.25,
-                consume=True,
-                allow_stale_latest=False,
-                allow_capture_fallback=False,
-                reject_unusable=True,
+        if self._viewport_reader is not None and (
+            self._snapshot_frame_pipe_enabled or self._viewport_frame_pipe_enabled
+        ):
+            packet = self._source_packet(
+                self._viewport_reader,
+                consume=False,
+                allow_stale_latest=True,
             )
             if packet is not None:
-                return np.array(packet.frame_bgr, copy=True), "viewport_pipe"
+                rejection_reason = capture_frame_rejection_reason(packet.frame_bgr)
+                if rejection_reason is None:
+                    self._store_packet(packet)
+                    source = "direct_snapshot_pipe"
+                    if self._viewport_frame_pipe_enabled:
+                        source = "direct_frame_pipe"
+                    return np.array(packet.frame_bgr, copy=True), source
+                trace_event(
+                    "direct_snapshot_pipe_rejected",
+                    stream=self.stream_name,
+                    seq=int(getattr(packet, "seq", -1)),
+                    reason=rejection_reason,
+                )
 
         if not _env_truthy("TRITON_DIRECT_SCREEN_SNAPSHOT", False):
             return None
@@ -1329,8 +1405,73 @@ class DirectGstVideoWidget(QWidget):
         )
         return frame, "direct3d_screen"
 
+    def _rov_snapshot_png_payload(self) -> bytes | None:
+        """Capture one PNG from TritonOS without opening the topside mirror receiver."""
+
+        rov = getattr(self.manager, "rov", None)
+        capture = getattr(rov, "capture_frame", None)
+        if not callable(capture):
+            return None
+        capture_s = time.monotonic()
+        try:
+            response = capture(stream=self.stream_name, wait_s=_snapshot_wait_s(), format="png")
+        except Exception as exc:
+            trace_event(
+                "direct_snapshot_rov_capture_failed",
+                stream=self.stream_name,
+                dt_ms=(time.monotonic() - capture_s) * 1000.0,
+                error=str(exc),
+            )
+            return None
+        if not isinstance(response, dict):
+            trace_event(
+                "direct_snapshot_rov_capture_failed",
+                stream=self.stream_name,
+                dt_ms=(time.monotonic() - capture_s) * 1000.0,
+                error="invalid_response",
+            )
+            return None
+        fmt = str(response.get("format") or response.get("image_format") or "png").strip().lower()
+        if fmt not in {"png", "image/png"}:
+            trace_event(
+                "direct_snapshot_rov_capture_failed",
+                stream=self.stream_name,
+                dt_ms=(time.monotonic() - capture_s) * 1000.0,
+                error=f"unsupported_format:{fmt}",
+            )
+            return None
+        raw = response.get("image_b64", response.get("payload_b64"))
+        if not raw:
+            trace_event(
+                "direct_snapshot_rov_capture_failed",
+                stream=self.stream_name,
+                dt_ms=(time.monotonic() - capture_s) * 1000.0,
+                error="missing_image_b64",
+            )
+            return None
+        try:
+            payload = base64.b64decode(str(raw), validate=True)
+        except Exception as exc:
+            trace_event(
+                "direct_snapshot_rov_capture_failed",
+                stream=self.stream_name,
+                dt_ms=(time.monotonic() - capture_s) * 1000.0,
+                error=str(exc),
+            )
+            return None
+        if not payload:
+            return None
+        trace_event(
+            "direct_snapshot_rov_capture_completed",
+            stream=self.stream_name,
+            seq=response.get("seq"),
+            dt_ms=(time.monotonic() - capture_s) * 1000.0,
+            shape=response.get("shape"),
+        )
+        return payload
+
     def latest_frame_packet(self):
-        if self._viewport_reader is not None:
+        if self._viewport_reader is not None and self._viewport_frame_pipe_enabled:
             latest = getattr(self._viewport_reader, "latest_frame_packet", None)
             if callable(latest):
                 try:
@@ -1351,7 +1492,7 @@ class DirectGstVideoWidget(QWidget):
             return None
 
     def recent_frame_packets(self, *, max_age_s: float = 0.5):
-        if self._viewport_reader is not None:
+        if self._viewport_reader is not None and self._viewport_frame_pipe_enabled:
             recent = getattr(self._viewport_reader, "recent_frame_packets", None)
             if callable(recent):
                 try:
@@ -1408,6 +1549,7 @@ class DirectGstVideoWidget(QWidget):
         self._proc = proc
         embedded_hwnd = 0
         frame_pipe = False
+        frame_pipe_mode = ""
         frame_width = 0
         frame_height = 0
         record_rtp_port = 0
@@ -1416,6 +1558,7 @@ class DirectGstVideoWidget(QWidget):
         codec = ""
         if isinstance(info, dict):
             frame_pipe = bool(info.get("frame_pipe"))
+            frame_pipe_mode = str(info.get("frame_pipe_mode") or "")
             try:
                 frame_width = int(info.get("frame_width") or 0)
                 frame_height = int(info.get("frame_height") or 0)
@@ -1442,7 +1585,8 @@ class DirectGstVideoWidget(QWidget):
         self._compressed_record_latency_ms = max(0, int(record_latency_ms))
         if frame_pipe and frame_width > 0 and frame_height > 0:
             self._viewport_reader = _ViewportFramePipe(self.stream_name, frame_width, frame_height)
-            self._viewport_frame_pipe_enabled = True
+            self._viewport_frame_pipe_enabled = frame_pipe_mode == "capture"
+            self._snapshot_frame_pipe_enabled = frame_pipe_mode in {"snapshot", "capture"}
             try:
                 self._viewport_reader.start(proc.stdout)
             except Exception as exc:
@@ -1475,7 +1619,7 @@ class DirectGstVideoWidget(QWidget):
             self._show_message(f"{self.stream_name}\nWaiting for Direct3D window...")
         if not self._embedded_hwnd and not self._embed_timer.isActive():
             self._embed_timer.start()
-        if not self._viewport_frame_pipe_enabled:
+        if self._viewport_reader is None:
             threading.Thread(target=self._log_stream, args=(proc.stdout, "OUT"), daemon=True).start()
         threading.Thread(target=self._log_stream, args=(proc.stderr, "ERR"), daemon=True).start()
 
@@ -2066,18 +2210,25 @@ class DirectGstVideoWidget(QWidget):
 
         direct_snapshot = self._direct_render_snapshot_frame()
         direct_frame = None
+        rov_png_payload = None
         snapshot_source = "capture"
         if direct_snapshot is not None:
             direct_frame, snapshot_source = direct_snapshot
         else:
-            try:
-                snapshot_source = self._ensure_capture_source(wait_s=0.25)
-            except Exception as exc:
-                logger.warning("Could not prepare capture source for snapshot '%s': %s", self.stream_name, exc)
-                return None
+            rov_png_payload = self._rov_snapshot_png_payload()
+            if rov_png_payload is not None:
+                snapshot_source = "rov_capture_rpc"
+            else:
+                try:
+                    snapshot_source = self._ensure_capture_source(wait_s=0.25)
+                except Exception as exc:
+                    logger.warning("Could not prepare capture source for snapshot '%s': %s", self.stream_name, exc)
+                    return None
         trace_event("direct_snapshot_source_selected", stream=self.stream_name, source=snapshot_source)
         if direct_frame is not None:
             frame = np.array(direct_frame, copy=True)
+        elif rov_png_payload is not None:
+            frame = None
         else:
             packet = self._capture_packet(
                 wait_s=_snapshot_wait_s(),
@@ -2099,7 +2250,10 @@ class DirectGstVideoWidget(QWidget):
 
         def _write_snapshot() -> None:
             try:
-                save_snapshot(frame, out_path)
+                if rov_png_payload is not None:
+                    Path(out_path).write_bytes(rov_png_payload)
+                else:
+                    save_snapshot(frame, out_path)
             except Exception as exc:
                 logger.warning("Snapshot write failed for '%s' -> %s: %s", self.stream_name, out_path, exc)
 

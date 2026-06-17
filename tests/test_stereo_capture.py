@@ -1,4 +1,5 @@
 import json
+import base64
 import time
 from pathlib import Path
 
@@ -78,9 +79,11 @@ class _FakeManager:
             "Left": _FakeCamera("Left", 1, 10.000),
             "Right": _FakeCamera("Right", 2, 10.012),
         }
+        self.opened = []
         self.closed = []
 
     def open(self, name: str):
+        self.opened.append(name)
         return self.cameras[name]
 
     def close(self, name: str):
@@ -127,6 +130,127 @@ def test_stereo_capture_session_writes_pair_and_manifest(tmp_path: Path):
     assert manifest["pair"]["rig_id"] == "rig-a"
     assert len(manifest["frames"]) == 1
     assert set(manager.closed) == {"Left", "Right"}
+
+
+class _FakeRovStereoCapture:
+    def __init__(self, *, fail: Exception | None = None):
+        self.fail = fail
+        self.calls = []
+
+    def capture_stereo_pair(self, **kwargs):
+        self.calls.append(dict(kwargs))
+        if self.fail is not None:
+            raise self.fail
+        return {
+            "timestamp_source": "rov_capture_ring",
+            "pair_delta_ms": 8.0,
+            "left": {
+                "stream": kwargs.get("left", "Left"),
+                "seq": 101,
+                "monotonic_ts": 50.000,
+                "wall_ts": 1050.000,
+                "source_pts_ns": 123456,
+                "shape": [1080, 1920, 3],
+                "format": "png",
+                "image_b64": base64.b64encode(b"left-png").decode("ascii"),
+            },
+            "right": {
+                "stream": kwargs.get("right", "Right"),
+                "seq": 202,
+                "monotonic_ts": 50.008,
+                "wall_ts": 1050.008,
+                "source_pts_ns": 124456,
+                "shape": [1080, 1920, 3],
+                "format": "png",
+                "image_b64": base64.b64encode(b"right-png").decode("ascii"),
+            },
+        }
+
+
+def test_stereo_capture_session_prefers_rov_capture_rpc(tmp_path: Path):
+    streams_path = tmp_path / "streams.json"
+    streams_path.write_text(
+        json.dumps(
+            {
+                "streams": [{"name": "Left"}, {"name": "Right"}],
+                "stereo_pairs": [
+                    {
+                        "name": "Forward",
+                        "left": "Left",
+                        "right": "Right",
+                        "rig_id": "rig-a",
+                        "max_pair_delta_ms": 20,
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    pair = load_stereo_pairs(streams_path)[0]
+    manager = _FakeManager()
+    manager.rov = _FakeRovStereoCapture()
+    session = StereoCaptureSession(
+        manager,  # type: ignore[arg-type]
+        pair,
+        output_root=tmp_path,
+        session_name="rov-rpc-session",
+        close_on_stop=True,
+    )
+
+    session.start()
+    record = session.capture_once(wait_s=0.1)
+    session.stop()
+
+    assert manager.opened == []
+    assert manager.rov.calls
+    assert manager.rov.calls[0]["left"] == "Left"
+    assert manager.rov.calls[0]["right"] == "Right"
+    assert record["timestamp_source"] == "rov_capture_ring"
+    assert record["pair_delta_ms"] == pytest.approx(8.0)
+    assert record["left"]["source_pts_ns"] == 123456
+    assert (session.session_dir / record["left_path"]).read_bytes() == b"left-png"
+    assert (session.session_dir / record["right_path"]).read_bytes() == b"right-png"
+    manifest = json.loads(session.manifest_path.read_text(encoding="utf-8"))
+    assert manifest["capture_notes"]["timestamp_source"] == "rov_capture_ring"
+    assert manifest["frames"][0]["timestamp_source"] == "rov_capture_ring"
+
+
+def test_stereo_capture_session_falls_back_when_rov_rpc_is_unsupported(tmp_path: Path):
+    streams_path = tmp_path / "streams.json"
+    streams_path.write_text(
+        json.dumps(
+            {
+                "streams": [{"name": "Left"}, {"name": "Right"}],
+                "stereo_pairs": [
+                    {
+                        "name": "Forward",
+                        "left": "Left",
+                        "right": "Right",
+                        "rig_id": "rig-a",
+                        "max_pair_delta_ms": 20,
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    pair = load_stereo_pairs(streams_path)[0]
+    manager = _FakeManager()
+    manager.rov = _FakeRovStereoCapture(fail=RuntimeError("unknown cmd: capture_stereo_pair"))
+    session = StereoCaptureSession(
+        manager,  # type: ignore[arg-type]
+        pair,
+        output_root=tmp_path,
+        session_name="rov-fallback-session",
+    )
+
+    session.start()
+    record = session.capture_once(wait_s=0.1)
+    session.stop()
+
+    assert manager.opened == ["Left", "Right"]
+    assert record["timestamp_source"] == "topside_receiver"
+    assert record["pair_delta_ms"] == pytest.approx(12.0)
 
 
 def test_stereo_capture_session_can_use_external_frame_sources(tmp_path: Path):
@@ -362,6 +486,56 @@ def test_stereo_capture_chooses_closest_buffered_frame_pair(tmp_path: Path):
     assert record["left"]["seq"] == 10
     assert record["right"]["seq"] == 20
     assert record["pair_delta_ms"] == pytest.approx(10.0)
+
+
+def test_stereo_capture_can_require_post_trigger_frames(tmp_path: Path):
+    streams_path = tmp_path / "streams.json"
+    streams_path.write_text(
+        json.dumps(
+            {
+                "streams": [{"name": "Left"}, {"name": "Right"}],
+                "stereo_pairs": [
+                    {
+                        "name": "Forward",
+                        "left": "Left",
+                        "right": "Right",
+                        "rig_id": "rig-a",
+                        "max_pair_delta_ms": 20,
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    pair = load_stereo_pairs(streams_path)[0]
+    manager = _FakeManager()
+    manager.cameras["Left"].packets = [
+        CameraFramePacket("Left", _usable_frame(10), 10, 100.000, 1000.000),
+        CameraFramePacket("Left", _usable_frame(11), 11, 100.520, 1000.520),
+    ]
+    manager.cameras["Right"].packets = [
+        CameraFramePacket("Right", _usable_frame(20), 20, 100.000, 1000.000),
+        CameraFramePacket("Right", _usable_frame(21), 21, 100.532, 1000.532),
+    ]
+    session = StereoCaptureSession(
+        manager,  # type: ignore[arg-type]
+        pair,
+        output_root=tmp_path,
+        session_name="post-trigger-session",
+    )
+
+    session.start()
+    record = session.capture_once(
+        wait_s=0.1,
+        min_frame_monotonic_ts=100.500,
+        target_monotonic_ts=100.500,
+    )
+    session.stop()
+
+    assert record["left"]["seq"] == 11
+    assert record["right"]["seq"] == 21
+    assert record["pair_delta_ms"] == pytest.approx(12.0)
+    assert record["min_frame_monotonic_ts"] == pytest.approx(100.500)
 
 
 def test_stereo_capture_skips_green_startup_artifact_packets(tmp_path: Path):

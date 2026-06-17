@@ -113,6 +113,9 @@
         "sender_queue_max_buffers": 1,
         "sender_queue_max_time_ms": 0,
         "sender_v4l2_do_timestamp": true,
+        "capture_ring": true,
+        "capture_ring_fps": 5,
+        "capture_ring_history_size": 30,
         "v4l2_controls": {
           "exposure_dynamic_framerate": 0
         }
@@ -145,6 +148,9 @@
         "sender_queue_max_buffers": 1,
         "sender_queue_max_time_ms": 0,
         "sender_v4l2_do_timestamp": true,
+        "capture_ring": true,
+        "capture_ring_fps": 5,
+        "capture_ring_history_size": 30,
         "v4l2_controls": {
           "exposure_dynamic_framerate": 0
         }

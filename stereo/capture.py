@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import base64
 import threading
 import time
 from concurrent.futures import Future, ThreadPoolExecutor
@@ -60,6 +61,8 @@ class StereoCaptureSession:
         self._last_left_seq: int | None = None
         self._last_right_seq: int | None = None
         self._last_pair_key: tuple[int, int] | None = None
+        self._last_left_monotonic_ts: float | None = None
+        self._last_right_monotonic_ts: float | None = None
         self._started_wall_ts: float | None = None
         self._manifest: dict[str, Any] = {}
         self._manifest_dirty = False
@@ -67,6 +70,8 @@ class StereoCaptureSession:
         self._manifest_flush_interval_s = 1.0
         self._using_capture_receivers = False
         self._using_external_frame_sources = False
+        self._using_rov_capture_rpc = False
+        self._timestamp_source = "topside_receiver"
         self._save_executor: ThreadPoolExecutor | None = None
         self._save_futures: list[Future] = []
         self._save_lock = threading.Lock()
@@ -90,6 +95,33 @@ class StereoCaptureSession:
         self.left_dir.mkdir(parents=True, exist_ok=True)
         self.right_dir.mkdir(parents=True, exist_ok=True)
         self._started_wall_ts = time.time()
+        self._using_rov_capture_rpc = self._rov_capture_rpc_available()
+        if self._using_rov_capture_rpc:
+            self._left_camera = None
+            self._right_camera = None
+            self._using_capture_receivers = False
+            self._using_external_frame_sources = False
+        else:
+            self._open_topside_sources()
+        self._manifest = self._load_existing_manifest() or self._base_manifest()
+        self._resume_frame_state()
+        self._write_manifest()
+        trace_event(
+            "stereo_session_started",
+            pair=self.pair.name,
+            session_dir=self.session_dir,
+            using_capture_receivers=self._using_capture_receivers,
+            using_external_frame_sources=self._using_external_frame_sources,
+            using_rov_capture_rpc=self._using_rov_capture_rpc,
+            dt_ms=(time.monotonic() - start_s) * 1000.0,
+        )
+        return self.session_dir
+
+    def _rov_capture_rpc_available(self) -> bool:
+        rov = getattr(self.manager, "rov", None)
+        return callable(getattr(rov, "capture_stereo_pair", None))
+
+    def _open_topside_sources(self) -> None:
         external_left = None
         external_right = None
         if callable(self.frame_source_provider):
@@ -115,18 +147,11 @@ class StereoCaptureSession:
                 self._right_camera = self.manager.open(self.pair.right)
                 self._using_capture_receivers = False
             self._using_external_frame_sources = False
-        self._manifest = self._load_existing_manifest() or self._base_manifest()
-        self._resume_frame_state()
-        self._write_manifest()
-        trace_event(
-            "stereo_session_started",
-            pair=self.pair.name,
-            session_dir=self.session_dir,
-            using_capture_receivers=self._using_capture_receivers,
-            using_external_frame_sources=self._using_external_frame_sources,
-            dt_ms=(time.monotonic() - start_s) * 1000.0,
-        )
-        return self.session_dir
+
+    def _ensure_topside_sources(self) -> None:
+        if self._left_camera is not None and self._right_camera is not None:
+            return
+        self._open_topside_sources()
 
     def stop(self) -> None:
         """Flush the manifest. Stream ownership remains with the camera manager."""
@@ -174,16 +199,17 @@ class StereoCaptureSession:
         require_fresh: bool = True,
         flush_manifest: bool = True,
         async_save: bool = False,
+        min_frame_monotonic_ts: float | None = None,
+        target_monotonic_ts: float | None = None,
         stop_requested: Callable[[], bool] | None = None,
     ) -> dict[str, Any]:
         """Capture one stereo pair whose receiver timestamps are close enough."""
 
-        if self._left_camera is None or self._right_camera is None:
-            raise StereoCaptureError("StereoCaptureSession.start() must be called before capture")
-
+        capture_start_s = time.monotonic()
+        if target_monotonic_ts is None:
+            target_monotonic_ts = capture_start_s
         deadline = time.monotonic() + max(0.0, float(wait_s))
         best_delta_s: float | None = None
-        capture_start_s = time.monotonic()
         attempts = 0
         trace_event(
             "stereo_capture_once_start",
@@ -193,13 +219,46 @@ class StereoCaptureSession:
             require_fresh=require_fresh,
             flush_manifest=flush_manifest,
             async_save=async_save,
+            min_frame_monotonic_ts=min_frame_monotonic_ts,
+            target_monotonic_ts=target_monotonic_ts,
         )
+
+        if self._using_rov_capture_rpc:
+            try:
+                return self._capture_once_via_rov(
+                    wait_s=wait_s,
+                    flush_manifest=flush_manifest,
+                    capture_request_monotonic_ts=capture_start_s,
+                    target_monotonic_ts=target_monotonic_ts,
+                    min_frame_monotonic_ts=min_frame_monotonic_ts,
+                    stop_requested=stop_requested,
+                )
+            except StereoCaptureInterrupted:
+                raise
+            except Exception as exc:
+                if not self._rov_capture_error_allows_fallback(exc):
+                    raise StereoCaptureError(f"ROV stereo capture failed: {exc}") from exc
+                trace_event(
+                    "stereo_rov_capture_fallback",
+                    pair=self.pair.name,
+                    error=str(exc),
+                )
+                self._using_rov_capture_rpc = False
+                self._timestamp_source = "topside_receiver"
+                self._ensure_topside_sources()
+
+        if self._left_camera is None or self._right_camera is None:
+            raise StereoCaptureError("StereoCaptureSession.start() must be called before capture")
 
         while time.monotonic() <= deadline:
             if stop_requested is not None and stop_requested():
                 raise StereoCaptureInterrupted("Stereo capture stopped")
             attempts += 1
-            match = self._best_recent_pair(require_fresh=require_fresh)
+            match = self._best_recent_pair(
+                require_fresh=require_fresh,
+                min_frame_monotonic_ts=min_frame_monotonic_ts,
+                target_monotonic_ts=target_monotonic_ts,
+            )
             if match is None:
                 time.sleep(0.005)
                 continue
@@ -223,6 +282,9 @@ class StereoCaptureSession:
                     left,
                     right,
                     delta_s,
+                    capture_request_monotonic_ts=capture_start_s,
+                    target_monotonic_ts=target_monotonic_ts,
+                    min_frame_monotonic_ts=min_frame_monotonic_ts,
                     flush_manifest=flush_manifest,
                     async_save=async_save,
                 )
@@ -249,7 +311,15 @@ class StereoCaptureSession:
 
         captures: list[dict[str, Any]] = []
         for idx in range(max(0, int(count))):
-            captures.append(self.capture_once(wait_s=wait_s, require_fresh=True))
+            capture_target_s = time.monotonic()
+            captures.append(
+                self.capture_once(
+                    wait_s=wait_s,
+                    require_fresh=True,
+                    min_frame_monotonic_ts=capture_target_s,
+                    target_monotonic_ts=capture_target_s,
+                )
+            )
             if idx < int(count) - 1:
                 time.sleep(max(0.0, float(interval_s)))
         return captures
@@ -291,12 +361,36 @@ class StereoCaptureSession:
             )
         return False
 
-    def _best_recent_pair(self, *, require_fresh: bool) -> tuple[CameraFramePacket, CameraFramePacket] | None:
+    def _best_recent_pair(
+        self,
+        *,
+        require_fresh: bool,
+        min_frame_monotonic_ts: float | None = None,
+        target_monotonic_ts: float | None = None,
+    ) -> tuple[CameraFramePacket, CameraFramePacket] | None:
         left_frames = self._recent_packets(self._left_camera)
         right_frames = self._recent_packets(self._right_camera)
-        best: tuple[float, CameraFramePacket, CameraFramePacket] | None = None
+        best: tuple[tuple[float, float], CameraFramePacket, CameraFramePacket] | None = None
         for left in left_frames:
+            left_ts = float(left.monotonic_ts)
+            if min_frame_monotonic_ts is not None and left_ts < float(min_frame_monotonic_ts):
+                continue
+            if (
+                require_fresh
+                and self._last_left_monotonic_ts is not None
+                and left_ts <= float(self._last_left_monotonic_ts)
+            ):
+                continue
             for right in right_frames:
+                right_ts = float(right.monotonic_ts)
+                if min_frame_monotonic_ts is not None and right_ts < float(min_frame_monotonic_ts):
+                    continue
+                if (
+                    require_fresh
+                    and self._last_right_monotonic_ts is not None
+                    and right_ts <= float(self._last_right_monotonic_ts)
+                ):
+                    continue
                 pair_key = (int(left.seq), int(right.seq))
                 if require_fresh and pair_key == self._last_pair_key:
                     continue
@@ -304,9 +398,13 @@ class StereoCaptureSession:
                 # when both cameras are live but one side briefly stalls.
                 if require_fresh and (left.seq == self._last_left_seq or right.seq == self._last_right_seq):
                     continue
-                delta_s = abs(float(left.monotonic_ts) - float(right.monotonic_ts))
-                if best is None or delta_s < best[0]:
-                    best = (delta_s, left, right)
+                delta_s = abs(left_ts - right_ts)
+                midpoint_target_s = 0.0
+                if target_monotonic_ts is not None:
+                    midpoint_target_s = abs(((left_ts + right_ts) * 0.5) - float(target_monotonic_ts))
+                score = (delta_s, midpoint_target_s)
+                if best is None or score < best[0]:
+                    best = (score, left, right)
         if best is None:
             return None
         return best[1], best[2]
@@ -329,7 +427,8 @@ class StereoCaptureSession:
                 "right": self._stream_def(self.pair.right),
             },
             "capture_notes": {
-                "timestamp_source": "topside receiver time after decoded frame read",
+                "timestamp_source": self._timestamp_source,
+                "topside_timestamp_source": "topside receiver time after decoded frame read; UI/CLI captures require post-trigger frames when possible",
                 "sync_quality": "best effort; exploreHD is rolling shutter and lacks external frame sync",
                 "quality_gate": "skips uniform green H.264 startup artifacts before pairing",
             },
@@ -366,6 +465,8 @@ class StereoCaptureSession:
         self._last_left_seq = None
         self._last_right_seq = None
         self._last_pair_key = None
+        self._last_left_monotonic_ts = None
+        self._last_right_monotonic_ts = None
         for frame in frames:
             try:
                 self._frame_index = max(self._frame_index, int(frame.get("index", 0)))
@@ -379,10 +480,14 @@ class StereoCaptureSession:
                 self._last_left_seq = int(left.get("seq"))
                 self._last_right_seq = int(right.get("seq"))
                 self._last_pair_key = (self._last_left_seq, self._last_right_seq)
+                self._last_left_monotonic_ts = float(left.get("monotonic_ts"))
+                self._last_right_monotonic_ts = float(right.get("monotonic_ts"))
             except Exception:
                 self._last_left_seq = None
                 self._last_right_seq = None
                 self._last_pair_key = None
+                self._last_left_monotonic_ts = None
+                self._last_right_monotonic_ts = None
 
     def _write_manifest(self) -> None:
         self.session_dir.mkdir(parents=True, exist_ok=True)
@@ -505,12 +610,179 @@ class StereoCaptureSession:
                 frame["save_pending"] = False
                 self._manifest_dirty = True
 
+    def _set_manifest_timestamp_source(self, source: str) -> None:
+        self._timestamp_source = str(source or "topside_receiver")
+        notes = self._manifest.setdefault("capture_notes", {})
+        if isinstance(notes, dict) and notes.get("timestamp_source") != self._timestamp_source:
+            notes["timestamp_source"] = self._timestamp_source
+            self._manifest_dirty = True
+
+    def _rov_capture_error_allows_fallback(self, exc: Exception) -> bool:
+        text = str(exc or "").lower()
+        return any(
+            phrase in text
+            for phrase in (
+                "unknown cmd",
+                "not supported",
+                "capture ring",
+                "no frame",
+                "no frames",
+                "not running",
+                "timeout",
+            )
+        )
+
+    def _stream_rotation_is_identity(self) -> bool:
+        if not self.pair.apply_stream_rotation:
+            return True
+        try:
+            left_rotation = int(self._stream_def(self.pair.left).get("rotation_deg", 0) or 0)
+            right_rotation = int(self._stream_def(self.pair.right).get("rotation_deg", 0) or 0)
+        except Exception:
+            return True
+        return left_rotation % 360 == 0 and right_rotation % 360 == 0
+
+    def _capture_once_via_rov(
+        self,
+        *,
+        wait_s: float,
+        flush_manifest: bool,
+        capture_request_monotonic_ts: float,
+        target_monotonic_ts: float | None,
+        min_frame_monotonic_ts: float | None,
+        stop_requested: Callable[[], bool] | None = None,
+    ) -> dict[str, Any]:
+        if stop_requested is not None and stop_requested():
+            raise StereoCaptureInterrupted("Stereo capture stopped")
+        if not self._stream_rotation_is_identity():
+            raise StereoCaptureError("ROV stereo capture does not apply stream rotation yet")
+        rov = getattr(self.manager, "rov", None)
+        capture = getattr(rov, "capture_stereo_pair", None)
+        if not callable(capture):
+            raise StereoCaptureError("ROV stereo capture is not supported")
+        capture_s = time.monotonic()
+        response = capture(
+            left=self.pair.left,
+            right=self.pair.right,
+            max_pair_delta_ms=float(self.pair.max_pair_delta_ms),
+            wait_s=float(wait_s),
+            format="png",
+        )
+        trace_event(
+            "stereo_rov_capture_completed",
+            pair=self.pair.name,
+            dt_ms=(time.monotonic() - capture_s) * 1000.0,
+            pair_delta_ms=(response or {}).get("pair_delta_ms") if isinstance(response, dict) else None,
+        )
+        return self._save_rov_pair(
+            response or {},
+            capture_request_monotonic_ts=capture_request_monotonic_ts,
+            target_monotonic_ts=target_monotonic_ts,
+            min_frame_monotonic_ts=min_frame_monotonic_ts,
+            flush_manifest=flush_manifest,
+        )
+
+    def _decode_rov_image_payload(self, frame: dict[str, Any], side: str) -> bytes:
+        fmt = str(frame.get("format") or frame.get("image_format") or "png").strip().lower()
+        if fmt not in {"png", "image/png"}:
+            raise StereoCaptureError(f"ROV {side} frame returned unsupported format: {fmt}")
+        raw = frame.get("image_b64", frame.get("payload_b64"))
+        if not raw:
+            raise StereoCaptureError(f"ROV {side} frame did not include image_b64")
+        try:
+            return base64.b64decode(str(raw), validate=True)
+        except Exception as exc:
+            raise StereoCaptureError(f"ROV {side} frame image_b64 was not valid base64") from exc
+
+    def _save_rov_pair(
+        self,
+        response: dict[str, Any],
+        *,
+        capture_request_monotonic_ts: float,
+        target_monotonic_ts: float | None,
+        min_frame_monotonic_ts: float | None,
+        flush_manifest: bool = True,
+    ) -> dict[str, Any]:
+        left_info = dict(response.get("left") or {})
+        right_info = dict(response.get("right") or {})
+        left_bytes = self._decode_rov_image_payload(left_info, "left")
+        right_bytes = self._decode_rov_image_payload(right_info, "right")
+        if not left_bytes or not right_bytes:
+            raise StereoCaptureError("ROV stereo capture returned an empty image")
+
+        self._frame_index += 1
+        stem = f"pair_{self._frame_index:06d}"
+        left_path = self.left_dir / f"{stem}_left.png"
+        right_path = self.right_dir / f"{stem}_right.png"
+        left_path.write_bytes(left_bytes)
+        right_path.write_bytes(right_bytes)
+
+        left_seq = int(left_info.get("seq", self._frame_index))
+        right_seq = int(right_info.get("seq", self._frame_index))
+        left_mono = float(left_info.get("monotonic_ts", left_info.get("capture_monotonic_ts", time.monotonic())))
+        right_mono = float(right_info.get("monotonic_ts", right_info.get("capture_monotonic_ts", time.monotonic())))
+        left_wall = float(left_info.get("wall_ts", left_info.get("capture_wall_ts", time.time())))
+        right_wall = float(right_info.get("wall_ts", right_info.get("capture_wall_ts", time.time())))
+        delta_ms = float(response.get("pair_delta_ms", abs(left_mono - right_mono) * 1000.0))
+
+        self._last_left_seq = left_seq
+        self._last_right_seq = right_seq
+        self._last_pair_key = (left_seq, right_seq)
+        self._last_left_monotonic_ts = left_mono
+        self._last_right_monotonic_ts = right_mono
+        self._set_manifest_timestamp_source("rov_capture_ring")
+        record = {
+            "index": self._frame_index,
+            "stem": stem,
+            "left_path": str(left_path.relative_to(self.session_dir)),
+            "right_path": str(right_path.relative_to(self.session_dir)),
+            "pair_delta_ms": delta_ms,
+            "timestamp_source": "rov_capture_ring",
+            "capture_request_monotonic_ts": float(capture_request_monotonic_ts),
+            "capture_target_monotonic_ts": None if target_monotonic_ts is None else float(target_monotonic_ts),
+            "min_frame_monotonic_ts": None if min_frame_monotonic_ts is None else float(min_frame_monotonic_ts),
+            "save_pending": False,
+            "left": {
+                "stream": self.pair.left,
+                "seq": left_seq,
+                "wall_ts": left_wall,
+                "monotonic_ts": left_mono,
+                "source_pts_ns": left_info.get("source_pts_ns"),
+                "shape": list(left_info.get("shape") or []),
+            },
+            "right": {
+                "stream": self.pair.right,
+                "seq": right_seq,
+                "wall_ts": right_wall,
+                "monotonic_ts": right_mono,
+                "source_pts_ns": right_info.get("source_pts_ns"),
+                "shape": list(right_info.get("shape") or []),
+            },
+        }
+        self._manifest.setdefault("frames", []).append(record)
+        self._manifest_dirty = True
+        self._flush_manifest_if_needed(force=flush_manifest)
+        trace_event(
+            "stereo_save_pair_done",
+            pair=self.pair.name,
+            index=self._frame_index,
+            stem=stem,
+            flush_manifest=flush_manifest,
+            async_save=False,
+            timestamp_source="rov_capture_ring",
+            manifest_dirty=self._manifest_dirty,
+        )
+        return record
+
     def _save_pair(
         self,
         left: CameraFramePacket,
         right: CameraFramePacket,
         delta_s: float,
         *,
+        capture_request_monotonic_ts: float | None = None,
+        target_monotonic_ts: float | None = None,
+        min_frame_monotonic_ts: float | None = None,
         flush_manifest: bool = True,
         async_save: bool = False,
     ) -> dict[str, Any]:
@@ -542,15 +814,24 @@ class StereoCaptureSession:
             if not left_path.exists() or not right_path.exists():
                 raise StereoCaptureError("Failed to write one or both stereo images")
 
+        self._set_manifest_timestamp_source("topside_receiver")
         self._last_left_seq = int(left.seq)
         self._last_right_seq = int(right.seq)
         self._last_pair_key = (int(left.seq), int(right.seq))
+        self._last_left_monotonic_ts = float(left.monotonic_ts)
+        self._last_right_monotonic_ts = float(right.monotonic_ts)
         record = {
             "index": self._frame_index,
             "stem": stem,
             "left_path": str(left_path.relative_to(self.session_dir)),
             "right_path": str(right_path.relative_to(self.session_dir)),
             "pair_delta_ms": float(delta_s * 1000.0),
+            "timestamp_source": "topside_receiver",
+            "capture_request_monotonic_ts": None
+            if capture_request_monotonic_ts is None
+            else float(capture_request_monotonic_ts),
+            "capture_target_monotonic_ts": None if target_monotonic_ts is None else float(target_monotonic_ts),
+            "min_frame_monotonic_ts": None if min_frame_monotonic_ts is None else float(min_frame_monotonic_ts),
             "save_pending": bool(async_save),
             "left": {
                 "stream": self.pair.left,

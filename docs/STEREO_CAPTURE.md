@@ -19,6 +19,15 @@ That means software can pair frames closely, but it cannot make the two sensors
 expose at exactly the same instant. For accurate calibration and measurement,
 keep the calibration board and ROV steady when capturing pairs.
 
+TritonPilot now prefers the TritonOS video RPC `capture_stereo_pair` when the
+active streams expose ROV-side capture rings. That path selects the closest pair
+using ROV monotonic timestamps before tether jitter and Windows decode buffering.
+If the RPC or capture rings are unavailable, TritonPilot falls back to the
+topside receiver path, which timestamps frames after they have crossed the
+tether and been decoded by the Windows receiver. Operator-triggered fallback
+captures still wait for post-trigger frames before accepting a pair, but
+receiver-time `pair_delta_ms` is not proof of camera exposure sync.
+
 Triton's pool calibration board is ChArUco with 9 rows by 12 columns, 60 mm
 square width, 45 mm marker width, and the calib.io default `DICT_5X5_1000`
 dictionary. TritonAnalysis uses those values as its default stereo calibration
@@ -81,9 +90,12 @@ stereo_sessions/
     manifest.json
 ```
 
-`manifest.json` stores the pair configuration, stream definitions, receiver
-timestamps, left/right frame sequence numbers, frame delta in milliseconds, and
-relative image paths. Move the whole session folder to the analysis computer.
+`manifest.json` stores the pair configuration, stream definitions, capture
+trigger timing, left/right frame sequence numbers, frame delta in milliseconds,
+relative image paths, and a `timestamp_source` marker. `rov_capture_ring` means
+the pair was selected by TritonOS using ROV-side capture-ring timestamps.
+`topside_receiver` means it used the fallback Windows receiver timestamps. Move
+the whole session folder to the analysis computer.
 
 The in-app stereo capture path keeps appending to the active session until a
 new still session is started. That means repeated single-pair captures build one
@@ -101,7 +113,9 @@ not changed.
 - Fill the image with the board at many positions, tilts, and distances.
 - Capture enough pairs that TritonAnalysis can reject weak detections and still
   keep at least 20 to 40 good observations.
-- Keep pair deltas low; for static calibration, 50 ms is acceptable, but lower
-  is better.
+- Prefer sessions whose manifest uses `rov_capture_ring`.
+- Keep pair deltas low; for static calibration, 50 ms can be usable, but lower
+  is better and neither software timestamp source is true hardware exposure
+  sync.
 - Do not change camera rotation, baseline, toe angle, lens cap, or stream
   resolution after calibration.

@@ -1,4 +1,5 @@
 import os
+import base64
 import time
 from pathlib import Path
 from types import SimpleNamespace
@@ -17,7 +18,10 @@ from recording.compressed_stream_recorder import (
 from gui.direct_gst_video_widget import (
     DirectGstVideoWidget,
     DirectReceiverConfig,
+    _compressed_recording_requested,
     _looks_like_green_startup_artifact,
+    _snapshot_frame_pipe_fps,
+    _snapshot_frame_pipe_requested,
     build_direct_receiver_cmd,
 )
 from gui.video_tabs import VideoTabs
@@ -103,12 +107,52 @@ def test_direct_receiver_can_tee_viewport_frames_to_raw_pipe():
     )
 
     assert "tee" in cmd
-    assert "name=viewport_t" in cmd
-    assert "viewport_t." in cmd
+    assert "name=frame_t" in cmd
+    assert "frame_t." in cmd
     assert "fdsink" in cmd
     assert "fd=1" in cmd
     assert "d3d11videosink" in cmd
-    assert "video/x-raw,format=BGR,width=1080,height=1080,colorimetry=1:4:0:0,range=full" in cmd
+    assert "video/x-raw,format=BGR,width=1920,height=1080,colorimetry=1:4:0:0,range=full" in cmd
+    frame_branch = cmd[cmd.index("frame_t."):]
+    assert "videocrop" not in frame_branch
+
+
+def test_direct_receiver_can_throttle_snapshot_frame_pipe():
+    cmd = build_direct_receiver_cmd(
+        "gst-launch-1.0",
+        DirectReceiverConfig(
+            name="Primary Camera",
+            codec="h264",
+            port=5000,
+            bind_address="192.168.1.1",
+            width=1920,
+            height=1080,
+            frame_pipe=True,
+            frame_pipe_fps=2.0,
+        ),
+    )
+
+    assert "videorate" in cmd
+    assert "drop-only=true" in cmd
+    assert "max-rate=2" in cmd
+    assert "video/x-raw,format=BGR,width=1920,height=1080,colorimetry=1:4:0:0,range=full,framerate=2/1" in cmd
+
+
+def test_direct_media_capture_defaults_can_be_overridden(monkeypatch):
+    monkeypatch.delenv("TRITON_DIRECT_COMPRESSED_RECORDING", raising=False)
+    monkeypatch.delenv("TRITON_DIRECT_SNAPSHOT_FRAMES", raising=False)
+    monkeypatch.delenv("TRITON_DIRECT_SNAPSHOT_FPS", raising=False)
+
+    assert _compressed_recording_requested({}) is True
+    assert _compressed_recording_requested({"direct_compressed_recording": False}) is False
+    assert _snapshot_frame_pipe_requested({}) is True
+    assert _snapshot_frame_pipe_requested({"direct_snapshot_frame_pipe": False}) is False
+    assert _snapshot_frame_pipe_fps({}) == 2.0
+
+    monkeypatch.setenv("TRITON_DIRECT_COMPRESSED_RECORDING", "0")
+    monkeypatch.setenv("TRITON_DIRECT_SNAPSHOT_FRAMES", "0")
+    assert _compressed_recording_requested({}) is False
+    assert _snapshot_frame_pipe_requested({}) is False
 
 
 def test_direct_h264_receiver_can_forward_compressed_rtp_for_recording():
@@ -458,6 +502,94 @@ def test_direct_widget_prefers_viewport_frame_pipe_for_capture(monkeypatch, tmp_
             time.sleep(0.01)
         assert rec is not None
         assert rec.stopped is True
+    finally:
+        widget.close()
+        widget.deleteLater()
+        app.processEvents()
+
+
+def test_direct_widget_prefers_snapshot_frame_pipe_for_stills(monkeypatch, tmp_path):
+    app = _app()
+    monkeypatch.setattr("gui.direct_gst_video_widget.DirectGstVideoWidget._start_connect", lambda self: None)
+    saved_frames = []
+
+    def _fake_save_snapshot(frame, out_path):
+        saved_frames.append(np.array(frame, copy=True))
+        Path(out_path).parent.mkdir(parents=True, exist_ok=True)
+        Path(out_path).touch()
+
+    monkeypatch.setattr("gui.direct_gst_video_widget.save_snapshot", _fake_save_snapshot)
+
+    frame = _usable_frame(base=112)
+    packet = SimpleNamespace(
+        frame_bgr=frame,
+        seq=7,
+        monotonic_ts=time.monotonic(),
+        wall_ts=time.time(),
+    )
+
+    class _FakeSnapshotReader:
+        def latest_frame_packet(self):
+            return packet
+
+    manager = _FakeManager()
+    widget = DirectGstVideoWidget(manager, "Primary Camera")
+    widget._viewport_reader = _FakeSnapshotReader()
+    widget._snapshot_frame_pipe_enabled = True
+    widget._viewport_frame_pipe_enabled = False
+    try:
+        snap_path = widget.save_snapshot(out_dir=str(tmp_path), basename="snapshot-pipe")
+        deadline = time.monotonic() + 1.0
+        while snap_path and not Path(snap_path).exists() and time.monotonic() < deadline:
+            app.processEvents()
+            time.sleep(0.01)
+
+        assert snap_path is not None
+        assert Path(snap_path).exists()
+        assert manager.opened == 0
+        assert saved_frames
+        assert int(saved_frames[0][0, 0, 1]) >= 112
+    finally:
+        widget.close()
+        widget.deleteLater()
+        app.processEvents()
+
+
+def test_direct_widget_snapshot_uses_rov_capture_rpc_before_capture_receiver(monkeypatch, tmp_path):
+    app = _app()
+    monkeypatch.setattr("gui.direct_gst_video_widget.DirectGstVideoWidget._start_connect", lambda self: None)
+    monkeypatch.setenv("TRITON_SNAPSHOT_WAIT_S", "1.0")
+
+    class _FakeRov:
+        def __init__(self):
+            self.calls = []
+
+        def capture_frame(self, **kwargs):
+            self.calls.append(dict(kwargs))
+            return {
+                "stream": kwargs.get("stream"),
+                "seq": 33,
+                "format": "png",
+                "shape": [1080, 1920, 3],
+                "image_b64": base64.b64encode(b"rov-png").decode("ascii"),
+            }
+
+    manager = _FakeManager()
+    manager.rov = _FakeRov()
+    widget = DirectGstVideoWidget(manager, "Primary Camera")
+    try:
+        snap_path = widget.save_snapshot(out_dir=str(tmp_path), basename="rov-snapshot")
+        deadline = time.monotonic() + 1.0
+        while snap_path and not Path(snap_path).exists() and time.monotonic() < deadline:
+            app.processEvents()
+            time.sleep(0.01)
+
+        assert snap_path is not None
+        assert Path(snap_path).read_bytes() == b"rov-png"
+        assert manager.opened == 0
+        assert manager.rov.calls == [
+            {"stream": "Primary Camera", "wait_s": 1.0, "format": "png"}
+        ]
     finally:
         widget.close()
         widget.deleteLater()

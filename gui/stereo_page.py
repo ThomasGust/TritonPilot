@@ -125,6 +125,8 @@ class _CaptureWorker(QThread):
                         require_fresh=True,
                         flush_manifest=False,
                         async_save=True,
+                        min_frame_monotonic_ts=capture_start_s,
+                        target_monotonic_ts=due_s,
                         stop_requested=self.isInterruptionRequested,
                     )
                     captured += 1
@@ -159,6 +161,8 @@ class _CaptureWorker(QThread):
                     record = session.capture_once(
                         wait_s=self.wait_s,
                         require_fresh=True,
+                        min_frame_monotonic_ts=capture_start_s,
+                        target_monotonic_ts=due_s,
                         stop_requested=self.isInterruptionRequested,
                     )
                     captured += 1
