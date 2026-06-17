@@ -130,8 +130,9 @@ Per-stream receiver options in `data/streams.json`:
 - `render_mode`: set to `direct3d` for low-latency pilot viewing
 - `capture_port`: optional mirror UDP port for direct-mode snapshots,
   recording, and stereo capture
-- `receiver_h264_decoder`: defaults to `decodebin`; set `avdec_h264` only when
-  debugging software decode behavior; direct mode also uses this decoder choice
+- `receiver_h264_decoder`: defaults to `openh264dec` for the checked-in
+  Direct3D H.264 streams because current DXVA/D3D hardware decoders can produce
+  green/corrupt frames on the pilot laptop; direct mode uses this decoder choice
 - `receiver_output_fps`: drops decoded frames before the Python pipe; the stream
   can stay 1080p30 while quad-view display work is capped; this only affects
   the legacy raw-frame widget

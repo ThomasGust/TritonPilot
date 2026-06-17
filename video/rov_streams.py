@@ -121,6 +121,9 @@ class ROVStreams:
     def stop_stream(self, **kwargs):
         return self._call("stop_stream", **kwargs)
 
+    def update_stream(self, **kwargs):
+        return self._call("update_stream", **kwargs)
+
     def list_devices(self):
         return self._call("list_devices")
 

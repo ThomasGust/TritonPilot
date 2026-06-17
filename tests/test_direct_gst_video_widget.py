@@ -113,6 +113,8 @@ def test_direct_receiver_can_tee_viewport_frames_to_raw_pipe():
     assert "fd=1" in cmd
     assert "d3d11videosink" in cmd
     assert "video/x-raw,format=BGR,width=1920,height=1080,colorimetry=1:4:0:0,range=full" in cmd
+    render_branch = cmd[cmd.index("name=frame_t"):cmd.index("frame_t.")]
+    assert "videoconvert" in render_branch
     frame_branch = cmd[cmd.index("frame_t."):]
     assert "videocrop" not in frame_branch
 

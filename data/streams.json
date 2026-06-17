@@ -53,13 +53,13 @@
           "exposure_dynamic_framerate": 0
         }
       },
-      "receiver_h264_decoder": "decodebin",
+      "receiver_h264_decoder": "openh264dec",
       "receiver_output_fps": 30,
       "port": 5001,
       "capture_port": 6001,
       "enabled": true
     },
-        {
+    {
       "name": "Back Gripper Camera",
       "device": "/dev/v4l/by-path/*1.2.4*video-index2",
       "width": 1920,
@@ -85,13 +85,13 @@
           "exposure_dynamic_framerate": 0
         }
       },
-      "receiver_h264_decoder": "decodebin",
+      "receiver_h264_decoder": "openh264dec",
       "receiver_output_fps": 30,
       "port": 5003,
       "capture_port": 6003,
       "enabled": true
     },
-        {
+    {
       "name": "Primary Camera",
       "device": "/dev/v4l/by-path/*1.2.5*video-index2",
       "width": 1920,
@@ -113,14 +113,11 @@
         "sender_queue_max_buffers": 1,
         "sender_queue_max_time_ms": 0,
         "sender_v4l2_do_timestamp": true,
-        "capture_ring": true,
-        "capture_ring_fps": 5,
-        "capture_ring_history_size": 30,
         "v4l2_controls": {
           "exposure_dynamic_framerate": 0
         }
       },
-      "receiver_h264_decoder": "decodebin",
+      "receiver_h264_decoder": "openh264dec",
       "receiver_output_fps": 30,
       "port": 5000,
       "capture_port": 6000,
@@ -148,14 +145,11 @@
         "sender_queue_max_buffers": 1,
         "sender_queue_max_time_ms": 0,
         "sender_v4l2_do_timestamp": true,
-        "capture_ring": true,
-        "capture_ring_fps": 5,
-        "capture_ring_history_size": 30,
         "v4l2_controls": {
           "exposure_dynamic_framerate": 0
         }
       },
-      "receiver_h264_decoder": "decodebin",
+      "receiver_h264_decoder": "openh264dec",
       "receiver_output_fps": 30,
       "port": 5002,
       "capture_port": 6002,

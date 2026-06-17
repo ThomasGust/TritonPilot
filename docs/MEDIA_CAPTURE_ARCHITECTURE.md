@@ -85,7 +85,7 @@ Owner: `stereo/capture.py` in TritonPilot plus the TritonOS video RPC service.
 Implemented v1 contract:
 
 - request a pair by left/right stream names with `capture_stereo_pair`
-- read from optional per-stream TritonOS capture rings
+- read from optional per-stream TritonOS capture rings when explicitly enabled
 - return base64 PNG payloads plus per-frame ROV monotonic and wall timestamps
 - return pair delta, camera paths, stream settings, and any dropped/retried
   frame counts
@@ -106,11 +106,15 @@ Direct3D receiver options live on each TritonPilot stream entry:
 - `direct_snapshot_frame_pipe`: set false to disable the direct snapshot tap
 - `direct_snapshot_frame_pipe_fps`: low-rate still tap FPS, default 2
 
-TritonOS sender options live under each stream `extra` object:
+TritonOS sender options live under each stream `extra` object and are opt-in:
 
 - `capture_ring`: enable the PNG appsink ring for ROV-side still capture
 - `capture_ring_fps`: default 5 for stereo capture streams
 - `capture_ring_history_size`: default 30 frames
+- `capture_ring_h264_decoder`: default `openh264dec` for H.264 ring decode
 
-The default `data/streams.json` enables the TritonOS capture ring on the
-configured forward stereo pair streams only: `Primary Camera` and `Aux Camera`.
+The default `data/streams.json` does not enable TritonOS capture rings. In live
+testing, continuous onboard H.264 decode for the ring was too expensive and
+hardware decoder selection produced corrupted PNGs. Keep the RPC support
+available, but enable rings only for targeted tests until this branch is made
+non-invasive.

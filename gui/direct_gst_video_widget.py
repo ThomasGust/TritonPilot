@@ -126,7 +126,12 @@ def _raw_frame_caps(width: int, height: int) -> str:
     )
 
 
-def _render_output_chain(cfg: DirectReceiverConfig, crop_chain: list[str] | None = None) -> list[str]:
+def _render_output_chain(
+    cfg: DirectReceiverConfig,
+    crop_chain: list[str] | None = None,
+    *,
+    isolate_caps: bool = False,
+) -> list[str]:
     sink = str(cfg.sink or "d3d11videosink").strip() or "d3d11videosink"
     sink_props = ["sync=false", "async=false"]
     if sink.lower() not in {"fakesink", "appsink", "filesink"}:
@@ -134,6 +139,7 @@ def _render_output_chain(cfg: DirectReceiverConfig, crop_chain: list[str] | None
     return [
         "!", "queue", "max-size-buffers=1", "max-size-bytes=0",
         "max-size-time=0", "leaky=downstream",
+        *(["!", "videoconvert"] if isolate_caps else []),
         *(crop_chain or []),
         "!", sink, *sink_props,
     ]
@@ -195,7 +201,7 @@ def build_direct_receiver_cmd(gst_launch: str, cfg: DirectReceiverConfig) -> lis
     if bool(cfg.frame_pipe):
         output_chain = [
             "!", "tee", "name=frame_t",
-            *_render_output_chain(cfg, crop_chain),
+            *_render_output_chain(cfg, crop_chain, isolate_caps=True),
             *_frame_pipe_output_chain(cfg),
         ]
     else:

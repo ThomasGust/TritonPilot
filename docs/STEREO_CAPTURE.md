@@ -19,14 +19,16 @@ That means software can pair frames closely, but it cannot make the two sensors
 expose at exactly the same instant. For accurate calibration and measurement,
 keep the calibration board and ROV steady when capturing pairs.
 
-TritonPilot now prefers the TritonOS video RPC `capture_stereo_pair` when the
-active streams expose ROV-side capture rings. That path selects the closest pair
-using ROV monotonic timestamps before tether jitter and Windows decode buffering.
-If the RPC or capture rings are unavailable, TritonPilot falls back to the
-topside receiver path, which timestamps frames after they have crossed the
-tether and been decoded by the Windows receiver. Operator-triggered fallback
-captures still wait for post-trigger frames before accepting a pair, but
-receiver-time `pair_delta_ms` is not proof of camera exposure sync.
+TritonPilot can prefer the TritonOS video RPC `capture_stereo_pair` when the
+active streams explicitly expose ROV-side capture rings. That path selects the
+closest pair using ROV monotonic timestamps before tether jitter and Windows
+decode buffering. The default stream config currently leaves those rings off
+because continuous onboard H.264 decode was too expensive in live testing. If
+the RPC or capture rings are unavailable, TritonPilot falls back to the topside
+receiver path, which timestamps frames after they have crossed the tether and
+been decoded by the Windows receiver. Operator-triggered fallback captures still
+wait for post-trigger frames before accepting a pair, but receiver-time
+`pair_delta_ms` is not proof of camera exposure sync.
 
 Triton's pool calibration board is ChArUco with 9 rows by 12 columns, 60 mm
 square width, 45 mm marker width, and the calib.io default `DICT_5X5_1000`
