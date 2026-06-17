@@ -2,11 +2,30 @@
   "windows_host": "192.168.1.1",
   "default_layout_count": 4,
   "stop_hidden_streams": false,
+  "snapshot_prewarm_count": 0,
   "default_pane_order": [
     "Primary Camera",
     "Aux Camera",
     "Arm Camera",
     "Back Gripper Camera"
+  ],
+  "stereo_pairs": [
+    {
+      "name": "Forward Stereo",
+      "left": "Primary Camera",
+      "right": "Aux Camera",
+      "rig_id": "explorehd_forward_v1",
+      "calibration_id": null,
+      "max_pair_delta_ms": 50,
+      "apply_stream_rotation": true,
+      "enabled": true,
+      "metadata": {
+        "camera_model": "DeepWater Exploration exploreHD 3.0",
+        "baseline_mm": null,
+        "mount_notes": "Final baseline and toe angle are pending the stereo mount.",
+        "sync_notes": "Best-effort software pairing only; exploreHD uses rolling shutter and has no external trigger."
+      }
+    }
   ],
   "streams": [
     {
@@ -80,6 +99,7 @@
       "latency_ms": 5,
       "extra": {
         "udp_qos_dscp": 34,
+        "rov_snapshot_fps": 30,
         "sender_leaky_queues": true,
         "sender_queue_max_buffers": 1,
         "sender_queue_max_time_ms": 0,
@@ -108,6 +128,7 @@
       "latency_ms": 5,
       "extra": {
         "udp_qos_dscp": 34,
+        "rov_snapshot_fps": 30,
         "sender_leaky_queues": true,
         "sender_queue_max_buffers": 1,
         "sender_queue_max_time_ms": 0,

@@ -137,6 +137,12 @@ not ask TritonOS to create duplicate streams. Set `stop_hidden_streams: true`
 or `TRITON_VIDEO_STOP_HIDDEN_STREAMS=1` when reducing live network load is more
 important than fast camera/layout changes.
 
+Still snapshots no longer add always-on top-side RTP mirror clients by default.
+For a normal `X` button capture, TritonPilot asks TritonOS for one JPEG from the
+selected stream's onboard snapshot branch and saves that payload locally. The
+legacy top-side mirror path is still configurable with `snapshot_prewarm_count`,
+but the default value is `0`.
+
 The local receive address is selected by `network/net_select.py`. It chooses a
 local interface that can reach the ROV and is suitable for receiving the stream.
 If the pilot has multiple adapters active, validate the selected route before

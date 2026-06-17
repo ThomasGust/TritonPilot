@@ -179,6 +179,34 @@ def test_video_tabs_widget_activation_selects_matching_pane(monkeypatch):
         app.processEvents()
 
 
+def test_video_tabs_flashes_snapshot_badge_on_matching_stream(monkeypatch):
+    app = _app()
+    monkeypatch.setattr("gui.video_tabs.QSettings", lambda *args, **kwargs: _FakeSettings())
+    monkeypatch.setattr("gui.video_tabs.VideoWidget", _DummyVideoWidget)
+
+    tabs = VideoTabs(
+        _DummyManager(
+            default_pane_order=["Primary Camera", "Aux Camera"],
+            default_layout_count=2,
+        ),
+        stream_names=["Primary Camera", "Aux Camera"],
+    )
+    try:
+        app.processEvents()
+
+        tabs.flash_snapshot_badge("Aux Camera")
+        app.processEvents()
+
+        assert tabs._panes[0]._snap_label.isHidden() is True
+        assert tabs._panes[1]._snap_label.isHidden() is False
+        assert tabs._panes[1]._snap_label.objectName() == "videoSnapshotBadge"
+        assert tabs._panes[1]._snap_label.text() == "SNAP"
+    finally:
+        tabs.close()
+        tabs.deleteLater()
+        app.processEvents()
+
+
 def test_video_tabs_reverse_layout_spans_rear_camera_without_saving(monkeypatch):
     app = _app()
     fake_settings = _FakeSettings({"video/layout_count": 4})

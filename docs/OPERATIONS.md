@@ -52,6 +52,9 @@ Default controls include:
 - `Y`/`A` on the controller and keyboard `+`/`-` adjust the main ROV motion gain.
 - Keyboard `1`/`2` adjust the back rotating gripper gain.
 - Keyboard `6`/`7` adjust the arm gain.
+- Xbox `X` captures a still image in standard capture mode.
+- Keyboard `C` toggles between standard still capture and stereo still capture.
+- Keyboard `N` starts a new stereo still session in the active app session folder.
 - `W`, `S`, `A`, and `D` provide trigger-like keyboard backup manipulator controls.
 
 The pilot-side telemetry column shows three live gain indicators: `BACK`,

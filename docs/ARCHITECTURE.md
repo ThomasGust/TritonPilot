@@ -136,9 +136,12 @@ Data logging is intentionally local to the pilot computer:
 - `recording/raw_sensor_csv.py` flattens raw telemetry into CSV rows.
 - `recording/save_location.py` resolves the active save directory.
 
-Saved stream logs and raw CSV files are the handoff point to TritonAnalysis.
-Media capture has been removed from this baseline so it can be rebuilt without
-entangling the live display path.
+Saved stream logs, raw CSV files, and still snapshots are the handoff point to
+TritonAnalysis. Still snapshots are captured on the ROV through the TritonOS
+video RPC snapshot path, so the live Direct3D display path stays separate from
+media persistence without adding default top-side RTP mirror receivers. Stereo
+still captures use the same ROV-side snapshot branches through a paired RPC and
+write the historical stereo session manifest shape for downstream analysis.
 
 ## Threading Model
 

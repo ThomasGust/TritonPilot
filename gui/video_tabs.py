@@ -50,6 +50,15 @@ class _VideoPane(QFrame):
         )
         self._layout.setSpacing(0)
 
+        self._snap_label = QLabel("SNAP", self)
+        self._snap_label.setObjectName("videoSnapshotBadge")
+        self._snap_label.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
+        self._snap_label.hide()
+
+        self._snap_timer = QTimer(self)
+        self._snap_timer.setSingleShot(True)
+        self._snap_timer.timeout.connect(self._snap_label.hide)
+
     def mousePressEvent(self, event) -> None:
         if event.button() == Qt.MouseButton.LeftButton:
             self.activated.emit(self.index)
@@ -60,6 +69,26 @@ class _VideoPane(QFrame):
         self.style().unpolish(self)
         self.style().polish(self)
         self.update()
+
+    def flash_snapshot_badge(self, duration_ms: int = 850) -> None:
+        self._position_snapshot_badge()
+        self._snap_label.show()
+        self._snap_label.raise_()
+        self._snap_timer.start(max(1, int(duration_ms)))
+
+    def _position_snapshot_badge(self) -> None:
+        self._snap_label.adjustSize()
+        margin = 10
+        width = self._snap_label.width()
+        height = self._snap_label.height()
+        x = max(margin, self.width() - width - margin)
+        y = margin
+        self._snap_label.setGeometry(x, y, width, height)
+
+    def resizeEvent(self, event) -> None:
+        super().resizeEvent(event)
+        if self._snap_label.isVisible():
+            self._position_snapshot_badge()
 
     def attach_widget(self, widget: QWidget | None, placeholder: str) -> None:
         while self._layout.count():
@@ -784,6 +813,17 @@ class VideoTabs(QWidget):
         if not name:
             return None
         return self._widgets.get(str(name))
+
+    def flash_snapshot_badge(self, stream_name: str | None = None) -> None:
+        target = str(stream_name or self.current_stream_name() or "")
+        visible_count = self._visible_pane_count()
+        for idx in range(visible_count):
+            if self._pane_streams[idx] == target:
+                self._panes[idx].flash_snapshot_badge()
+                return
+        if visible_count > 0:
+            idx = max(0, min(self._active_pane_index, visible_count - 1))
+            self._panes[idx].flash_snapshot_badge()
 
     def set_layout_controls_enabled(self, enabled: bool) -> None:
         self._layout_combo.setEnabled(bool(enabled))

@@ -1,17 +1,21 @@
 ﻿import os
+import json
 from pathlib import Path
+from types import SimpleNamespace
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
+import numpy as np
 import pytest
 
 pytest.importorskip("PyQt6")
 
 from PyQt6.QtCore import QEvent, Qt, pyqtSignal
-from PyQt6.QtGui import QKeyEvent
+from PyQt6.QtGui import QImage, QKeyEvent
 from PyQt6.QtWidgets import QApplication, QComboBox, QWidget
 
 import gui.main_window as main_window
+from video.cam import SnapshotImagePacket, StereoImagePairPacket
 
 
 class _FakeSettings:
@@ -155,6 +159,7 @@ class _FakeRemoteCameraManager:
 class _FakeVideoWidget:
     def __init__(self):
         self.packet = None
+        self.snapshot = None
 
     def status(self):
         return {"state": "playing", "age_s": 0.0}
@@ -164,6 +169,9 @@ class _FakeVideoWidget:
 
     def recent_frame_packets(self, *, max_age_s=0.5):
         return [] if self.packet is None else [self.packet]
+
+    def snapshot_image(self):
+        return self.snapshot
 
 
 class _FakeVideoPanel(QWidget):
@@ -184,6 +192,7 @@ class _FakeVideoPanel(QWidget):
         self.tether_statuses = []
         self.square_display_enabled = False
         self.refresh_layout_count = 0
+        self.snapshot_badges = []
         self._widgets = {name: _FakeVideoWidget() for name in self.stream_names}
 
     def _visible_count(self):
@@ -246,6 +255,9 @@ class _FakeVideoPanel(QWidget):
 
     def refresh_layout_geometry(self):
         self.refresh_layout_count += 1
+
+    def flash_snapshot_badge(self, stream_name=None):
+        self.snapshot_badges.append(stream_name)
 
     def set_water_correction(self, *_args, **_kwargs):
         return None
@@ -455,6 +467,366 @@ def test_r_shortcut_toggles_reverse_without_leaving_pilot_page(monkeypatch, tmp_
     finally:
         win.close()
         app.processEvents()
+
+
+def test_x_button_snapshots_selected_stream_into_app_session(monkeypatch, tmp_path):
+    app = _app()
+    streams_path = tmp_path / "streams.json"
+    streams_path.write_text("{}", encoding="utf-8")
+    save_root = tmp_path / "recordings"
+    saved = []
+
+    def _save_snapshot(self, image, target, stream_name):
+        saved.append((image, Path(target), stream_name))
+
+    monkeypatch.setattr(main_window, "QSettings", lambda *args, **kwargs: _FakeSettings())
+    monkeypatch.setattr(main_window, "PilotPublisherService", _FakePilotService)
+    monkeypatch.setattr(main_window, "SensorSubscriberService", _FakeSensorService)
+    monkeypatch.setattr(main_window, "RemoteCameraManager", _FakeRemoteCameraManager)
+    monkeypatch.setattr(main_window, "VideoTabs", _FakeVideoPanel)
+    monkeypatch.setattr(main_window, "HoldTestPanel", _SimplePage)
+    monkeypatch.setattr(main_window, "ManagementPage", _SimplePage)
+    monkeypatch.setattr(main_window.threading, "Thread", _NoopThread)
+    monkeypatch.setattr(main_window, "resolve_recordings_dir", lambda _preferred: main_window.SaveLocation(save_root))
+    monkeypatch.setattr(main_window.MainWindow, "_save_snapshot_image_async", _save_snapshot)
+
+    win = main_window.MainWindow(str(streams_path))
+    try:
+        app.processEvents()
+        panel = win.video_panel
+        assert panel is not None
+        panel._active_pane_index = 2
+        image = QImage(8, 4, QImage.Format.Format_RGB32)
+        image.fill(0xFF336699)
+        panel._widgets["Arm Camera"].snapshot = image
+
+        win._handle_pilot_msg_on_ui({"edges": {"x": "down"}, "modes": {}})
+
+        assert len(saved) == 1
+        saved_image, target, stream_name = saved[0]
+        assert saved_image.size() == image.size()
+        assert stream_name == "Arm Camera"
+        assert target.parent == win._app_session_dir
+        assert target.parent.parent.resolve() == save_root.resolve()
+        assert target.name.startswith("Arm_Camera_")
+        assert target.suffix == ".png"
+        assert panel.snapshot_badges == ["Arm Camera"]
+    finally:
+        win.close()
+        app.processEvents()
+
+
+def test_x_button_prefers_source_capture_over_widget_snapshot(monkeypatch, tmp_path):
+    app = _app()
+    streams_path = tmp_path / "streams.json"
+    streams_path.write_text("{}", encoding="utf-8")
+    save_root = tmp_path / "recordings"
+    capture_jobs = []
+
+    def _queue_source_capture(self, stream_name, target):
+        capture_jobs.append((stream_name, Path(target)))
+
+    def _unexpected_widget_save(*_args, **_kwargs):
+        raise AssertionError("widget snapshot fallback should not be used when source capture exists")
+
+    monkeypatch.setattr(main_window, "QSettings", lambda *args, **kwargs: _FakeSettings())
+    monkeypatch.setattr(main_window, "PilotPublisherService", _FakePilotService)
+    monkeypatch.setattr(main_window, "SensorSubscriberService", _FakeSensorService)
+    monkeypatch.setattr(main_window, "RemoteCameraManager", _FakeRemoteCameraManager)
+    monkeypatch.setattr(main_window, "VideoTabs", _FakeVideoPanel)
+    monkeypatch.setattr(main_window, "HoldTestPanel", _SimplePage)
+    monkeypatch.setattr(main_window, "ManagementPage", _SimplePage)
+    monkeypatch.setattr(main_window.threading, "Thread", _NoopThread)
+    monkeypatch.setattr(main_window, "resolve_recordings_dir", lambda _preferred: main_window.SaveLocation(save_root))
+    monkeypatch.setattr(main_window.MainWindow, "_capture_and_save_snapshot_async", _queue_source_capture)
+    monkeypatch.setattr(main_window.MainWindow, "_save_snapshot_image_async", _unexpected_widget_save)
+
+    win = main_window.MainWindow(str(streams_path))
+    try:
+        app.processEvents()
+        panel = win.video_panel
+        assert panel is not None
+        panel._widgets["Primary Camera"].snapshot = QImage(8, 4, QImage.Format.Format_RGB32)
+        win.cam_mgr.capture_snapshot_frame = lambda *_args, **_kwargs: None
+
+        win._handle_pilot_msg_on_ui({"edges": {"x": "down"}, "modes": {}})
+
+        assert len(capture_jobs) == 1
+        stream_name, target = capture_jobs[0]
+        assert stream_name == "Primary Camera"
+        assert target.parent == win._app_session_dir
+        assert target.name.startswith("Primary_Camera_")
+        assert panel.snapshot_badges == ["Primary Camera"]
+    finally:
+        win.close()
+        app.processEvents()
+
+
+def test_x_button_prefers_onboard_snapshot_bytes(monkeypatch, tmp_path):
+    app = _app()
+    streams_path = tmp_path / "streams.json"
+    streams_path.write_text("{}", encoding="utf-8")
+    save_root = tmp_path / "recordings"
+    jpeg_bytes = b"\xff\xd8onboard snapshot\xff\xd9"
+    calls = []
+
+    class _ImmediateThread:
+        def __init__(self, *, target, name=None, daemon=None):
+            self.target = target
+
+        def start(self):
+            self.target()
+
+    monkeypatch.setattr(main_window, "QSettings", lambda *args, **kwargs: _FakeSettings())
+    monkeypatch.setattr(main_window, "PilotPublisherService", _FakePilotService)
+    monkeypatch.setattr(main_window, "SensorSubscriberService", _FakeSensorService)
+    monkeypatch.setattr(main_window, "RemoteCameraManager", _FakeRemoteCameraManager)
+    monkeypatch.setattr(main_window, "VideoTabs", _FakeVideoPanel)
+    monkeypatch.setattr(main_window, "HoldTestPanel", _SimplePage)
+    monkeypatch.setattr(main_window, "ManagementPage", _SimplePage)
+    monkeypatch.setattr(main_window.threading, "Thread", _NoopThread)
+    monkeypatch.setattr(main_window, "resolve_recordings_dir", lambda _preferred: main_window.SaveLocation(save_root))
+
+    win = main_window.MainWindow(str(streams_path))
+    try:
+        app.processEvents()
+        panel = win.video_panel
+        assert panel is not None
+
+        def _capture_onboard_snapshot(name, *, timeout_s=2.0):
+            calls.append((name, timeout_s))
+            return SimpleNamespace(
+                source_name=name,
+                image_bytes=jpeg_bytes,
+                mime_type="image/jpeg",
+                extension="jpg",
+                byte_count=len(jpeg_bytes),
+            )
+
+        def _unexpected_frame_capture(*_args, **_kwargs):
+            raise AssertionError("frame fallback should not run when onboard snapshot succeeds")
+
+        win.cam_mgr.capture_onboard_snapshot = _capture_onboard_snapshot
+        win.cam_mgr.capture_snapshot_frame = _unexpected_frame_capture
+        panel._active_pane_index = 1
+        panel._widgets["Aux Camera"].snapshot = QImage(8, 4, QImage.Format.Format_RGB32)
+
+        monkeypatch.setattr(main_window.threading, "Thread", _ImmediateThread)
+        win._handle_pilot_msg_on_ui({"edges": {"x": "down"}, "modes": {}})
+        monkeypatch.setattr(main_window.threading, "Thread", _NoopThread)
+        app.processEvents()
+
+        files = list(win._app_session_dir.glob("Aux_Camera_*.jpg"))
+        assert calls == [("Aux Camera", 2.0)]
+        assert len(files) == 1
+        assert files[0].read_bytes() == jpeg_bytes
+        assert files[0].parent.parent.resolve() == save_root.resolve()
+        assert panel.snapshot_badges == ["Aux Camera"]
+    finally:
+        win.close()
+        app.processEvents()
+
+
+def test_keyboard_c_toggles_capture_mode_when_stereo_pair_exists(monkeypatch, tmp_path):
+    app = _app()
+    streams_path = tmp_path / "streams.json"
+    streams_path.write_text(
+        json.dumps(
+            {
+                "streams": [{"name": "Primary Camera"}, {"name": "Aux Camera"}],
+                "stereo_pairs": [
+                    {
+                        "name": "Forward Stereo",
+                        "left": "Primary Camera",
+                        "right": "Aux Camera",
+                        "rig_id": "rig-a",
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    monkeypatch.setattr(main_window, "QSettings", lambda *args, **kwargs: _FakeSettings())
+    monkeypatch.setattr(main_window, "PilotPublisherService", _FakePilotService)
+    monkeypatch.setattr(main_window, "SensorSubscriberService", _FakeSensorService)
+    monkeypatch.setattr(main_window, "RemoteCameraManager", _FakeRemoteCameraManager)
+    monkeypatch.setattr(main_window, "VideoTabs", _FakeVideoPanel)
+    monkeypatch.setattr(main_window, "HoldTestPanel", _SimplePage)
+    monkeypatch.setattr(main_window, "ManagementPage", _SimplePage)
+    monkeypatch.setattr(main_window.threading, "Thread", _NoopThread)
+
+    win = main_window.MainWindow(str(streams_path))
+    try:
+        app.processEvents()
+        key_event = QKeyEvent(QEvent.Type.KeyPress, Qt.Key.Key_C, Qt.KeyboardModifier.NoModifier, "c")
+        assert win.eventFilter(win, key_event) is True
+        assert win._capture_mode == "stereo"
+
+        key_event = QKeyEvent(QEvent.Type.KeyPress, Qt.Key.Key_C, Qt.KeyboardModifier.NoModifier, "c")
+        assert win.eventFilter(win, key_event) is True
+        assert win._capture_mode == "standard"
+    finally:
+        win.close()
+        app.processEvents()
+
+
+def test_keyboard_n_creates_stereo_session_and_x_saves_pair(monkeypatch, tmp_path):
+    app = _app()
+    streams_path = tmp_path / "streams.json"
+    streams_path.write_text(
+        json.dumps(
+            {
+                "streams": [{"name": "Primary Camera"}, {"name": "Aux Camera"}],
+                "stereo_pairs": [
+                    {
+                        "name": "Forward Stereo",
+                        "left": "Primary Camera",
+                        "right": "Aux Camera",
+                        "rig_id": "rig-a",
+                        "max_pair_delta_ms": 50,
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    save_root = tmp_path / "recordings"
+    calls = []
+
+    class _ImmediateThread:
+        def __init__(self, *, target, name=None, daemon=None):
+            self.target = target
+
+        def start(self):
+            self.target()
+
+    monkeypatch.setattr(main_window, "QSettings", lambda *args, **kwargs: _FakeSettings())
+    monkeypatch.setattr(main_window, "PilotPublisherService", _FakePilotService)
+    monkeypatch.setattr(main_window, "SensorSubscriberService", _FakeSensorService)
+    monkeypatch.setattr(main_window, "RemoteCameraManager", _FakeRemoteCameraManager)
+    monkeypatch.setattr(main_window, "VideoTabs", _FakeVideoPanel)
+    monkeypatch.setattr(main_window, "HoldTestPanel", _SimplePage)
+    monkeypatch.setattr(main_window, "ManagementPage", _SimplePage)
+    monkeypatch.setattr(main_window.threading, "Thread", _NoopThread)
+    monkeypatch.setattr(main_window, "resolve_recordings_dir", lambda _preferred: main_window.SaveLocation(save_root))
+
+    win = main_window.MainWindow(str(streams_path))
+    try:
+        app.processEvents()
+
+        def _capture_onboard_stereo_pair(left, right, *, timeout_s=2.0, max_pair_delta_ms=50.0):
+            calls.append((left, right, timeout_s, max_pair_delta_ms))
+            return StereoImagePairPacket(
+                left=SnapshotImagePacket(
+                    source_name=left,
+                    image_bytes=b"left-jpeg",
+                    mime_type="image/jpeg",
+                    extension="jpg",
+                    wall_ts=1000.0,
+                    monotonic_ts=50.0,
+                    byte_count=len(b"left-jpeg"),
+                    seq=1,
+                    shape=(1080, 1920, 3),
+                ),
+                right=SnapshotImagePacket(
+                    source_name=right,
+                    image_bytes=b"right-jpeg",
+                    mime_type="image/jpeg",
+                    extension="jpg",
+                    wall_ts=1000.008,
+                    monotonic_ts=50.008,
+                    byte_count=len(b"right-jpeg"),
+                    seq=2,
+                    shape=(1080, 1920, 3),
+                ),
+                pair_delta_ms=8.0,
+                timestamp_source="rov_snapshot_appsink_fresh_monotonic",
+            )
+
+        win.cam_mgr.capture_onboard_stereo_pair = _capture_onboard_stereo_pair
+        key_event = QKeyEvent(QEvent.Type.KeyPress, Qt.Key.Key_N, Qt.KeyboardModifier.NoModifier, "n")
+        assert win.eventFilter(win, key_event) is True
+        assert win._capture_mode == "stereo"
+        assert win._stereo_capture_session is not None
+        session_dir = win._stereo_capture_session.session_dir
+
+        monkeypatch.setattr(main_window.threading, "Thread", _ImmediateThread)
+        win._handle_pilot_msg_on_ui({"edges": {"x": "down"}, "modes": {}})
+        monkeypatch.setattr(main_window.threading, "Thread", _NoopThread)
+        app.processEvents()
+
+        assert calls == [("Primary Camera", "Aux Camera", 2.0, 50.0)]
+        assert (session_dir / "left" / "pair_000001_left.jpg").read_bytes() == b"left-jpeg"
+        assert (session_dir / "right" / "pair_000001_right.jpg").read_bytes() == b"right-jpeg"
+        manifest = json.loads((session_dir / "manifest.json").read_text(encoding="utf-8"))
+        assert manifest["frames"][0]["pair_delta_ms"] == pytest.approx(8.0)
+        assert manifest["frames"][0]["left_path"] == "left\\pair_000001_left.jpg"
+        assert manifest["frames"][0]["right_path"] == "right\\pair_000001_right.jpg"
+        assert session_dir.parent.name == "stereo_sessions"
+        assert session_dir.parent.parent.parent.resolve() == save_root.resolve()
+        assert win.video_panel.snapshot_badges == ["Primary Camera", "Aux Camera"]
+    finally:
+        win.close()
+        app.processEvents()
+
+
+def test_non_down_x_edge_does_not_snapshot(monkeypatch, tmp_path):
+    app = _app()
+    streams_path = tmp_path / "streams.json"
+    streams_path.write_text("{}", encoding="utf-8")
+    saved = []
+
+    monkeypatch.setattr(main_window, "QSettings", lambda *args, **kwargs: _FakeSettings())
+    monkeypatch.setattr(main_window, "PilotPublisherService", _FakePilotService)
+    monkeypatch.setattr(main_window, "SensorSubscriberService", _FakeSensorService)
+    monkeypatch.setattr(main_window, "RemoteCameraManager", _FakeRemoteCameraManager)
+    monkeypatch.setattr(main_window, "VideoTabs", _FakeVideoPanel)
+    monkeypatch.setattr(main_window, "HoldTestPanel", _SimplePage)
+    monkeypatch.setattr(main_window, "ManagementPage", _SimplePage)
+    monkeypatch.setattr(main_window.threading, "Thread", _NoopThread)
+    monkeypatch.setattr(main_window.MainWindow, "_save_snapshot_image_async", lambda *args, **kwargs: saved.append(args))
+
+    win = main_window.MainWindow(str(streams_path))
+    try:
+        app.processEvents()
+        panel = win.video_panel
+        assert panel is not None
+        image = QImage(2, 2, QImage.Format.Format_RGB32)
+        image.fill(0xFFFFFFFF)
+        panel._widgets["Primary Camera"].snapshot = image
+
+        win._handle_pilot_msg_on_ui({"edges": {"x": "up"}, "modes": {}})
+
+        assert saved == []
+        assert panel.snapshot_badges == []
+    finally:
+        win.close()
+        app.processEvents()
+
+
+def test_snapshot_path_uses_stream_name_timestamp_and_collision_suffix(tmp_path):
+    session = tmp_path / "20260617-120000"
+    session.mkdir()
+
+    first = main_window.MainWindow._snapshot_path(session, "Port / Aux: Camera?", now=1_800_000_000.125)
+    first.write_bytes(b"existing")
+    second = main_window.MainWindow._snapshot_path(session, "Port / Aux: Camera?", now=1_800_000_000.125)
+
+    assert first.name.startswith("Port_Aux_Camera_")
+    assert first.name.endswith("-125.png")
+    assert second.name == first.with_name(first.stem + "_02.png").name
+
+
+def test_qimage_from_bgr_frame_uses_camera_pixels_not_overlay():
+    frame = np.array([[[1, 2, 3], [10, 20, 30]]], dtype=np.uint8)
+
+    image = main_window.MainWindow._qimage_from_bgr_frame(frame)
+
+    assert image.width() == 2
+    assert image.height() == 1
+    first = image.pixelColor(0, 0)
+    assert (first.red(), first.green(), first.blue()) == (3, 2, 1)
 
 
 def test_analysis_transfer_status_bar_shows_served_root(monkeypatch, tmp_path):

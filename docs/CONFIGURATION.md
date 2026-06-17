@@ -86,10 +86,15 @@ The multi-camera value applies to three- and four-pane layouts. Lowering it can
 make quad view feel smoother on a loaded laptop because the UI stops trying to
 scale and repaint every pane at full camera rate.
 
-Media capture is intentionally disabled in this baseline. There are no
-configured capture mirror ports, snapshot taps, MP4 writers, or stereo capture
-sessions. Use this Direct3D display profile as the starting point for rebuilding
-media capture cleanly.
+Still photos are captured on the ROV, not from the Direct3D viewport. TritonOS
+keeps a low-rate local JPEG snapshot branch on each running camera pipeline.
+When the operator presses `X`, TritonPilot calls the video RPC
+`capture_snapshot` command for the selected stream and writes the returned JPEG
+bytes into the active app session folder. This avoids black Direct3D readbacks,
+UI-overlay captures, and extra always-on top-side RTP receivers. The old
+top-side snapshot mirror path remains as a fallback for older TritonOS builds,
+but the checked-in profile does not prewarm it. There are still no configured
+fixed capture ports or MP4 writers in this profile.
 
 Per-stream receiver options in `data/streams.json`:
 
@@ -106,6 +111,10 @@ Per-stream receiver options in `data/streams.json`:
   low-latency queue depth is `1`
 - `extra.sender_v4l2_do_timestamp`: timestamps captured frames on the Pi before
   RTP payloading; the stable default is `true`
+- `extra.rov_snapshot_fps`: onboard JPEG snapshot branch rate; Primary and Aux
+  use `30` in the checked-in profile so ROV-side stereo still captures can wait
+  for fresh paired samples without the 4 FPS still-photo default becoming the
+  limiting factor
 - `extra.v4l2_controls.exposure_dynamic_framerate`: set to `0` to prevent the
   camera from lowering frame rate for exposure, which can look like video lag
 
@@ -114,6 +123,18 @@ Top-level stream layout knobs:
 - `default_layout_count`: initial visible camera count for this deployment
 - `stop_hidden_streams`: stop ROV-side streams when they are no longer visible;
   set false to keep already-started streams warm for fast camera/layout changes
+- `snapshot_prewarm_count`: number of default streams to keep ready through the
+  legacy top-side RTP mirror snapshot path; current field value is `0` because
+  onboard TritonOS snapshots are preferred
+- `snapshot_persistent`: optional per-stream override for the legacy mirror
+  fallback path
+- `receiver_snapshot_output_fps`: optional legacy mirror raw receiver output
+  rate; omitted in the default profile because no mirror receivers are normally
+  prewarmed
+- `stereo_pairs`: configured left/right still-capture pairs. The checked-in
+  pair is `Forward Stereo`, with `Primary Camera` as left and `Aux Camera` as
+  right. TritonPilot uses this for keyboard stereo capture mode and preserves
+  the historical `stereo_sessions/<session>/manifest.json` schema.
 
 The current default streams are:
 

@@ -134,6 +134,14 @@ class ROVStreams:
         """Return ROV-side stream config plus timing diagnostics when supported."""
         return self._call("list_stream_status")
 
+    def capture_snapshot(self, **kwargs):
+        """Return one onboard still image payload from a named ROV stream."""
+        return self._call("capture_snapshot", **kwargs)
+
+    def capture_stereo_pair(self, **kwargs):
+        """Return one onboard left/right still-image pair payload."""
+        return self._call("capture_stereo_pair", **kwargs)
+
     def net_info(self):
         """Return ROV-side interface/IP info (best-effort)."""
         return self._call("net_info")

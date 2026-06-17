@@ -18,8 +18,9 @@ import time
 from collections import deque
 from pathlib import Path
 
+import numpy as np
 from PyQt6.QtCore import pyqtSignal, Qt, QTimer, QEvent, QSettings
-from PyQt6.QtGui import QAction
+from PyQt6.QtGui import QAction, QImage
 from PyQt6.QtWidgets import (
     QApplication,
     QFileDialog,
@@ -70,6 +71,8 @@ from video.cam import RemoteCameraManager
 from recording.capture_trace import trace_event
 from recording.stream_recorder import StreamRecorder
 from recording.save_location import DEFAULT_RECORDINGS_DIR, SaveLocation, is_available_directory, resolve_recordings_dir
+from stereo.capture import StereoCaptureSession, default_stereo_session_name
+from stereo.pairs import load_stereo_pairs
 from gui.video_tabs import VideoTabs
 from gui.sensor_panel import SensorPanel
 from gui.instruments import InstrumentPanel, HoldTestPanel, PilotTelemetryColumn
@@ -95,6 +98,8 @@ class MainWindow(QMainWindow):
     sensor_msg_sig = pyqtSignal(dict)
     pilot_status_sig = pyqtSignal(dict)
     pilot_msg_sig = pyqtSignal(dict)
+    snapshot_result_sig = pyqtSignal(str, str, bool, str)
+    stereo_capture_result_sig = pyqtSignal(str, str, bool, str)
 
     @staticmethod
     def _env_truthy(name: str, default: bool = False) -> bool:
@@ -370,6 +375,17 @@ class MainWindow(QMainWindow):
 
     def _on_video_tab_changed(self, *_args) -> None:
         self._refresh_video_status()
+        self._prewarm_snapshot_capture_feeds()
+
+    def _prewarm_snapshot_capture_feeds(self) -> None:
+        manager = getattr(self, "cam_mgr", None)
+        warmer = getattr(manager, "prewarm_snapshot_taps", None)
+        if not callable(warmer):
+            return
+        try:
+            warmer(None)
+        except Exception as exc:
+            logger.debug("Snapshot prewarm request failed: %s", exc)
 
     def _make_center_placeholder(self, text: str) -> QLabel:
         lbl = QLabel(text)
@@ -848,6 +864,8 @@ class MainWindow(QMainWindow):
         self.sensor_msg_sig.connect(self._handle_sensor_msg_on_ui)
         self.pilot_status_sig.connect(self._handle_pilot_status_on_ui)
         self.pilot_msg_sig.connect(self._handle_pilot_msg_on_ui)
+        self.snapshot_result_sig.connect(self._handle_snapshot_result_on_ui)
+        self.stereo_capture_result_sig.connect(self._handle_stereo_capture_result_on_ui)
 
         self._last_ctrl_status: dict = {'controller': 'unknown'}
         self._last_pilot_msg_ts: float = 0.0
@@ -912,6 +930,14 @@ class MainWindow(QMainWindow):
         self._record_dir: str | None = None
         self._app_session_dir: Path | None = None
         self._app_session_location: SaveLocation | None = None
+        self._last_snapshot_request_mono: float = 0.0
+        self._streams_path = str(streams_path)
+        self._capture_mode = "standard"
+        self._stereo_pairs = []
+        self._active_stereo_pair = None
+        self._stereo_capture_session: StereoCaptureSession | None = None
+        self._last_stereo_capture_request_mono: float = 0.0
+        self._stereo_capture_in_flight = False
         # 2) sensor subscriber (ROV -> topside)
         self.sensor_panel = SensorPanel()
         self.instrument_panel = InstrumentPanel()
@@ -959,11 +985,19 @@ class MainWindow(QMainWindow):
                 self.statusBar().showMessage(f"Streams config not found: {streams_path}", 10000)
             else:
                 self.cam_mgr = RemoteCameraManager(streams_path)
+                try:
+                    self._stereo_pairs = load_stereo_pairs(streams_path)
+                    self._active_stereo_pair = self._stereo_pairs[0] if self._stereo_pairs else None
+                except Exception as exc:
+                    logger.warning("Could not load stereo pairs from %s: %s", streams_path, exc)
+                    self._stereo_pairs = []
+                    self._active_stereo_pair = None
                 stream_names = self.cam_mgr.list_available()
                 if stream_names:
                     self.video_panel = VideoTabs(self.cam_mgr, stream_names=stream_names)
                     self._reverse_camera_name = self._select_reverse_stream_name(stream_names)
                     self.video_panel.selectionChanged.connect(self._on_video_tab_changed)
+                    QTimer.singleShot(1000, self._prewarm_snapshot_capture_feeds)
                 else:
                     self.statusBar().showMessage("No enabled video streams in streams.json", 8000)
         except Exception as e:
@@ -1385,6 +1419,12 @@ class MainWindow(QMainWindow):
                     if event.text().upper() == shortcut_text:
                         self._toggle_lights_from_keyboard()
                         return True
+                    if event.key() == Qt.Key.Key_C:
+                        self._toggle_capture_mode()
+                        return True
+                    if event.key() == Qt.Key.Key_N:
+                        self._start_new_stereo_session()
+                        return True
                     direction = self._back_gripper_gain_shortcuts.get(event.key())
                     if direction is not None:
                         self._adjust_back_gripper_gain_from_keyboard(direction)
@@ -1546,6 +1586,12 @@ class MainWindow(QMainWindow):
             self._last_pilot_msg = dict(msg or {})
         except Exception:
             pass
+        try:
+            edges = (msg or {}).get("edges", {}) or {}
+            if str(edges.get("x", "")).strip().lower() == "down":
+                self._capture_from_current_mode()
+        except Exception as exc:
+            logger.exception("Snapshot trigger failed: %s", exc)
 
         # Update mode indicator from locally-transmitted modes.
         try:
@@ -2128,6 +2174,7 @@ class MainWindow(QMainWindow):
             return
         if changed:
             trace_event("pilot_tether_video_endpoint_applied", endpoint=endpoint, windows_host=local_ip)
+            self._prewarm_snapshot_capture_feeds()
 
     def _refresh_tether_status_ui(self) -> None:
         snapshot = self._get_tether_status_snapshot()
@@ -2380,8 +2427,420 @@ class MainWindow(QMainWindow):
             )
             return
         self.video_panel.set_layout_count(pane_count)
+        self._prewarm_snapshot_capture_feeds()
         labels = {1: "single-camera", 2: "stacked dual-camera", 3: "reverse-pane", 4: "quad-camera"}
         self.statusBar().showMessage(f"Video layout set to {labels.get(int(pane_count), 'custom')} view", 3000)
+
+    @staticmethod
+    def _safe_snapshot_stream_stem(stream_name: str | None) -> str:
+        text = str(stream_name or "").strip()
+        chars: list[str] = []
+        last_was_sep = False
+        for ch in text:
+            if ("A" <= ch <= "Z") or ("a" <= ch <= "z") or ("0" <= ch <= "9") or ch in {".", "-"}:
+                chars.append(ch)
+                last_was_sep = False
+            else:
+                if not last_was_sep:
+                    chars.append("_")
+                    last_was_sep = True
+        safe = "".join(chars).strip("._-")
+        return safe or "stream"
+
+    @classmethod
+    def _snapshot_path(
+        cls,
+        session_dir: Path,
+        stream_name: str | None,
+        *,
+        now: float | None = None,
+        suffix: str = ".png",
+    ) -> Path:
+        ts = time.time() if now is None else float(now)
+        stamp = time.strftime("%Y%m%d-%H%M%S", time.localtime(ts))
+        millis = int(max(0.0, min(0.999, ts - int(ts))) * 1000.0)
+        stem = f"{cls._safe_snapshot_stream_stem(stream_name)}_{stamp}-{millis:03d}"
+        suffix = str(suffix or ".png").strip()
+        if not suffix.startswith("."):
+            suffix = "." + suffix
+        target = Path(session_dir) / f"{stem}{suffix}"
+        counter = 1
+        while target.exists():
+            counter += 1
+            target = Path(session_dir) / f"{stem}_{counter:02d}{suffix}"
+        return target
+
+    @staticmethod
+    def _unused_snapshot_path(target: Path) -> Path:
+        target = Path(target)
+        if not target.exists():
+            return target
+        counter = 1
+        while True:
+            counter += 1
+            candidate = target.with_name(f"{target.stem}_{counter:02d}{target.suffix}")
+            if not candidate.exists():
+                return candidate
+
+    def _current_stereo_pair(self):
+        pair = getattr(self, "_active_stereo_pair", None)
+        if pair is not None:
+            return pair
+        pairs = list(getattr(self, "_stereo_pairs", []) or [])
+        if pairs:
+            self._active_stereo_pair = pairs[0]
+            return pairs[0]
+        return None
+
+    def _toggle_capture_mode(self) -> None:
+        if str(getattr(self, "_capture_mode", "standard")) == "stereo":
+            self._capture_mode = "standard"
+            self.statusBar().showMessage("Capture mode: standard snapshots", 3000)
+            trace_event("capture_mode_changed", mode="standard")
+            return
+        pair = self._current_stereo_pair()
+        if pair is None:
+            self.statusBar().showMessage("Stereo capture unavailable: no stereo pair configured", 5000)
+            trace_event("capture_mode_change_failed", mode="stereo", reason="no_pair")
+            return
+        self._capture_mode = "stereo"
+        self.statusBar().showMessage(f"Capture mode: stereo ({pair.left} + {pair.right})", 4000)
+        trace_event("capture_mode_changed", mode="stereo", pair=pair.name, left=pair.left, right=pair.right)
+
+    def _start_new_stereo_session(self) -> None:
+        if self._stereo_capture_in_flight:
+            self.statusBar().showMessage("Stereo capture busy; wait for the current pair to finish", 3500)
+            return
+        pair = self._current_stereo_pair()
+        if pair is None or self.cam_mgr is None:
+            self.statusBar().showMessage("Stereo session unavailable: no stereo pair configured", 5000)
+            trace_event("stereo_session_new_failed", reason="no_pair_or_manager")
+            return
+        try:
+            output_root, _location = self._make_recording_session_dir()
+            old_session = getattr(self, "_stereo_capture_session", None)
+            if old_session is not None:
+                try:
+                    old_session.stop()
+                except Exception:
+                    pass
+            session = StereoCaptureSession(
+                self.cam_mgr,
+                pair,
+                output_root=output_root,
+                session_name=default_stereo_session_name(),
+            )
+            session.start()
+            self._stereo_capture_session = session
+            self._capture_mode = "stereo"
+            self.statusBar().showMessage(f"New stereo session -> {session.session_dir}", 5000)
+            trace_event(
+                "stereo_session_new",
+                pair=pair.name,
+                session_dir=str(session.session_dir),
+                output_root=str(output_root),
+            )
+        except Exception as exc:
+            self.statusBar().showMessage(f"Could not start stereo session: {exc}", 7000)
+            trace_event("stereo_session_new_failed", reason="exception", error=str(exc))
+
+    def _ensure_stereo_session(self) -> StereoCaptureSession | None:
+        session = getattr(self, "_stereo_capture_session", None)
+        if session is not None:
+            return session
+        self._start_new_stereo_session()
+        return getattr(self, "_stereo_capture_session", None)
+
+    def _capture_from_current_mode(self) -> None:
+        if str(getattr(self, "_capture_mode", "standard")) == "stereo":
+            self._capture_stereo_pair_snapshot()
+            return
+        self._capture_selected_stream_snapshot()
+
+    def _capture_stereo_pair_snapshot(self) -> None:
+        now_mono = time.monotonic()
+        if now_mono - float(getattr(self, "_last_stereo_capture_request_mono", 0.0)) < 0.05:
+            trace_event("stereo_capture_request_ignored", reason="debounce")
+            return
+        self._last_stereo_capture_request_mono = now_mono
+        if self._stereo_capture_in_flight:
+            self.statusBar().showMessage("Stereo capture busy; wait for the current pair to finish", 2500)
+            trace_event("stereo_capture_request_ignored", reason="busy")
+            return
+        pair = self._current_stereo_pair()
+        if pair is None:
+            self.statusBar().showMessage("Stereo capture unavailable: no stereo pair configured", 5000)
+            trace_event("stereo_capture_request_ignored", reason="no_pair")
+            return
+        session = self._ensure_stereo_session()
+        if session is None:
+            return
+        flasher = getattr(self.video_panel, "flash_snapshot_badge", None) if self.video_panel is not None else None
+        if callable(flasher):
+            for stream_name in (pair.left, pair.right):
+                try:
+                    flasher(stream_name)
+                except Exception:
+                    pass
+        self._stereo_capture_in_flight = True
+        self._capture_and_save_stereo_pair_async(session)
+        self.statusBar().showMessage(f"Stereo capture queued -> {session.session_dir}", 2500)
+        trace_event("stereo_capture_queued", pair=pair.name, session_dir=str(session.session_dir))
+
+    def _capture_selected_stream_snapshot(self) -> None:
+        now_mono = time.monotonic()
+        if now_mono - float(getattr(self, "_last_snapshot_request_mono", 0.0)) < 0.05:
+            trace_event("snapshot_request_ignored", reason="debounce")
+            return
+        self._last_snapshot_request_mono = now_mono
+
+        if self.video_panel is None:
+            self.statusBar().showMessage("Snapshot unavailable: no video panel", 3000)
+            trace_event("snapshot_request_ignored", reason="no_video_panel")
+            return
+
+        stream_name = self.video_panel.current_stream_name()
+        widget = self.video_panel.current_video_widget()
+        if not stream_name or widget is None:
+            self.statusBar().showMessage("Snapshot unavailable: no selected camera", 3000)
+            trace_event("snapshot_request_ignored", reason="no_selected_camera", stream=stream_name)
+            return
+
+        try:
+            session_dir, _location = self._make_recording_session_dir()
+            has_onboard_capture = callable(getattr(self.cam_mgr, "capture_onboard_snapshot", None))
+            target = self._snapshot_path(session_dir, stream_name, suffix=".jpg" if has_onboard_capture else ".png")
+        except Exception as exc:
+            self.statusBar().showMessage(f"Could not prepare snapshot folder: {exc}", 5000)
+            trace_event("snapshot_request_ignored", reason="session_dir_failed", stream=stream_name, error=str(exc))
+            return
+
+        trace_event("snapshot_requested", stream=stream_name, path=str(target))
+        flasher = getattr(self.video_panel, "flash_snapshot_badge", None)
+        if callable(flasher):
+            try:
+                flasher(stream_name)
+            except Exception:
+                pass
+
+        onboard_capturer = getattr(self.cam_mgr, "capture_onboard_snapshot", None)
+        source_capturer = getattr(self.cam_mgr, "capture_snapshot_frame", None)
+        if callable(onboard_capturer) or callable(source_capturer):
+            self._capture_and_save_snapshot_async(str(stream_name), target)
+        else:
+            image: QImage | None = None
+            snapshotter = getattr(widget, "snapshot_image", None)
+            if callable(snapshotter):
+                try:
+                    image = snapshotter()
+                except Exception as exc:
+                    logger.warning("Snapshot image capture failed for %s: %s", stream_name, exc)
+                    image = None
+            if image is None or image.isNull():
+                self.statusBar().showMessage(f"Snapshot unavailable: {stream_name} has no frame yet", 3000)
+                trace_event("snapshot_request_ignored", reason="widget_no_frame", stream=stream_name)
+                return
+            self._save_snapshot_image_async(image.copy(), target, str(stream_name))
+        self.statusBar().showMessage(f"Snapshot queued -> {target}", 2500)
+        trace_event("snapshot_queued", stream=stream_name, path=str(target))
+
+    @staticmethod
+    def _qimage_from_bgr_frame(frame) -> QImage:
+        arr = np.ascontiguousarray(frame)
+        if arr.ndim != 3 or arr.shape[2] != 3:
+            raise ValueError(f"Expected BGR frame with 3 channels, got shape {arr.shape}")
+        height, width, _channels = arr.shape
+        image = QImage(arr.data, int(width), int(height), int(arr.strides[0]), QImage.Format.Format_BGR888)
+        return image.copy()
+
+    @staticmethod
+    def _save_snapshot_image_file(image: QImage, target: Path) -> None:
+        target = Path(target)
+        tmp = target.with_name(f".{target.stem}.partial{target.suffix}")
+        target.parent.mkdir(parents=True, exist_ok=True)
+        if tmp.exists():
+            try:
+                tmp.unlink()
+            except Exception:
+                pass
+        try:
+            if not image.save(str(tmp), "PNG"):
+                raise RuntimeError("Qt image encoder returned failure")
+            tmp.replace(target)
+        except Exception:
+            try:
+                if tmp.exists():
+                    tmp.unlink()
+            except Exception:
+                pass
+            raise
+
+    @staticmethod
+    def _snapshot_extension_for_packet(packet) -> str:
+        extension = str(getattr(packet, "extension", "") or "").strip().lower()
+        if extension.startswith("."):
+            extension = extension[1:]
+        mime_type = str(getattr(packet, "mime_type", "") or "").strip().lower()
+        if not extension:
+            extension = "jpg" if mime_type == "image/jpeg" else "bin"
+        extension = "".join(ch for ch in extension if ("a" <= ch <= "z") or ("0" <= ch <= "9"))
+        if not extension:
+            extension = "jpg" if mime_type == "image/jpeg" else "bin"
+        return "." + extension
+
+    @staticmethod
+    def _save_snapshot_bytes_file(data: bytes, target: Path) -> None:
+        target = Path(target)
+        tmp = target.with_name(f".{target.stem}.partial{target.suffix}")
+        target.parent.mkdir(parents=True, exist_ok=True)
+        if tmp.exists():
+            try:
+                tmp.unlink()
+            except Exception:
+                pass
+        try:
+            with open(tmp, "wb") as f:
+                f.write(bytes(data))
+                f.flush()
+                os.fsync(f.fileno())
+            tmp.replace(target)
+        except Exception:
+            try:
+                if tmp.exists():
+                    tmp.unlink()
+            except Exception:
+                pass
+            raise
+
+    def _capture_and_save_snapshot_async(self, stream_name: str, target: Path) -> None:
+        stream_name = str(stream_name)
+        target = Path(target)
+
+        def _work() -> None:
+            ok = False
+            err = ""
+            saved_target = target
+            try:
+                trace_event("snapshot_capture_started", stream=stream_name, path=str(target))
+                onboard_capturer = getattr(self.cam_mgr, "capture_onboard_snapshot", None)
+                if callable(onboard_capturer):
+                    try:
+                        packet = onboard_capturer(stream_name, timeout_s=2.0)
+                        data = bytes(getattr(packet, "image_bytes", b"") or b"")
+                        if not data:
+                            raise RuntimeError("ROV snapshot returned no image bytes")
+                        extension = self._snapshot_extension_for_packet(packet)
+                        save_target = target if target.suffix.lower() == extension else target.with_suffix(extension)
+                        saved_target = self._unused_snapshot_path(save_target)
+                        self._save_snapshot_bytes_file(data, saved_target)
+                        ok = True
+                        trace_event(
+                            "snapshot_onboard_saved",
+                            stream=stream_name,
+                            path=str(saved_target),
+                            byte_count=int(getattr(packet, "byte_count", len(data)) or len(data)),
+                            mime_type=str(getattr(packet, "mime_type", "") or ""),
+                        )
+                        self.snapshot_result_sig.emit(stream_name, str(saved_target), ok, err)
+                        return
+                    except Exception as onboard_exc:
+                        trace_event(
+                            "snapshot_onboard_failed",
+                            stream=stream_name,
+                            path=str(target),
+                            error=str(onboard_exc),
+                        )
+                        logger.warning(
+                            "ROV onboard snapshot failed for %s; falling back to source frame: %s",
+                            stream_name,
+                            onboard_exc,
+                        )
+                capturer = getattr(self.cam_mgr, "capture_snapshot_frame", None)
+                if not callable(capturer):
+                    raise RuntimeError("source capture path is unavailable")
+                packet = capturer(stream_name, timeout_s=2.5)
+                frame = getattr(packet, "frame_bgr", None)
+                if frame is None:
+                    raise RuntimeError("source capture returned no frame")
+                saved_target = target if target.suffix.lower() == ".png" else target.with_suffix(".png")
+                saved_target = self._unused_snapshot_path(saved_target)
+                trace_event(
+                    "snapshot_frame_captured",
+                    stream=stream_name,
+                    path=str(saved_target),
+                    seq=int(getattr(packet, "seq", 0) or 0),
+                    frame_shape=str(getattr(frame, "shape", "")),
+                )
+                image = self._qimage_from_bgr_frame(frame)
+                self._save_snapshot_image_file(image, saved_target)
+                ok = True
+            except Exception as exc:
+                err = str(exc)
+                logger.warning("Snapshot capture/save failed for %s -> %s: %s", stream_name, saved_target, err)
+            self.snapshot_result_sig.emit(stream_name, str(saved_target), ok, err)
+
+        threading.Thread(target=_work, name=f"snapshot-capture-{stream_name}", daemon=True).start()
+
+    def _save_snapshot_image_async(self, image: QImage, target: Path, stream_name: str) -> None:
+        target = Path(target)
+        image = image.copy()
+
+        def _write() -> None:
+            ok = False
+            err = ""
+            try:
+                self._save_snapshot_image_file(image, target)
+                ok = True
+            except Exception as exc:
+                err = str(exc)
+            self.snapshot_result_sig.emit(str(stream_name), str(target), ok, err)
+
+        threading.Thread(target=_write, name=f"snapshot-save-{stream_name}", daemon=True).start()
+
+    def _capture_and_save_stereo_pair_async(self, session: StereoCaptureSession) -> None:
+        pair_name = str(getattr(session.pair, "name", "stereo"))
+
+        def _work() -> None:
+            ok = False
+            err = ""
+            path = str(session.manifest_path)
+            try:
+                record = session.capture_once(wait_s=2.0)
+                ok = True
+                path = str(session.manifest_path)
+                trace_event(
+                    "stereo_capture_saved",
+                    pair=pair_name,
+                    session_dir=str(session.session_dir),
+                    manifest_path=path,
+                    index=record.get("index"),
+                    pair_delta_ms=record.get("pair_delta_ms"),
+                )
+            except Exception as exc:
+                err = str(exc)
+                logger.warning("Stereo capture failed for %s -> %s: %s", pair_name, path, err)
+            self.stereo_capture_result_sig.emit(pair_name, path, ok, err)
+
+        threading.Thread(target=_work, name=f"stereo-capture-{pair_name}", daemon=True).start()
+
+    def _handle_snapshot_result_on_ui(self, stream_name: str, path: str, ok: bool, err: str) -> None:
+        if ok:
+            self.statusBar().showMessage(f"Saved snapshot {stream_name} -> {path}", 5000)
+            trace_event("snapshot_saved", stream=stream_name, path=path)
+            return
+        detail = err or "unknown error"
+        self.statusBar().showMessage(f"Snapshot save failed for {stream_name}: {detail}", 7000)
+        trace_event("snapshot_save_failed", stream=stream_name, path=path, error=detail)
+
+    def _handle_stereo_capture_result_on_ui(self, pair_name: str, path: str, ok: bool, err: str) -> None:
+        self._stereo_capture_in_flight = False
+        if ok:
+            self.statusBar().showMessage(f"Saved stereo pair {pair_name} -> {path}", 5000)
+            trace_event("stereo_capture_result", pair=pair_name, path=path, ok=True)
+            return
+        detail = err or "unknown error"
+        self.statusBar().showMessage(f"Stereo capture failed for {pair_name}: {detail}", 7000)
+        trace_event("stereo_capture_result", pair=pair_name, path=path, ok=False, error=detail)
 
     def _analysis_transfer_configured_root(self) -> Path:
         override = os.environ.get("TRITON_PILOT_TRANSFER_ROOT", "").strip()
@@ -2809,6 +3268,18 @@ class MainWindow(QMainWindow):
         try:
             if self.video_panel is not None:
                 self.video_panel.stop_all()
+        except Exception:
+            pass
+        try:
+            closer = getattr(self.cam_mgr, "close_snapshot_taps", None)
+            if callable(closer):
+                closer(reason="app_close")
+        except Exception:
+            pass
+        try:
+            session = getattr(self, "_stereo_capture_session", None)
+            if session is not None:
+                session.stop()
         except Exception:
             pass
         video_panel = self.video_panel

@@ -488,6 +488,19 @@ class VideoWidget(QWidget):
         pix.setDevicePixelRatio(dpr)
         self.label.setPixmap(pix)
 
+    def snapshot_image(self) -> QImage | None:
+        frame = self.last_frame
+        if frame is None:
+            return None
+        try:
+            frame = self._display_frame(frame)
+            h, w, _ch = frame.shape
+            bytes_per_line = frame.strides[0]
+            image = QImage(frame.data, w, h, bytes_per_line, QImage.Format.Format_BGR888)
+            return image.copy()
+        except Exception:
+            return None
+
     def refresh_layout_geometry(self) -> None:
         if self.last_frame is None:
             return
