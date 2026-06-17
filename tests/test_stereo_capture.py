@@ -10,6 +10,16 @@ from stereo.pairs import load_stereo_pairs
 from video.cam import CameraFramePacket
 
 
+def _usable_frame(seq: int, width: int = 6, height: int = 4) -> np.ndarray:
+    base = 40 + (int(seq) % 9) * 18
+    frame = np.zeros((height, width, 3), dtype=np.uint8)
+    frame[:, :, 0] = min(base, 255)
+    frame[:, :, 1] = min(base + 28, 255)
+    frame[:, :, 2] = min(base + 12, 255)
+    frame[::2, ::2, :] = min(base + 85, 255)
+    return frame
+
+
 def test_load_stereo_pairs_from_streams_config(tmp_path: Path):
     cfg_path = tmp_path / "streams.json"
     cfg_path.write_text(
@@ -44,7 +54,7 @@ class _FakeCamera:
         self.packets = [
             CameraFramePacket(
                 source_name=name,
-                frame_bgr=np.full((4, 6, 3), seq, dtype=np.uint8),
+                frame_bgr=_usable_frame(seq),
                 seq=seq,
                 monotonic_ts=ts,
                 wall_ts=1000.0 + ts,
@@ -331,12 +341,12 @@ def test_stereo_capture_chooses_closest_buffered_frame_pair(tmp_path: Path):
     pair = load_stereo_pairs(streams_path)[0]
     manager = _FakeManager()
     manager.cameras["Left"].packets = [
-        CameraFramePacket("Left", np.zeros((4, 6, 3), dtype=np.uint8), 10, 100.000, 1000.000),
-        CameraFramePacket("Left", np.zeros((4, 6, 3), dtype=np.uint8), 11, 100.033, 1000.033),
+        CameraFramePacket("Left", _usable_frame(10), 10, 100.000, 1000.000),
+        CameraFramePacket("Left", _usable_frame(11), 11, 100.033, 1000.033),
     ]
     manager.cameras["Right"].packets = [
-        CameraFramePacket("Right", np.zeros((4, 6, 3), dtype=np.uint8), 20, 100.010, 1000.010),
-        CameraFramePacket("Right", np.zeros((4, 6, 3), dtype=np.uint8), 21, 100.060, 1000.060),
+        CameraFramePacket("Right", _usable_frame(20), 20, 100.010, 1000.010),
+        CameraFramePacket("Right", _usable_frame(21), 21, 100.060, 1000.060),
     ]
     session = StereoCaptureSession(
         manager,  # type: ignore[arg-type]
@@ -352,6 +362,60 @@ def test_stereo_capture_chooses_closest_buffered_frame_pair(tmp_path: Path):
     assert record["left"]["seq"] == 10
     assert record["right"]["seq"] == 20
     assert record["pair_delta_ms"] == pytest.approx(10.0)
+
+
+def test_stereo_capture_skips_green_startup_artifact_packets(tmp_path: Path):
+    streams_path = tmp_path / "streams.json"
+    streams_path.write_text(
+        json.dumps(
+            {
+                "streams": [{"name": "Left"}, {"name": "Right"}],
+                "stereo_pairs": [
+                    {
+                        "name": "Forward",
+                        "left": "Left",
+                        "right": "Right",
+                        "rig_id": "rig-a",
+                        "max_pair_delta_ms": 20,
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    pair = load_stereo_pairs(streams_path)[0]
+    manager = _FakeManager()
+    green = np.zeros((24, 32, 3), dtype=np.uint8)
+    green[:, :, 1] = 74
+    normal_left = np.zeros((24, 32, 3), dtype=np.uint8)
+    normal_left[:, :, 0] = 140
+    normal_left[:, :, 1] = 145
+    normal_left[:, :, 2] = 110
+    normal_left[::2, ::2, :] = 180
+    normal_right = normal_left.copy()
+    normal_right[:, :, 2] = 118
+    manager.cameras["Left"].packets = [
+        CameraFramePacket("Left", green, 10, 100.000, 1000.000),
+        CameraFramePacket("Left", normal_left, 11, 100.050, 1000.050),
+    ]
+    manager.cameras["Right"].packets = [
+        CameraFramePacket("Right", green, 20, 100.002, 1000.002),
+        CameraFramePacket("Right", normal_right, 21, 100.058, 1000.058),
+    ]
+    session = StereoCaptureSession(
+        manager,  # type: ignore[arg-type]
+        pair,
+        output_root=tmp_path,
+        session_name="artifact-session",
+    )
+
+    session.start()
+    record = session.capture_once(wait_s=0.1)
+    session.stop()
+
+    assert record["left"]["seq"] == 11
+    assert record["right"]["seq"] == 21
+    assert record["pair_delta_ms"] == pytest.approx(8.0)
 
 
 def test_stereo_capture_once_honors_stop_request(tmp_path: Path):

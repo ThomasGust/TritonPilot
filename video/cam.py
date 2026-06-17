@@ -18,6 +18,7 @@ import numpy as np
 from network.net_select import parse_zmq_endpoint, choose_video_receive_ip
 from config import VIDEO_RPC_ENDPOINT
 from recording.capture_trace import trace_event
+from recording.frame_quality import capture_frame_rejection_reason
 from video.gst_receiver import ReceiverProcess, RxConfig
 from video.frame_rotation import normalize_rotation_deg
 from video.rov_streams import ROVStreams
@@ -71,6 +72,7 @@ class RemoteCv2Camera:
         self.latency_ms = latency_ms
         self.channel_order = channel_order
         self.rotation_deg = normalize_rotation_deg(stream_opts.get("rotation_deg", 0) if stream_opts else 0)
+        self._last_rejected_artifact_seq: int | None = None
 
         # Populated if the ROV had to perform recovery actions (e.g., USB rebind)
         self.start_messages: list[str] = []
@@ -198,8 +200,23 @@ class RemoteCv2Camera:
             return False, None
         return True, packet.frame_bgr
 
-    def _decode_packet(self, packet) -> CameraFramePacket:
+    def _decode_packet(self, packet) -> CameraFramePacket | None:
         img = np.frombuffer(packet.data, dtype=np.uint8).reshape((self.height, self.width, 3))
+        rejection_reason = capture_frame_rejection_reason(img)
+        if rejection_reason is not None:
+            try:
+                seq = int(packet.seq)
+            except Exception:
+                seq = -1
+            if getattr(self, "_last_rejected_artifact_seq", None) != seq:
+                self._last_rejected_artifact_seq = seq
+                trace_event(
+                    "camera_frame_rejected",
+                    stream=self.name,
+                    seq=seq,
+                    reason=rejection_reason,
+                )
+            return None
         return CameraFramePacket(
             source_name=self.name,
             frame_bgr=img,
@@ -232,7 +249,12 @@ class RemoteCv2Camera:
         except AttributeError:
             latest = self.latest_frame_packet()
             return [] if latest is None else [latest]
-        return [self._decode_packet(packet) for packet in packets]
+        decoded: list[CameraFramePacket] = []
+        for packet in packets:
+            decoded_packet = self._decode_packet(packet)
+            if decoded_packet is not None:
+                decoded.append(decoded_packet)
+        return decoded
 
     def release(self, rx_grace_s: float = 0.15):
         """Stop the local receiver and ask TritonOS to stop transmitting."""
@@ -281,6 +303,7 @@ class RemoteCaptureCamera:
         self.latency_ms = int(latency_ms)
         self.channel_order = channel_order
         self.rotation_deg = normalize_rotation_deg(stream_opts.get("rotation_deg", 0) if stream_opts else 0)
+        self._last_rejected_artifact_seq: int | None = None
         self.start_messages: list[str] = []
 
         stream_opts = stream_opts or {}
@@ -372,8 +395,23 @@ class RemoteCaptureCamera:
             return False, None
         return True, packet.frame_bgr
 
-    def _decode_packet(self, packet) -> CameraFramePacket:
+    def _decode_packet(self, packet) -> CameraFramePacket | None:
         img = np.frombuffer(packet.data, dtype=np.uint8).reshape((self.height, self.width, 3))
+        rejection_reason = capture_frame_rejection_reason(img)
+        if rejection_reason is not None:
+            try:
+                seq = int(packet.seq)
+            except Exception:
+                seq = -1
+            if getattr(self, "_last_rejected_artifact_seq", None) != seq:
+                self._last_rejected_artifact_seq = seq
+                trace_event(
+                    "camera_frame_rejected",
+                    stream=self.name,
+                    seq=seq,
+                    reason=rejection_reason,
+                )
+            return None
         return CameraFramePacket(
             source_name=self.name,
             frame_bgr=img,
@@ -396,7 +434,12 @@ class RemoteCaptureCamera:
 
     def recent_frame_packets(self, *, max_age_s: float = 0.5) -> list[CameraFramePacket]:
         packets = self.rx.recent_frame_packets(max_age_s=max_age_s)
-        return [self._decode_packet(packet) for packet in packets]
+        decoded: list[CameraFramePacket] = []
+        for packet in packets:
+            decoded_packet = self._decode_packet(packet)
+            if decoded_packet is not None:
+                decoded.append(decoded_packet)
+        return decoded
 
     def release(self, rx_grace_s: float = 0.15):
         trace_event("capture_camera_release", stream=self.name, port=self.port, rx_grace_s=rx_grace_s)
@@ -672,6 +715,21 @@ class RemoteCameraManager:
         )
         resp = self.rov.start_stream(**kwargs)
         trace_event("camera_manager_capture_stream_started", stream=name, response=resp)
+
+    def restart_capture_stream(self, name: str) -> None:
+        """Restart the ROV-side sender for a capture-backed stream."""
+
+        name_lock = self._lock_for_name(name)
+        with name_lock:
+            stream_opts = self._merged_stream_options(name)
+            capture_port = self._capture_port_for_stream(stream_opts)
+            trace_event("camera_manager_capture_stream_restart_request", stream=name, capture_port=capture_port)
+            try:
+                self.rov.stop_stream(name=name)
+                trace_event("camera_manager_capture_stream_stopped_for_restart", stream=name)
+            except Exception as exc:
+                trace_event("camera_manager_capture_stream_stop_for_restart_failed", stream=name, error=str(exc))
+            self._start_rov_stream_for_capture(name, stream_opts, capture_port)
 
     def open_capture(self, name: str) -> RemoteCaptureCamera:
         """Open or share a capture-only receiver for a named stream."""

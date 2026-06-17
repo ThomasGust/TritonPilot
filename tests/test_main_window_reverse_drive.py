@@ -148,14 +148,37 @@ class _FakeRemoteCameraManager:
             "Arm Camera": {"name": "Arm Camera", "width": 1920, "height": 1080, "fps": 30, "video_format": "h264", "port": 5001},
             "Back Gripper Camera": {"name": "Back Gripper Camera", "width": 1920, "height": 1080, "fps": 30, "video_format": "h264", "port": 5003},
         }
+        self.capture_opened = []
+        self.capture_closed = []
 
     def list_available(self):
         return list(self.default_pane_order)
 
+    def open_capture(self, name):
+        self.capture_opened.append(str(name))
+        return object()
+
+    def close_capture(self, name):
+        self.capture_closed.append(str(name))
+        return True
+
 
 class _FakeVideoWidget:
+    def __init__(self):
+        self.capture_frame_pipe_enabled = False
+        self.packet = None
+
     def status(self):
         return {"state": "playing", "age_s": 0.0}
+
+    def latest_frame_packet(self):
+        return self.packet
+
+    def recent_frame_packets(self, *, max_age_s=0.5):
+        return [] if self.packet is None else [self.packet]
+
+    def set_capture_frame_pipe_enabled(self, enabled):
+        self.capture_frame_pipe_enabled = bool(enabled)
 
 
 class _FakeVideoPanel(QWidget):
@@ -176,6 +199,7 @@ class _FakeVideoPanel(QWidget):
         self.tether_statuses = []
         self.square_display_enabled = False
         self.refresh_layout_count = 0
+        self._widgets = {name: _FakeVideoWidget() for name in self.stream_names}
 
     def _visible_count(self):
         return min(len(self.stream_names), int(self._pane_count))
@@ -197,7 +221,11 @@ class _FakeVideoPanel(QWidget):
         return visible[idx]
 
     def current_video_widget(self):
-        return _FakeVideoWidget()
+        name = self.current_stream_name()
+        return self._widgets.get(name) if name else None
+
+    def video_widget_for_stream(self, name):
+        return self._widgets.get(str(name))
 
     def set_layout_controls_visible(self, visible):
         self.controls_visible = bool(visible)
@@ -763,11 +791,18 @@ def test_stereo_page_applies_configured_pair_layout(monkeypatch, tmp_path):
         assert panel.controls_enabled is False
         assert win._stereo_page.rig_lbl.text() == "rig-a"
         assert win._stereo_page.baseline_lbl.text() == "120 mm"
+        assert panel.video_widget_for_stream("Primary Camera").capture_frame_pipe_enabled is True
+        assert panel.video_widget_for_stream("Aux Camera").capture_frame_pipe_enabled is True
+        assert win._video_frame_source("Primary Camera", require_packet=True) is None
+        assert sorted(win.cam_mgr.capture_opened) == ["Aux Camera", "Primary Camera"]
 
         win._set_center_page("pilot", announce=False)
         app.processEvents()
 
         assert panel.restore_layout_snapshot_calls
+        assert panel.video_widget_for_stream("Primary Camera").capture_frame_pipe_enabled is False
+        assert panel.video_widget_for_stream("Aux Camera").capture_frame_pipe_enabled is False
+        assert sorted(win.cam_mgr.capture_closed) == ["Aux Camera", "Primary Camera"]
     finally:
         win.close()
         app.processEvents()

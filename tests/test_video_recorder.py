@@ -6,7 +6,7 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-from recording.video_recorder import VideoRecorder, _ffmpeg_output_params, _preferred_mp4_backends
+from recording.video_recorder import VideoRecorder, _ffmpeg_output_params, _preferred_mp4_backends, save_snapshot
 
 
 def _sample_frame(value: int) -> np.ndarray:
@@ -87,6 +87,18 @@ def test_video_recorder_hides_mp4_until_finalized(tmp_path: Path):
 
     assert target.exists()
     _assert_ffmpeg_can_read(target)
+
+
+def test_save_snapshot_publishes_readable_final_file(tmp_path: Path):
+    cv2 = pytest.importorskip("cv2")
+    target = tmp_path / "snapshot.png"
+
+    save_snapshot(_sample_frame(90), target)
+
+    loaded = cv2.imread(str(target), cv2.IMREAD_COLOR)
+    assert loaded is not None
+    assert loaded.shape == (48, 64, 3)
+    assert not list(tmp_path.glob("*.partial*"))
 
 
 def test_video_recorder_discards_empty_mp4(tmp_path: Path):

@@ -14,6 +14,7 @@ import numpy as np
 
 from recording.capture_paths import safe_filename_component
 from recording.capture_trace import trace_event
+from recording.frame_quality import is_usable_capture_frame
 from recording.save_location import DEFAULT_RECORDINGS_DIR
 from recording.video_recorder import save_snapshot
 from stereo.pairs import StereoPairConfig
@@ -69,6 +70,7 @@ class StereoCaptureSession:
         self._save_executor: ThreadPoolExecutor | None = None
         self._save_futures: list[Future] = []
         self._save_lock = threading.Lock()
+        self._last_rejected_artifact_seq_by_stream: dict[str, int] = {}
 
     @property
     def manifest_path(self) -> Path:
@@ -257,9 +259,37 @@ class StereoCaptureSession:
         if callable(recent):
             packets = recent(max_age_s=max(0.25, self.pair.max_pair_delta_s + 0.2))
             if packets:
-                return list(packets)
+                return [packet for packet in list(packets) if self._packet_is_usable(packet)]
         latest = camera.latest_frame_packet()
-        return [] if latest is None else [latest]
+        if latest is None or not self._packet_is_usable(latest):
+            return []
+        return [latest]
+
+    def _packet_is_usable(self, packet: CameraFramePacket) -> bool:
+        try:
+            usable = is_usable_capture_frame(packet.frame_bgr)
+        except Exception:
+            usable = True
+        if usable:
+            return True
+        try:
+            stream_name = str(packet.source_name)
+        except Exception:
+            stream_name = ""
+        try:
+            seq = int(packet.seq)
+        except Exception:
+            seq = -1
+        if self._last_rejected_artifact_seq_by_stream.get(stream_name) != seq:
+            self._last_rejected_artifact_seq_by_stream[stream_name] = seq
+            trace_event(
+                "stereo_capture_frame_rejected",
+                pair=self.pair.name,
+                stream=stream_name,
+                seq=seq,
+                reason="green_startup_artifact",
+            )
+        return False
 
     def _best_recent_pair(self, *, require_fresh: bool) -> tuple[CameraFramePacket, CameraFramePacket] | None:
         left_frames = self._recent_packets(self._left_camera)
@@ -301,6 +331,7 @@ class StereoCaptureSession:
             "capture_notes": {
                 "timestamp_source": "topside receiver time after decoded frame read",
                 "sync_quality": "best effort; exploreHD is rolling shutter and lacks external frame sync",
+                "quality_gate": "skips uniform green H.264 startup artifacts before pairing",
             },
             "frames": [],
         }

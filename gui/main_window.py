@@ -591,6 +591,37 @@ class MainWindow(QMainWindow):
             requested = str(env_value).strip().lower() in {"1", "true", "yes", "on"}
         return bool(requested)
 
+    def _set_stereo_viewport_capture_streams(self, *stream_names: str) -> None:
+        previous = set(getattr(self, "_stereo_viewport_capture_names", set()) or set())
+        desired = {str(name) for name in stream_names if str(name or "").strip()}
+        panel = self.video_panel
+        if panel is None:
+            self._stereo_viewport_capture_names = set()
+            return
+        getter = getattr(panel, "video_widget_for_stream", None)
+        active: set[str] = set()
+        for name in sorted(previous - desired):
+            try:
+                widget = getter(name) if callable(getter) else None
+                setter = getattr(widget, "set_capture_frame_pipe_enabled", None)
+                if callable(setter):
+                    setter(False)
+            except Exception:
+                pass
+        for name in sorted(desired):
+            try:
+                widget = getter(name) if callable(getter) else None
+                setter = getattr(widget, "set_capture_frame_pipe_enabled", None)
+                if callable(setter):
+                    setter(True)
+                    active.add(name)
+            except Exception:
+                pass
+        self._stereo_viewport_capture_names = active
+
+    def _release_stereo_viewport_capture_streams(self) -> None:
+        self._set_stereo_viewport_capture_streams()
+
     def _video_frame_source(self, stream_name: str, *, require_packet: bool = True):
         panel = self.video_panel
         if panel is None:
@@ -661,6 +692,7 @@ class MainWindow(QMainWindow):
 
         previous_page = getattr(self, "_active_page_name", "")
         if previous_page == "stereo" and page_name != "stereo":
+            self._release_stereo_viewport_capture_streams()
             self._release_stereo_capture_receivers()
             if self.video_panel is not None and getattr(self, "_stereo_layout_restore_snapshot", None) is not None:
                 try:
@@ -846,6 +878,7 @@ class MainWindow(QMainWindow):
                 active_name=pair.left,
                 emit=True,
             )
+            self._set_stereo_viewport_capture_streams(pair.left, pair.right)
             self._warm_stereo_capture_receivers(pair.left, pair.right)
             self._resume_video_panel()
         except Exception:
@@ -1262,6 +1295,7 @@ class MainWindow(QMainWindow):
         self._stereo_layout_restore_snapshot: dict | None = None
         self._transect_layout_restore_snapshot: dict | None = None
         self._stereo_capture_warm_names: set[str] = set()
+        self._stereo_viewport_capture_names: set[str] = set()
         self._reverse_page_owns_mode: bool = False
         self._active_page_name = ""
 

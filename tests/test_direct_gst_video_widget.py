@@ -188,11 +188,25 @@ def _app() -> QApplication:
     return app
 
 
+def _usable_frame(width: int = 24, height: int = 16, base: int = 80) -> np.ndarray:
+    frame = np.zeros((height, width, 3), dtype=np.uint8)
+    frame[:, :, 0] = base
+    frame[:, :, 1] = min(base + 18, 255)
+    frame[:, :, 2] = min(base + 36, 255)
+    frame[::2, ::2, :] = min(base + 70, 255)
+    return frame
+
+
 class _FakeCaptureCamera:
     def __init__(self):
-        self.packet = SimpleNamespace(
-            frame_bgr=np.zeros((16, 24, 3), dtype=np.uint8),
-            seq=1,
+        self.seq = 0
+        self.packet = self._packet()
+
+    def _packet(self):
+        self.seq += 1
+        return SimpleNamespace(
+            frame_bgr=_usable_frame(base=70 + (self.seq % 3) * 10),
+            seq=self.seq,
             monotonic_ts=time.monotonic(),
             wall_ts=time.time(),
         )
@@ -201,6 +215,7 @@ class _FakeCaptureCamera:
         return self.packet
 
     def read_frame_packet(self):
+        self.packet = self._packet()
         return self.packet
 
 
@@ -449,6 +464,134 @@ def test_direct_widget_prefers_viewport_frame_pipe_for_capture(monkeypatch, tmp_
         app.processEvents()
 
 
+def test_direct_widget_screen_snapshot_avoids_capture_receiver(monkeypatch, tmp_path):
+    app = _app()
+    monkeypatch.setattr("gui.direct_gst_video_widget.DirectGstVideoWidget._start_connect", lambda self: None)
+    saved_frames = []
+
+    def _fake_save_snapshot(frame, out_path):
+        saved_frames.append(np.array(frame, copy=True))
+        Path(out_path).parent.mkdir(parents=True, exist_ok=True)
+        Path(out_path).touch()
+
+    monkeypatch.setattr("gui.direct_gst_video_widget.save_snapshot", _fake_save_snapshot)
+
+    frame = np.zeros((12, 20, 3), dtype=np.uint8)
+    frame[:, :, 2] = 140
+    manager = _FakeManager()
+    widget = DirectGstVideoWidget(manager, "Primary Camera")
+    monkeypatch.setattr(widget, "_direct_render_snapshot_frame", lambda: (frame, "direct3d_screen"))
+    try:
+        snap_path = widget.save_snapshot(out_dir=str(tmp_path), basename="direct-screen")
+        deadline = time.monotonic() + 1.0
+        while snap_path and not Path(snap_path).exists() and time.monotonic() < deadline:
+            app.processEvents()
+            time.sleep(0.01)
+
+        assert snap_path is not None
+        assert Path(snap_path).exists()
+        assert manager.opened == 0
+        assert saved_frames
+        assert int(saved_frames[0][0, 0, 2]) == 140
+    finally:
+        widget.close()
+        widget.deleteLater()
+        app.processEvents()
+
+
+def test_direct_widget_snapshot_requires_fresh_usable_capture_frame(monkeypatch, tmp_path):
+    app = _app()
+    monkeypatch.setattr("gui.direct_gst_video_widget.DirectGstVideoWidget._start_connect", lambda self: None)
+    monkeypatch.setenv("TRITON_SNAPSHOT_WAIT_S", "0.1")
+
+    class _StaleOnlyCaptureCamera:
+        def __init__(self):
+            self.packet = SimpleNamespace(
+                frame_bgr=np.full((12, 20, 3), 80, dtype=np.uint8),
+                seq=4,
+                monotonic_ts=time.monotonic(),
+                wall_ts=time.time(),
+            )
+
+        def latest_frame_packet(self):
+            return self.packet
+
+        def read_frame_packet(self):
+            return None
+
+    manager = _FakeManager()
+    manager.capture = _StaleOnlyCaptureCamera()
+    widget = DirectGstVideoWidget(manager, "Primary Camera")
+    try:
+        snap_path = widget.save_snapshot(out_dir=str(tmp_path), basename="stale")
+
+        assert snap_path is None
+        assert manager.opened == 1
+        assert not (tmp_path / "stale.png").exists()
+    finally:
+        widget.close()
+        widget.deleteLater()
+        app.processEvents()
+
+
+def test_direct_widget_snapshot_retries_after_capture_restart(monkeypatch, tmp_path):
+    app = _app()
+    monkeypatch.setattr("gui.direct_gst_video_widget.DirectGstVideoWidget._start_connect", lambda self: None)
+    monkeypatch.setenv("TRITON_SNAPSHOT_WAIT_S", "0.1")
+
+    def _fake_save_snapshot(frame, out_path):
+        Path(out_path).parent.mkdir(parents=True, exist_ok=True)
+        Path(out_path).touch()
+
+    monkeypatch.setattr("gui.direct_gst_video_widget.save_snapshot", _fake_save_snapshot)
+
+    class _RestartableCaptureCamera:
+        def __init__(self):
+            self.enabled = False
+            self.seq = 0
+
+        def latest_frame_packet(self):
+            return None
+
+        def read_frame_packet(self):
+            if not self.enabled:
+                return None
+            self.seq += 1
+            return SimpleNamespace(
+                frame_bgr=_usable_frame(base=100),
+                seq=self.seq,
+                monotonic_ts=time.monotonic(),
+                wall_ts=time.time(),
+            )
+
+    class _RestartManager(_FakeManager):
+        def __init__(self):
+            super().__init__()
+            self.capture = _RestartableCaptureCamera()
+            self.restarts = 0
+
+        def restart_capture_stream(self, name):
+            self.restarts += 1
+            self.capture.enabled = True
+
+    manager = _RestartManager()
+    widget = DirectGstVideoWidget(manager, "Primary Camera")
+    try:
+        snap_path = widget.save_snapshot(out_dir=str(tmp_path), basename="retry")
+        deadline = time.monotonic() + 1.0
+        while snap_path and not Path(snap_path).exists() and time.monotonic() < deadline:
+            app.processEvents()
+            time.sleep(0.01)
+
+        assert snap_path is not None
+        assert Path(snap_path).exists()
+        assert manager.restarts == 1
+    finally:
+        widget.close()
+        widget.deleteLater()
+        app.processEvents()
+
+
 def test_direct_widget_defers_square_reconnect_while_recording(monkeypatch):
     app = _app()
     monkeypatch.setattr("gui.direct_gst_video_widget.DirectGstVideoWidget._start_connect", lambda self: None)
@@ -466,6 +609,26 @@ def test_direct_widget_defers_square_reconnect_while_recording(monkeypatch):
         assert reconnects == []
     finally:
         widget._rec = None
+        widget.close()
+        widget.deleteLater()
+        app.processEvents()
+
+
+def test_direct_widget_capture_frame_pipe_request_does_not_reconnect_active_stream(monkeypatch):
+    app = _app()
+    monkeypatch.setattr("gui.direct_gst_video_widget.DirectGstVideoWidget._start_connect", lambda self: None)
+
+    widget = DirectGstVideoWidget(_FakeManager(), "Primary Camera")
+    try:
+        reconnects = []
+        monkeypatch.setattr(widget, "_force_reconnect", lambda *args, **kwargs: reconnects.append((args, kwargs)))
+        widget._proc = SimpleNamespace(poll=lambda: None)
+
+        widget.set_capture_frame_pipe_enabled(True)
+
+        assert widget._capture_frame_pipe_requested is True
+        assert reconnects == []
+    finally:
         widget.close()
         widget.deleteLater()
         app.processEvents()

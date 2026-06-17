@@ -584,6 +584,7 @@ def save_snapshot(frame_bgr: np.ndarray, out_path: str | os.PathLike) -> None:
     if out_path.suffix == "":
         out_path = out_path.with_suffix(".png")
     out_path.parent.mkdir(parents=True, exist_ok=True)
+    temp_path = out_path.with_name(f".{out_path.stem}.{uuid.uuid4().hex[:8]}.partial{out_path.suffix}")
 
     try:
         frame = _normalize_bgr(frame_bgr)
@@ -591,31 +592,44 @@ def save_snapshot(frame_bgr: np.ndarray, out_path: str | os.PathLike) -> None:
         logger.warning("Snapshot failed (bad frame): %s", e)
         return
 
-    # Prefer Qt since it's already in the GUI stack.
     try:
-        from PyQt6.QtGui import QImage  # type: ignore
+        # Prefer Qt since it's already in the GUI stack.
+        try:
+            from PyQt6.QtGui import QImage  # type: ignore
 
-        h, w, ch = frame.shape
-        bytes_per_line = frame.strides[0]
-        qimg = QImage(frame.data, w, h, bytes_per_line, QImage.Format.Format_BGR888)
-        qimg.copy().save(str(out_path))
-        return
-    except Exception:
-        pass
+            h, w, ch = frame.shape
+            bytes_per_line = frame.strides[0]
+            qimg = QImage(frame.data, w, h, bytes_per_line, QImage.Format.Format_BGR888)
+            if qimg.copy().save(str(temp_path)) and temp_path.exists() and temp_path.stat().st_size > 0:
+                temp_path.replace(out_path)
+                return
+        except Exception:
+            pass
 
-    # PIL fallback
-    try:
-        from PIL import Image  # type: ignore
+        # PIL fallback
+        try:
+            from PIL import Image  # type: ignore
 
-        Image.fromarray(frame[:, :, ::-1]).save(out_path)
-        return
-    except Exception:
-        pass
+            Image.fromarray(frame[:, :, ::-1]).save(temp_path)
+            if temp_path.exists() and temp_path.stat().st_size > 0:
+                temp_path.replace(out_path)
+                return
+        except Exception:
+            pass
 
-    # imageio fallback
-    try:
-        import imageio.v2 as imageio  # type: ignore
+        # imageio fallback
+        try:
+            import imageio.v2 as imageio  # type: ignore
 
-        imageio.imwrite(str(out_path), frame[:, :, ::-1])
-    except Exception:
-        pass
+            imageio.imwrite(str(temp_path), frame[:, :, ::-1])
+            if temp_path.exists() and temp_path.stat().st_size > 0:
+                temp_path.replace(out_path)
+                return
+        except Exception:
+            pass
+        logger.warning("Snapshot failed: no image writer could save %s", out_path)
+    finally:
+        try:
+            temp_path.unlink(missing_ok=True)
+        except Exception:
+            pass

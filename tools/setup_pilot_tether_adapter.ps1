@@ -101,6 +101,7 @@ function Ensure-FirewallRule {
 function Ensure-TritonPilotFirewall {
     Write-Step "Configuring Windows Firewall"
     Ensure-FirewallRule -DisplayName "TritonPilot Camera UDP" -Protocol UDP -LocalPort "5000-5003"
+    Ensure-FirewallRule -DisplayName "TritonPilot Capture UDP" -Protocol UDP -LocalPort "6000-6003"
     Ensure-FirewallRule -DisplayName "TritonPilot Analysis Transfer TCP" -Protocol TCP -LocalPort "8765"
 }
 
