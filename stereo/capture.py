@@ -151,8 +151,8 @@ class StereoCaptureSession:
                 "right": self._stream_def(self.pair.right),
             },
             "capture_notes": {
-                "timestamp_source": "rov_snapshot_appsink_fresh_monotonic",
-                "sync_quality": "best effort; paired ROV-side fresh snapshot pulls without external camera trigger",
+                "timestamp_source": "rov_snapshot_cache_source_monotonic",
+                "sync_quality": "best effort; paired ROV-side cached snapshot frames without external camera trigger",
                 "quality_gate": "captures from TritonOS onboard decoded JPEG snapshot branches, not from the display widget",
             },
             "frames": [],
@@ -233,6 +233,10 @@ class StereoCaptureSession:
             meta["source_dts_ns"] = int(packet.source_dts_ns)
         if packet.source_duration_ns is not None:
             meta["source_duration_ns"] = int(packet.source_duration_ns)
+        if packet.source_monotonic_ts is not None:
+            meta["source_monotonic_ts"] = float(packet.source_monotonic_ts)
+        if packet.capture_source:
+            meta["capture_source"] = str(packet.capture_source)
         return meta
 
     def _save_packet_pair(self, packet: StereoImagePairPacket) -> dict[str, Any]:

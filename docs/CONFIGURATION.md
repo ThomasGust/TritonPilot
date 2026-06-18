@@ -112,12 +112,17 @@ Per-stream receiver options in `data/streams.json`:
 - `extra.sender_v4l2_do_timestamp`: timestamps captured frames on the Pi before
   RTP payloading; the stable default is `true`
 - `extra.rov_snapshot_fps`: onboard JPEG snapshot branch rate; Primary and Aux
-  use `30` in the checked-in profile so ROV-side stereo still captures can wait
-  for fresh paired samples without the 4 FPS still-photo default becoming the
-  limiting factor
+  use `12` in the checked-in profile so ROV-side stereo still captures keep a
+  warm frame cache without the 30 FPS decode/JPEG branch overloading the ROV
 - `extra.rov_snapshot_jpeg_quality`: onboard JPEG encoder quality for ROV-side
   snapshots. Primary and Aux use `98` so the still-save path adds minimal extra
   compression after the camera stream has already been decoded.
+- `extra.rov_snapshot_cache_enabled`: keeps TritonOS pulling the onboard
+  snapshot branch into a small async frame cache. Primary and Aux enable this so
+  stereo capture can choose an already-arrived left/right pair instead of
+  blocking two fresh pulls at button time.
+- `extra.rov_snapshot_cache_frames`: max cached still frames per stream; Primary
+  and Aux use `24`.
 - `extra.v4l2_controls.exposure_dynamic_framerate`: set to `0` to prevent the
   camera from lowering frame rate for exposure, which can look like video lag
 
@@ -138,8 +143,9 @@ Top-level stream layout knobs:
   pair is `Forward Stereo`, with `Primary Camera` as left and `Aux Camera` as
   right. TritonPilot uses this for keyboard stereo capture mode and preserves
   the historical `stereo_sessions/<session>/manifest.json` schema. The default
-  `max_pair_delta_ms` is `20`, which keeps accepted pairs tighter while still
-  leaving room for best-effort software sync at 30 FPS.
+  `max_pair_delta_ms` is `120`, which is a practical software-sync gate for the
+  warmed 12 FPS onboard still cache. The actual pair delta is still written to
+  each stereo manifest frame.
 
 The current default streams are:
 

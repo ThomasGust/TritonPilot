@@ -93,6 +93,8 @@ def test_capture_onboard_snapshot_decodes_rov_jpeg(monkeypatch, tmp_path):
                 "caps": "image/jpeg,width=32,height=24",
                 "wall_ts": 123.5,
                 "monotonic_ts": 45.25,
+                "source_monotonic_ts": 44.75,
+                "capture_source": "rov_snapshot_cache",
             }
 
     fake_rov = _SnapshotRov()
@@ -113,6 +115,8 @@ def test_capture_onboard_snapshot_decodes_rov_jpeg(monkeypatch, tmp_path):
     assert packet.caps == "image/jpeg,width=32,height=24"
     assert packet.wall_ts == 123.5
     assert packet.monotonic_ts == 45.25
+    assert packet.source_monotonic_ts == 44.75
+    assert packet.capture_source == "rov_snapshot_cache"
 
 
 def test_capture_onboard_stereo_pair_decodes_rov_jpegs(monkeypatch, tmp_path):
@@ -126,7 +130,7 @@ def test_capture_onboard_stereo_pair_decodes_rov_jpegs(monkeypatch, tmp_path):
         def capture_stereo_pair(self, **kwargs):
             self.calls.append(dict(kwargs))
             return {
-                "timestamp_source": "rov_snapshot_appsink_fresh_monotonic",
+                "timestamp_source": "rov_snapshot_cache_source_monotonic",
                 "pair_delta_ms": 7.5,
                 "attempts": 2,
                 "left": {
@@ -141,6 +145,8 @@ def test_capture_onboard_stereo_pair_decodes_rov_jpegs(monkeypatch, tmp_path):
                     "wall_ts": 1000.0,
                     "monotonic_ts": 50.0,
                     "source_pts_ns": 123,
+                    "source_monotonic_ts": 49.900,
+                    "capture_source": "rov_snapshot_cache",
                 },
                 "right": {
                     "stream": "Front",
@@ -178,13 +184,15 @@ def test_capture_onboard_stereo_pair_decodes_rov_jpegs(monkeypatch, tmp_path):
 
     assert fake_rov.calls == [{"left": "Left", "right": "Right", "timeout_s": 0.8, "max_pair_delta_ms": 25.0}]
     assert packet.pair_delta_ms == 7.5
-    assert packet.timestamp_source == "rov_snapshot_appsink_fresh_monotonic"
+    assert packet.timestamp_source == "rov_snapshot_cache_source_monotonic"
     assert packet.attempts == 2
     assert packet.left.image_bytes == left_bytes
     assert packet.right.image_bytes == right_bytes
     assert packet.left.seq == 11
     assert packet.right.shape == (1080, 1920, 3)
     assert packet.left.source_pts_ns == 123
+    assert packet.left.source_monotonic_ts == 49.900
+    assert packet.left.capture_source == "rov_snapshot_cache"
 
 
 def test_display_camera_decode_rejects_green_startup_artifact():

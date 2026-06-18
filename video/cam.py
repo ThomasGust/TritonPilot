@@ -116,6 +116,8 @@ class SnapshotImagePacket:
     source_pts_ns: int | None = None
     source_dts_ns: int | None = None
     source_duration_ns: int | None = None
+    source_monotonic_ts: float | None = None
+    capture_source: str = ""
 
 
 @dataclass(frozen=True)
@@ -1079,6 +1081,15 @@ class RemoteCameraManager:
             return None
 
     @staticmethod
+    def _optional_float(value) -> float | None:
+        if value is None:
+            return None
+        try:
+            return float(value)
+        except Exception:
+            return None
+
+    @staticmethod
     def _shape_tuple(value) -> tuple[int, ...]:
         if not isinstance(value, (list, tuple)):
             return ()
@@ -1140,6 +1151,8 @@ class RemoteCameraManager:
             source_pts_ns=cls._optional_int(data.get("source_pts_ns")),
             source_dts_ns=cls._optional_int(data.get("source_dts_ns")),
             source_duration_ns=cls._optional_int(data.get("source_duration_ns")),
+            source_monotonic_ts=cls._optional_float(data.get("source_monotonic_ts")),
+            capture_source=str(data.get("capture_source") or ""),
         )
 
     def capture_onboard_snapshot(self, name: str, *, timeout_s: float = 2.0) -> SnapshotImagePacket:

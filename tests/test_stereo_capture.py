@@ -61,6 +61,8 @@ class _FakeManager:
                 seq=101,
                 shape=(1080, 1920, 3),
                 source_pts_ns=123456,
+                source_monotonic_ts=49.996,
+                capture_source="rov_snapshot_cache",
             ),
             right=SnapshotImagePacket(
                 source_name=right,
@@ -73,9 +75,11 @@ class _FakeManager:
                 seq=202,
                 shape=(1080, 1920, 3),
                 source_pts_ns=124456,
+                source_monotonic_ts=50.004,
+                capture_source="rov_snapshot_cache",
             ),
             pair_delta_ms=8.0,
-            timestamp_source="rov_snapshot_appsink_fresh_monotonic",
+            timestamp_source="rov_snapshot_cache_source_monotonic",
             attempts=1,
         )
 
@@ -124,11 +128,13 @@ def test_stereo_capture_session_writes_rov_pair_and_manifest(tmp_path: Path):
     assert manifest["pair"]["rig_id"] == "explorehd_forward_v1"
     assert manifest["streams"]["left"]["name"] == "Primary Camera"
     assert manifest["streams"]["right"]["name"] == "Aux Camera"
-    assert manifest["capture_notes"]["timestamp_source"] == "rov_snapshot_appsink_fresh_monotonic"
     assert len(manifest["frames"]) == 1
     assert manifest["frames"][0]["left"]["seq"] == 101
     assert manifest["frames"][0]["right"]["seq"] == 202
     assert manifest["frames"][0]["left"]["source_pts_ns"] == 123456
+    assert manifest["frames"][0]["left"]["source_monotonic_ts"] == pytest.approx(49.996)
+    assert manifest["frames"][0]["left"]["capture_source"] == "rov_snapshot_cache"
+    assert manifest["capture_notes"]["timestamp_source"] == "rov_snapshot_cache_source_monotonic"
 
 
 def test_stereo_capture_session_appends_existing_manifest(tmp_path: Path):
