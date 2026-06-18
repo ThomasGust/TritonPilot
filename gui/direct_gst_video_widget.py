@@ -35,7 +35,7 @@ class DirectReceiverConfig:
     bind_address: str
     width: int = 0
     height: int = 0
-    latency_ms: int = 5
+    latency_ms: int = 50
     udp_buffer_size: int = 4 * 1024 * 1024
     drop_on_latency: bool = True
     h264_decoder: str = "openh264dec"
@@ -70,6 +70,17 @@ def _h264_decoder_chain(decoder: str) -> list[str]:
     if name in {"auto", "hardware", "decodebin"}:
         return ["decodebin"]
     return [name]
+
+
+# Decoders that output Direct3D11 GPU memory. Pairing them with d3d11convert +
+# d3d11videosink keeps frames on the GPU (no per-frame GPU->CPU download), which
+# is the whole point of hardware decode: it offloads the 4x 1080p30 decode from
+# the CPU so a busy topside can't starve a decoder and freeze the display.
+_D3D11_DECODERS = {"d3d11h264dec", "d3d11h264device1dec"}
+
+
+def _decoder_outputs_d3d11(decoder: str) -> bool:
+    return str(decoder or "").strip().lower() in _D3D11_DECODERS
 
 
 def _square_crop_chain(cfg: DirectReceiverConfig) -> list[str]:
@@ -132,6 +143,11 @@ def build_direct_receiver_cmd(gst_launch: str, cfg: DirectReceiverConfig) -> lis
     output_chain = [*crop_chain, *_render_output_chain(cfg)]
 
     if cfg.codec.lower() == "h264":
+        # Keep frames on the GPU when a Direct3D11 hardware decoder is selected
+        # (d3d11convert), but fall back to CPU videoconvert for software decoders
+        # or when a square crop is needed (videocrop is a CPU element).
+        use_d3d11 = _decoder_outputs_d3d11(cfg.h264_decoder) and not crop_chain
+        convert = "d3d11convert" if use_d3d11 else "videoconvert"
         caps = "application/x-rtp,media=video,encoding-name=H264,payload=96,clock-rate=90000"
         pipeline = [
             "udpsrc", f"address={cfg.bind_address}", "reuse=true", f"port={cfg.port}",
@@ -141,7 +157,7 @@ def build_direct_receiver_cmd(gst_launch: str, cfg: DirectReceiverConfig) -> lis
             "!", "rtph264depay",
             "!", "h264parse", "config-interval=-1", "disable-passthrough=true",
             "!", *_h264_decoder_chain(cfg.h264_decoder),
-            "!", "videoconvert",
+            "!", convert,
             *output_chain,
         ]
     else:
@@ -168,6 +184,18 @@ def _stream_options(manager: RemoteCameraManager, stream_name: str) -> dict[str,
     if stream_name not in stream_defs:
         raise KeyError(f"Unknown stream '{stream_name}'")
     options.update(dict(stream_defs[stream_name]))
+
+    # If a topside video recording is active for this stream, fold its mirror
+    # UDP port into the sender config so the duplicate RTP feed survives any
+    # display reconnect (start_stream rebuilds from this config). The recorder
+    # also applies the mirror live via update_stream, but a reconnect would
+    # otherwise wipe it; this keeps the recording robust.
+    mirrors = getattr(manager, "recording_mirror_ports", {}).get(stream_name)
+    if mirrors:
+        extra = dict(options.get("extra") or {})
+        existing = list(extra.get("udp_mirror_ports") or [])
+        extra["udp_mirror_ports"] = existing + [p for p in mirrors if p not in existing]
+        options["extra"] = extra
     return options
 
 
@@ -272,7 +300,7 @@ class _DirectConnectWorker(QThread):
                 bind_address=host if bool(stream_opts.get("bind_receiver_to_host", True)) else "0.0.0.0",
                 width=width,
                 height=height,
-                latency_ms=int(stream_opts.get("latency_ms", 5)),
+                latency_ms=int(stream_opts.get("latency_ms", 50)),
                 udp_buffer_size=int(stream_opts.get("receiver_udp_buffer_size", 4 * 1024 * 1024)),
                 drop_on_latency=bool(stream_opts.get("receiver_drop_on_latency", True)),
                 h264_decoder=h264_decoder,
@@ -282,6 +310,12 @@ class _DirectConnectWorker(QThread):
             cmd = build_direct_receiver_cmd(_find_gst_launch(), cfg)
             env = dict(os.environ)
             bootstrap_gstreamer_env(env)
+            # Opt-in freeze diagnostics: surface decoder errors / sink QoS drops /
+            # jitterbuffer warnings in the captured stderr without per-packet spam.
+            # e.g. TRITON_VIDEO_GST_DEBUG=2  (warnings) or  rtpjitterbuffer:5  (packet loss).
+            gst_debug = os.environ.get("TRITON_VIDEO_GST_DEBUG", "").strip()
+            if gst_debug:
+                env["GST_DEBUG"] = gst_debug
             creationflags = 0
             startupinfo = None
             if os.name == "nt":

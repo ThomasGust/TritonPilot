@@ -71,8 +71,14 @@ from video.cam import RemoteCameraManager
 from recording.capture_trace import trace_event
 from recording.stream_recorder import StreamRecorder
 from recording.save_location import DEFAULT_RECORDINGS_DIR, SaveLocation, is_available_directory, resolve_recordings_dir
-from stereo.capture import StereoCaptureSession, default_stereo_session_name
+from stereo.capture import StereoCaptureSession, default_stereo_session_name, safe_filename_component
 from stereo.pairs import load_stereo_pairs
+from recording.video_recorder import VideoRecorder, VideoRecorderConfig
+from gui.direct_gst_video_widget import (
+    _resolve_windows_host as resolve_video_host,
+    _start_kwargs as video_start_kwargs,
+    _stream_options as video_stream_options,
+)
 from gui.video_tabs import VideoTabs
 from gui.sensor_panel import SensorPanel
 from gui.instruments import InstrumentPanel, HoldTestPanel, PilotTelemetryColumn
@@ -102,6 +108,7 @@ class MainWindow(QMainWindow):
     stereo_capture_result_sig = pyqtSignal(str, str, bool, str)
     stereo_recording_state_sig = pyqtSignal(bool, str)  # recording, session_dir
     stereo_recording_progress_sig = pyqtSignal(int, float)  # count, last_delta_ms
+    video_recording_state_sig = pyqtSignal(bool, str, str)  # recording, stream, path_or_error
 
     @staticmethod
     def _env_truthy(name: str, default: bool = False) -> bool:
@@ -870,6 +877,7 @@ class MainWindow(QMainWindow):
         self.stereo_capture_result_sig.connect(self._handle_stereo_capture_result_on_ui)
         self.stereo_recording_state_sig.connect(self._handle_stereo_recording_state_on_ui)
         self.stereo_recording_progress_sig.connect(self._handle_stereo_recording_progress_on_ui)
+        self.video_recording_state_sig.connect(self._on_video_recording_state)
 
         self._last_ctrl_status: dict = {'controller': 'unknown'}
         self._last_pilot_msg_ts: float = 0.0
@@ -950,6 +958,15 @@ class MainWindow(QMainWindow):
         self._stereo_recording_stop = threading.Event()
         self._stereo_recording_count = 0
         self._last_stereo_recording_toggle_mono: float = 0.0
+        # Single-camera video recording (standard mode): records the selected
+        # stream's H.264 feed to mp4 topside via a live ROV mirror UDP port.
+        self._video_recording = False
+        self._video_recorder: VideoRecorder | None = None
+        self._video_recording_stream: str | None = None
+        self._video_recording_mirror_port: int | None = None
+        self._video_recording_busy = False
+        self._video_recording_started_mono: float = 0.0
+        self._last_video_recording_toggle_mono: float = 0.0
         # 2) sensor subscriber (ROV -> topside)
         self.sensor_panel = SensorPanel()
         self.instrument_panel = InstrumentPanel()
@@ -997,6 +1014,10 @@ class MainWindow(QMainWindow):
                 self.statusBar().showMessage(f"Streams config not found: {streams_path}", 10000)
             else:
                 self.cam_mgr = RemoteCameraManager(streams_path)
+                # Active topside video-recording mirror ports, keyed by stream
+                # name. _stream_options() folds these into start_stream so the
+                # recording survives a display reconnect.
+                self.cam_mgr.recording_mirror_ports = {}
                 try:
                     self._stereo_pairs = load_stereo_pairs(streams_path)
                     self._active_stereo_pair = self._stereo_pairs[0] if self._stereo_pairs else None
@@ -1439,7 +1460,7 @@ class MainWindow(QMainWindow):
                         self._start_new_stereo_session()
                         return True
                     if event.key() == Qt.Key.Key_B:
-                        self._toggle_stereo_recording()
+                        self._toggle_recording_for_mode()
                         return True
                     direction = self._back_gripper_gain_shortcuts.get(event.key())
                     if direction is not None:
@@ -1607,7 +1628,7 @@ class MainWindow(QMainWindow):
             if str(edges.get("x", "")).strip().lower() == "down":
                 self._capture_from_current_mode()
             if str(edges.get("b", "")).strip().lower() == "down":
-                self._toggle_stereo_recording()
+                self._toggle_recording_for_mode()
         except Exception as exc:
             logger.exception("Snapshot trigger failed: %s", exc)
 
@@ -2511,7 +2532,7 @@ class MainWindow(QMainWindow):
         return None
 
     def _toggle_capture_mode(self) -> None:
-        if self._stereo_recording:
+        if self._stereo_recording or self._video_recording or self._video_recording_busy:
             self.statusBar().showMessage("Stop recording (B) before changing capture mode", 3000)
             return
         if str(getattr(self, "_capture_mode", "standard")) == "stereo":
@@ -2588,6 +2609,14 @@ class MainWindow(QMainWindow):
             name = pair.name if pair is not None else "Stereo"
             setter(f"● REC  {name}  —  {self._stereo_recording_count} pairs", recording=True)
             return
+        if self._video_recording:
+            name = self._video_recording_stream or "Camera"
+            secs = int(max(0.0, time.monotonic() - float(self._video_recording_started_mono)))
+            setter(f"● REC  {name}  —  {secs // 60:02d}:{secs % 60:02d}", recording=True)
+            return
+        if self._video_recording_busy:
+            setter("Starting video recording…", recording=True)
+            return
         mode = str(getattr(self, "_capture_mode", "standard"))
         if mode == "stereo":
             pair = self._current_stereo_pair()
@@ -2595,6 +2624,213 @@ class MainWindow(QMainWindow):
             setter(f"Capture: Stereo{suffix}", recording=False)
         else:
             setter("Capture: Standard", recording=False)
+
+    # ------------- B button dispatch (mode-aware) ------------- #
+    def _toggle_recording_for_mode(self) -> None:
+        """Controller/keyboard B: stereo burst in stereo mode, video in standard mode."""
+        if str(getattr(self, "_capture_mode", "standard")) == "stereo":
+            self._toggle_stereo_recording()
+        else:
+            self._toggle_video_recording()
+
+    # ------------- Single-camera video recording ------------- #
+    def _toggle_video_recording(self) -> None:
+        now_mono = time.monotonic()
+        if now_mono - float(getattr(self, "_last_video_recording_toggle_mono", 0.0)) < 0.5:
+            trace_event("video_recording_toggle_ignored", reason="debounce")
+            return
+        self._last_video_recording_toggle_mono = now_mono
+        if self._video_recording_busy:
+            self.statusBar().showMessage("Video recording is starting/stopping; please wait", 2500)
+            return
+        if self._video_recording:
+            self._stop_video_recording()
+        else:
+            self._start_video_recording()
+
+    def _start_video_recording(self) -> None:
+        if self.cam_mgr is None or self.video_panel is None:
+            self.statusBar().showMessage("Video recording unavailable: no video panel", 3000)
+            return
+        stream_name = self.video_panel.current_stream_name()
+        if not stream_name:
+            self.statusBar().showMessage("Select a camera (click its pane) before recording", 3500)
+            trace_event("video_recording_start_failed", reason="no_selected_camera")
+            return
+        self._video_recording_busy = True
+        self._video_recording_stream = stream_name
+        self._video_recording_started_mono = time.monotonic()
+        self._update_capture_status_label()
+        self.statusBar().showMessage(f"Starting video recording: {stream_name}…", 2500)
+        threading.Thread(
+            target=self._video_recording_start_worker,
+            args=(stream_name,),
+            name="video-recording-start",
+            daemon=True,
+        ).start()
+
+    def _stop_video_recording(self) -> None:
+        if not self._video_recording or self._video_recorder is None:
+            return
+        rec = self._video_recorder
+        stream_name = self._video_recording_stream or ""
+        mirror_port = int(self._video_recording_mirror_port or 0)
+        self._video_recorder = None
+        self._video_recording_busy = True
+        self.statusBar().showMessage("Finalizing video recording…", 2500)
+        self._update_capture_status_label()
+        threading.Thread(
+            target=self._video_recording_stop_worker,
+            args=(rec, stream_name, mirror_port),
+            name="video-recording-stop",
+            daemon=True,
+        ).start()
+
+    def _stream_current_extra(self, stream_name: str) -> dict:
+        """Best-effort fetch of the ROV's *current* extra dict for one stream.
+
+        Sending the live extra back (plus/minus the mirror) keeps the change a
+        mirror-only one, which the ROV applies as a live multiudpsink update
+        instead of rebuilding the pipeline (no display interruption).
+        """
+        try:
+            status = self.cam_mgr.rov.list_status() or {}
+            cfg = status.get(stream_name) or {}
+            extra = cfg.get("extra")
+            if isinstance(extra, dict):
+                return dict(extra)
+        except Exception:
+            pass
+        try:
+            return dict(video_stream_options(self.cam_mgr, stream_name).get("extra") or {})
+        except Exception:
+            return {}
+
+    def _set_stream_mirror(self, stream_name: str, mirror_port: int, *, add: bool) -> None:
+        """Add/remove one recording mirror UDP port on the ROV stream (live)."""
+        extra = self._stream_current_extra(stream_name)
+        ports = [int(p) for p in (extra.get("udp_mirror_ports") or []) if int(p) != int(mirror_port)]
+        if add:
+            ports.append(int(mirror_port))
+        if ports:
+            extra["udp_mirror_ports"] = ports
+        else:
+            extra.pop("udp_mirror_ports", None)
+        self.cam_mgr.rov.update_stream(name=stream_name, extra=extra)
+
+    def _video_recording_start_worker(self, stream_name: str) -> None:
+        mirror_applied: int | None = None
+        try:
+            opts = video_stream_options(self.cam_mgr, stream_name)
+            host = resolve_video_host(self.cam_mgr, opts)
+            kwargs = video_start_kwargs(opts, host=host)
+            port = int(kwargs.get("port", 5000))
+            mirror_port = port + 200
+            tx_is_h264 = (
+                str(kwargs.get("video_format", "")).lower() == "h264"
+                or str(kwargs.get("encode", "")).lower() == "h264"
+            )
+            codec = "h264" if tx_is_h264 else "jpeg"
+            bind = host if bool(opts.get("bind_receiver_to_host", True)) else "0.0.0.0"
+
+            session_dir, _loc = self._make_recording_session_dir()
+            video_dir = Path(session_dir) / "video"
+            stamp = time.strftime("%Y%m%d-%H%M%S")
+            fname = f"{safe_filename_component(stream_name)}-{stamp}.mp4"
+            out_path = self._unused_snapshot_path(video_dir / fname)
+
+            # Register the mirror so a later display reconnect keeps it, then
+            # apply it live to the already-running stream.
+            mirrors = getattr(self.cam_mgr, "recording_mirror_ports", None)
+            if mirrors is None:
+                mirrors = {}
+                self.cam_mgr.recording_mirror_ports = mirrors
+            mirrors[stream_name] = [mirror_port]
+
+            self._set_stream_mirror(stream_name, mirror_port, add=True)
+            mirror_applied = mirror_port
+
+            recorder = VideoRecorder(
+                VideoRecorderConfig(
+                    name=stream_name,
+                    out_path=str(out_path),
+                    codec=codec,
+                    port=mirror_port,
+                    bind_address=bind,
+                )
+            )
+            recorder.start()
+            self._video_recorder = recorder
+            self._video_recording_mirror_port = mirror_port
+            trace_event(
+                "video_recording_started",
+                stream=stream_name,
+                mirror_port=mirror_port,
+                codec=codec,
+                path=str(out_path),
+            )
+            self.video_recording_state_sig.emit(True, stream_name, str(out_path))
+        except Exception as exc:
+            try:
+                getattr(self.cam_mgr, "recording_mirror_ports", {}).pop(stream_name, None)
+            except Exception:
+                pass
+            # If the mirror was already applied live but the recorder then failed
+            # to start, remove it so the ROV doesn't keep duplicating RTP to nobody.
+            if mirror_applied is not None:
+                try:
+                    self._set_stream_mirror(stream_name, mirror_applied, add=False)
+                except Exception:
+                    pass
+            trace_event("video_recording_start_failed", reason="exception", error=str(exc))
+            self.video_recording_state_sig.emit(False, stream_name, f"ERROR: {exc}")
+
+    def _video_recording_stop_worker(self, recorder, stream_name: str, mirror_port: int) -> None:
+        path = ""
+        try:
+            if recorder is not None:
+                path = recorder.stop(grace_s=6.0)
+        except Exception as exc:
+            trace_event("video_recording_stop_error", stream=stream_name, error=str(exc))
+        finally:
+            try:
+                getattr(self.cam_mgr, "recording_mirror_ports", {}).pop(stream_name, None)
+            except Exception:
+                pass
+            try:
+                self._set_stream_mirror(stream_name, mirror_port, add=False)
+            except Exception as exc:
+                trace_event("video_recording_mirror_remove_failed", stream=stream_name, error=str(exc))
+            trace_event("video_recording_stopped", stream=stream_name, path=str(path))
+            self.video_recording_state_sig.emit(False, stream_name, str(path))
+
+    def _on_video_recording_state(self, recording: bool, stream: str, path_or_error: str) -> None:
+        if recording:
+            self._video_recording = True
+            self._video_recording_busy = False
+            self._video_recording_stream = stream
+            self._video_recording_started_mono = time.monotonic()
+            timer = getattr(self, "_video_rec_timer", None)
+            if timer is None:
+                timer = QTimer(self)
+                timer.setInterval(1000)
+                timer.timeout.connect(self._update_capture_status_label)
+                self._video_rec_timer = timer
+            timer.start()
+            self.statusBar().showMessage(f"Recording {stream} -> {path_or_error}", 4000)
+        else:
+            self._video_recording = False
+            self._video_recording_busy = False
+            self._video_recording_stream = None
+            self._video_recording_mirror_port = None
+            timer = getattr(self, "_video_rec_timer", None)
+            if timer is not None:
+                timer.stop()
+            if str(path_or_error).startswith("ERROR:"):
+                self.statusBar().showMessage(f"Video recording failed: {path_or_error[6:].strip()}", 7000)
+            elif path_or_error:
+                self.statusBar().showMessage(f"Video recording saved -> {path_or_error}", 6000)
+        self._update_capture_status_label()
 
     def _toggle_stereo_recording(self) -> None:
         now_mono = time.monotonic()
@@ -3449,6 +3685,20 @@ class MainWindow(QMainWindow):
             recording_thread = getattr(self, "_stereo_recording_thread", None)
             if recording_thread is not None:
                 recording_thread.join(timeout=5.0)
+        except Exception:
+            pass
+        # Finalize an in-progress single-camera video recording so the mp4 is
+        # closed cleanly (EOS) instead of being abandoned on exit.
+        try:
+            recorder = getattr(self, "_video_recorder", None)
+            if recorder is not None:
+                self._video_recording = False
+                self._video_recorder = None
+                recorder.stop(grace_s=5.0)
+                stream = getattr(self, "_video_recording_stream", None)
+                mirrors = getattr(self.cam_mgr, "recording_mirror_ports", None)
+                if isinstance(mirrors, dict) and stream:
+                    mirrors.pop(stream, None)
         except Exception:
             pass
         try:

@@ -617,7 +617,7 @@ def test_x_button_prefers_onboard_snapshot_bytes(monkeypatch, tmp_path):
         app.processEvents()
 
         files = list(win._app_session_dir.glob("Aux_Camera_*.jpg"))
-        assert calls == [("Aux Camera", 2.0)]
+        assert calls == [("Aux Camera", 4.0)]
         assert len(files) == 1
         assert files[0].read_bytes() == jpeg_bytes
         assert files[0].parent.parent.resolve() == save_root.resolve()
@@ -756,7 +756,7 @@ def test_keyboard_n_creates_stereo_session_and_x_saves_pair(monkeypatch, tmp_pat
         monkeypatch.setattr(main_window.threading, "Thread", _NoopThread)
         app.processEvents()
 
-        assert calls == [("Primary Camera", "Aux Camera", 2.0, 50.0)]
+        assert calls == [("Primary Camera", "Aux Camera", 5.0, 50.0)]
         assert (session_dir / "left" / "pair_000001_left.jpg").read_bytes() == b"left-jpeg"
         assert (session_dir / "right" / "pair_000001_right.jpg").read_bytes() == b"right-jpeg"
         manifest = json.loads((session_dir / "manifest.json").read_text(encoding="utf-8"))
