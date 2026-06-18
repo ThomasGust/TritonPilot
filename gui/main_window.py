@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import os
 import ipaddress
+import json
 import logging
 import math
 import socket
@@ -280,6 +281,18 @@ class MainWindow(QMainWindow):
             if self._stream_name_matches(name, REVERSE_CAMERA_KEYWORDS):
                 return name
         return None
+
+    def _select_transect_stream_name(self, stream_names: list[str]) -> str | None:
+        """Pick the default transect camera (the arm camera) by name/keyword."""
+        exact = {str(name).strip().lower(): name for name in stream_names}
+        for preferred in ("Arm Camera",):
+            match = exact.get(str(preferred).strip().lower())
+            if match:
+                return match
+        for name in stream_names:
+            if self._stream_name_matches(name, ["arm", "transect"]):
+                return name
+        return stream_names[0] if stream_names else None
 
     def _sync_reverse_action(self) -> None:
         act = getattr(self, "_reverse_act", None)
@@ -967,6 +980,12 @@ class MainWindow(QMainWindow):
         self._video_recording_busy = False
         self._video_recording_started_mono: float = 0.0
         self._last_video_recording_toggle_mono: float = 0.0
+        # Data capture: a video recording also bundles a synchronized state log
+        # (pilot cmds, sensors incl. autopilot/station-keep status) + a manifest
+        # tying them together, so a pool run yields a ready-to-train dataset.
+        self._video_capture_session_dir: str | None = None
+        self._video_capture_owns_log = False
+        self._stream_log_path: str | None = None
         # 2) sensor subscriber (ROV -> topside)
         self.sensor_panel = SensorPanel()
         self.instrument_panel = InstrumentPanel()
@@ -1111,6 +1130,10 @@ class MainWindow(QMainWindow):
         self._page_stack.addWidget(self._pilot_page)
 
         self._transect_page = TransectPage(stream_names=stream_names)
+        # Default the transect view to the arm camera (the square-aspect task feed).
+        transect_default = self._select_transect_stream_name(stream_names)
+        if transect_default:
+            self._transect_page.set_current_stream(transect_default, emit=False)
         self._transect_page.cameraSelectionChanged.connect(self._on_transect_camera_changed)
         if self.video_panel is None:
             self._transect_page.attach_video_placeholder("Video unavailable.")
@@ -2657,14 +2680,26 @@ class MainWindow(QMainWindow):
             self.statusBar().showMessage("Select a camera (click its pane) before recording", 3500)
             trace_event("video_recording_start_failed", reason="no_selected_camera")
             return
+        # One session dir holds the mp4, the synchronized state log, and a
+        # manifest. Compute it (and start the log) on the UI thread.
+        try:
+            session_dir, _loc = self._make_recording_session_dir()
+        except Exception as exc:
+            self.statusBar().showMessage(f"Could not prepare capture folder: {exc}", 5000)
+            return
+        self._video_capture_session_dir = str(session_dir)
+        self._video_capture_owns_log = False
+        if self._stream_recorder is None:
+            self._start_stream_log(Path(session_dir))
+            self._video_capture_owns_log = self._stream_recorder is not None
         self._video_recording_busy = True
         self._video_recording_stream = stream_name
         self._video_recording_started_mono = time.monotonic()
         self._update_capture_status_label()
-        self.statusBar().showMessage(f"Starting video recording: {stream_name}…", 2500)
+        self.statusBar().showMessage(f"Starting capture: {stream_name}…", 2500)
         threading.Thread(
             target=self._video_recording_start_worker,
-            args=(stream_name,),
+            args=(stream_name, str(session_dir)),
             name="video-recording-start",
             daemon=True,
         ).start()
@@ -2718,7 +2753,73 @@ class MainWindow(QMainWindow):
             extra.pop("udp_mirror_ports", None)
         self.cam_mgr.rov.update_stream(name=stream_name, extra=extra)
 
-    def _video_recording_start_worker(self, stream_name: str) -> None:
+    def _write_capture_manifest(
+        self,
+        session_dir: "Path",
+        *,
+        stream_name: str,
+        mp4_path: "Path",
+        codec: str,
+        opts: dict,
+        ended_wall: float | None = None,
+    ) -> None:
+        """Write/update capture_manifest.json tying the mp4 to the state log.
+
+        A training script can load the mp4 + the streams JSONL and align them by
+        wall clock: the video's ``started_wall_ts`` marks ~t0 of the recording.
+        """
+        session_dir = Path(session_dir)
+        manifest_path = session_dir / "capture_manifest.json"
+
+        def _rel(p: "Path | str | None") -> str | None:
+            if not p:
+                return None
+            p = Path(p)
+            try:
+                return str(p.relative_to(session_dir)).replace("\\", "/")
+            except Exception:
+                return str(p)
+
+        data: dict = {}
+        if manifest_path.exists():
+            try:
+                data = json.loads(manifest_path.read_text(encoding="utf-8"))
+            except Exception:
+                data = {}
+        if not data:
+            data = {
+                "schema": "tritonpilot.capture_manifest",
+                "version": 1,
+                "started_wall_ts": time.time(),
+                "started_mono_ts": time.monotonic(),
+                "video": {
+                    "stream": stream_name,
+                    "path": _rel(mp4_path),
+                    "codec": codec,
+                    "width": int(opts.get("width", 0) or 0),
+                    "height": int(opts.get("height", 0) or 0),
+                    "fps": int(opts.get("fps", 0) or 0),
+                },
+                "streams_log": _rel(self._stream_log_path),
+                "streams": ["pilot", "sensors", "attitude", "tracking"],
+                "notes": {
+                    "alignment": (
+                        "Align mp4 frame time to the streams JSONL by wall clock; "
+                        "video.started_wall_ts marks ~t=0 of the mp4 (a few hundred "
+                        "ms of pipeline latency). 'tracking' stream holds model "
+                        "error/command samples when the CV is running."
+                    ),
+                },
+            }
+        if ended_wall is not None:
+            data["ended_wall_ts"] = float(ended_wall)
+        try:
+            session_dir.mkdir(parents=True, exist_ok=True)
+            manifest_path.write_text(json.dumps(data, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+        except Exception:
+            pass
+
+    def _video_recording_start_worker(self, stream_name: str, session_dir: str) -> None:
         mirror_applied: int | None = None
         try:
             opts = video_stream_options(self.cam_mgr, stream_name)
@@ -2733,7 +2834,6 @@ class MainWindow(QMainWindow):
             codec = "h264" if tx_is_h264 else "jpeg"
             bind = host if bool(opts.get("bind_receiver_to_host", True)) else "0.0.0.0"
 
-            session_dir, _loc = self._make_recording_session_dir()
             video_dir = Path(session_dir) / "video"
             stamp = time.strftime("%Y%m%d-%H%M%S")
             fname = f"{safe_filename_component(stream_name)}-{stamp}.mp4"
@@ -2762,12 +2862,24 @@ class MainWindow(QMainWindow):
             recorder.start()
             self._video_recorder = recorder
             self._video_recording_mirror_port = mirror_port
+            try:
+                self._write_capture_manifest(
+                    Path(session_dir),
+                    stream_name=stream_name,
+                    mp4_path=Path(out_path),
+                    codec=codec,
+                    opts=opts,
+                )
+            except Exception as exc:
+                trace_event("capture_manifest_write_failed", error=str(exc))
             trace_event(
                 "video_recording_started",
                 stream=stream_name,
                 mirror_port=mirror_port,
                 codec=codec,
                 path=str(out_path),
+                session_dir=str(session_dir),
+                streams_log=str(self._stream_log_path or ""),
             )
             self.video_recording_state_sig.emit(True, stream_name, str(out_path))
         except Exception as exc:
@@ -2793,6 +2905,19 @@ class MainWindow(QMainWindow):
         except Exception as exc:
             trace_event("video_recording_stop_error", stream=stream_name, error=str(exc))
         finally:
+            session_dir = self._video_capture_session_dir
+            if session_dir:
+                try:
+                    self._write_capture_manifest(
+                        Path(session_dir),
+                        stream_name=stream_name,
+                        mp4_path=Path(path) if path else Path(session_dir) / "video",
+                        codec="h264",
+                        opts={},
+                        ended_wall=time.time(),
+                    )
+                except Exception:
+                    pass
             try:
                 getattr(self.cam_mgr, "recording_mirror_ports", {}).pop(stream_name, None)
             except Exception:
@@ -2826,10 +2951,17 @@ class MainWindow(QMainWindow):
             timer = getattr(self, "_video_rec_timer", None)
             if timer is not None:
                 timer.stop()
+            # Stop the synchronized state log only if this capture started it.
+            if self._video_capture_owns_log:
+                self._stop_stream_log()
+                self._video_capture_owns_log = False
+            session_dir = self._video_capture_session_dir
+            self._video_capture_session_dir = None
             if str(path_or_error).startswith("ERROR:"):
-                self.statusBar().showMessage(f"Video recording failed: {path_or_error[6:].strip()}", 7000)
+                self.statusBar().showMessage(f"Capture failed: {path_or_error[6:].strip()}", 7000)
             elif path_or_error:
-                self.statusBar().showMessage(f"Video recording saved -> {path_or_error}", 6000)
+                where = session_dir or path_or_error
+                self.statusBar().showMessage(f"Capture saved -> {where}", 6000)
         self._update_capture_status_label()
 
     def _toggle_stereo_recording(self) -> None:
@@ -3771,11 +3903,16 @@ class MainWindow(QMainWindow):
                 pass
         super().closeEvent(event)
 
-    def _start_stream_log(self):
+    def _start_stream_log(self, out_dir: "Path | None" = None):
         if self._stream_recorder is not None:
             return
+        location = None
         try:
-            out_dir, location = self._log_output_dir()
+            if out_dir is not None:
+                out_dir = Path(out_dir)
+                out_dir.mkdir(parents=True, exist_ok=True)
+            else:
+                out_dir, location = self._log_output_dir()
         except Exception as exc:
             self.statusBar().showMessage(f"Could not prepare save directory: {exc}", 5000)
             return
@@ -3794,7 +3931,7 @@ class MainWindow(QMainWindow):
             self._record_dir = None
             self.statusBar().showMessage(f"Could not start stream log: {exc}", 5000)
             return
-
+        self._stream_log_path = str(target)
         self.statusBar().showMessage(f"Recording streams -> {target}{self._save_location_note(location)}", 5000)
 
     def _stop_stream_log(self):
@@ -3802,4 +3939,19 @@ class MainWindow(QMainWindow):
             return
         self._stream_recorder.stop()
         self._stream_recorder = None
+        self._stream_log_path = None
         self.statusBar().showMessage("Stream recording stopped", 3000)
+
+    def record_tracking_sample(self, payload: dict) -> None:
+        """Log one optical-tracking sample (model error/command) to the active
+        stream log under the "tracking" stream, aligned with video + state.
+
+        This is the hook the future CV/policy calls each tick so its inputs and
+        outputs are captured alongside the video for offline model iteration.
+        """
+        rec = self._stream_recorder
+        if rec is not None:
+            try:
+                rec.record("tracking", dict(payload or {}))
+            except Exception:
+                pass

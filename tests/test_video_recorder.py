@@ -118,6 +118,44 @@ def test_direct_receiver_software_decoder_keeps_cpu_convert():
 
 # --------------------------- mode-aware B dispatch --------------------------- #
 
+def test_capture_manifest_creates_and_finalizes(tmp_path):
+    import json
+    from gui.main_window import MainWindow
+
+    class _Stub:
+        _stream_log_path = None
+
+    stub = _Stub()
+    session = tmp_path / "sess"
+    (session / "video").mkdir(parents=True)
+    stub._stream_log_path = str(session / "20260618_streams.jsonl")
+
+    MainWindow._write_capture_manifest(
+        stub, session,
+        stream_name="Arm Camera",
+        mp4_path=session / "video" / "Arm_Camera-x.mp4",
+        codec="h264",
+        opts={"width": 1920, "height": 1080, "fps": 30},
+    )
+    m = json.loads((session / "capture_manifest.json").read_text())
+    assert m["schema"] == "tritonpilot.capture_manifest"
+    assert m["video"]["stream"] == "Arm Camera"
+    assert m["video"]["path"] == "video/Arm_Camera-x.mp4"   # relative, forward slashes
+    assert m["video"]["width"] == 1920
+    assert m["streams_log"] == "20260618_streams.jsonl"
+    assert "tracking" in m["streams"]
+    assert "started_wall_ts" in m and "ended_wall_ts" not in m
+
+    # Finalize: adds end time, preserves the original video metadata.
+    MainWindow._write_capture_manifest(
+        stub, session, stream_name="Arm Camera",
+        mp4_path=session / "video", codec="h264", opts={}, ended_wall=123.0,
+    )
+    m2 = json.loads((session / "capture_manifest.json").read_text())
+    assert m2["ended_wall_ts"] == 123.0
+    assert m2["video"]["width"] == 1920
+
+
 def test_b_button_dispatches_video_in_standard_and_stereo_in_stereo_mode():
     from gui.main_window import MainWindow
 

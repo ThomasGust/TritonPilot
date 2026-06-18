@@ -395,8 +395,9 @@ def test_transect_page_applies_square_single_camera_layout(monkeypatch, tmp_path
         assert panel.controls_enabled is False
         assert panel.square_display_enabled is True
         assert win._transect_page.square_host.current_widget() is panel
-        assert panel.apply_temporary_layout_calls[-1][0] == (1, ["Primary Camera"])
-        assert panel.apply_temporary_layout_calls[-1][1]["active_name"] == "Primary Camera"
+        # Transect defaults to the arm camera (the square-aspect task feed).
+        assert panel.apply_temporary_layout_calls[-1][0] == (1, ["Arm Camera"])
+        assert panel.apply_temporary_layout_calls[-1][1]["active_name"] == "Arm Camera"
 
         win._transect_page.set_current_stream("Aux Camera", emit=True)
         app.processEvents()

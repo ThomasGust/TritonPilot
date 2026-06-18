@@ -472,6 +472,84 @@ if os.name == "nt":
         _get_window_long = _user32.GetWindowLongW
         _set_window_long = _user32.SetWindowLongW
 
+    # WinEvent hook so we can hide the d3d11 renderer's top-level window the
+    # instant it is shown -- before it ever paints to screen -- instead of
+    # waiting for a polling timer to catch it (which lets it flash briefly).
+    _EVENT_OBJECT_SHOW = 0x8002
+    _OBJID_WINDOW = 0
+    _WINEVENT_OUTOFCONTEXT = 0x0000
+    _WinEventProcType = ctypes.WINFUNCTYPE(
+        None, ctypes.c_void_p, ctypes.c_uint, ctypes.c_void_p,
+        ctypes.c_long, ctypes.c_long, ctypes.c_uint, ctypes.c_uint,
+    )
+    try:
+        _user32.SetWinEventHook.restype = ctypes.c_void_p
+        _user32.SetWinEventHook.argtypes = [
+            ctypes.c_uint, ctypes.c_uint, ctypes.c_void_p, _WinEventProcType,
+            ctypes.c_uint, ctypes.c_uint, ctypes.c_uint,
+        ]
+        _user32.UnhookWinEvent.argtypes = [ctypes.c_void_p]
+    except Exception:
+        pass
+
+
+class _RendererWindowHider:
+    """Hide the renderer's top-level window on show so it never flashes.
+
+    The d3d11videosink subprocess creates a top-level "Direct3D11 renderer"
+    window that we reparent into the Qt pane. Between creation and reparent the
+    window would briefly appear on screen. This installs a per-process WinEvent
+    hook (delivered on the GUI thread message loop) that hides the window the
+    moment it is shown; the normal embed path then adopts and re-shows it as a
+    child. Windows already embedded (WS_CHILD) are left alone so re-show events
+    during embedding don't fight the reparent.
+    """
+
+    def __init__(self, pid: int):
+        self._pid = int(pid or 0)
+        self._hook = None
+        self._proc = None  # keep a strong ref so the callback isn't GC'd
+
+    def install(self) -> None:
+        if os.name != "nt" or not self._pid:
+            return
+        try:
+            self._proc = _WinEventProcType(self._callback)
+            self._hook = _user32.SetWinEventHook(
+                _EVENT_OBJECT_SHOW, _EVENT_OBJECT_SHOW, 0, self._proc,
+                self._pid, 0, _WINEVENT_OUTOFCONTEXT,
+            )
+        except Exception:
+            self._hook = None
+            self._proc = None
+
+    def _callback(self, _hook, event, hwnd, id_object, _id_child, _thread, _time) -> None:
+        try:
+            if not hwnd or int(id_object) != _OBJID_WINDOW:
+                return
+            length = _user32.GetWindowTextLengthW(hwnd)
+            buf = ctypes.create_unicode_buffer(length + 1)
+            _user32.GetWindowTextW(hwnd, buf, length + 1)
+            if str(buf.value or "") != "Direct3D11 renderer":
+                return
+            style = int(_get_window_long(hwnd, _GWL_STYLE))
+            if style & _WS_CHILD:
+                return  # already embedded; leave it visible
+            _user32.ShowWindow(hwnd, _SW_HIDE)
+        except Exception:
+            pass
+
+    def remove(self) -> None:
+        hook = self._hook
+        self._hook = None
+        self._proc = None
+        if os.name != "nt" or not hook:
+            return
+        try:
+            _user32.UnhookWinEvent(hook)
+        except Exception:
+            pass
+
 
 def _top_level_windows_for_pid(pid: int) -> list[int]:
     if os.name != "nt":
@@ -571,6 +649,7 @@ class DirectGstVideoWidget(QWidget):
         self._connect_worker: _DirectConnectWorker | None = None
         self._connect_attempt_active = False
         self._embedded_hwnd: int | None = None
+        self._window_hider: _RendererWindowHider | None = None
         self._state = "waiting"
         self._last_error: str | None = None
         self._connected_ts = 0.0
@@ -653,8 +732,33 @@ class DirectGstVideoWidget(QWidget):
         self._connect_attempt_active = True
         self._connect_worker.start()
 
+    def _install_window_hider(self, pid: int) -> None:
+        self._remove_window_hider()
+        try:
+            hider = _RendererWindowHider(int(pid))
+            hider.install()
+            self._window_hider = hider
+        except Exception:
+            self._window_hider = None
+
+    def _remove_window_hider(self) -> None:
+        hider = self._window_hider
+        self._window_hider = None
+        if hider is not None:
+            try:
+                hider.remove()
+            except Exception:
+                pass
+
     def _on_receiver_started(self, proc: subprocess.Popen, info: object = 0) -> None:
         self._proc = proc
+        # Hide the renderer window the moment it appears so it never flashes
+        # on screen before we reparent it into this pane.
+        try:
+            if proc is not None and proc.pid:
+                self._install_window_hider(int(proc.pid))
+        except Exception:
+            pass
         embedded_hwnd = 0
         if isinstance(info, dict):
             pass
@@ -700,6 +804,7 @@ class DirectGstVideoWidget(QWidget):
             self._embed_timer.stop()
         except Exception:
             pass
+        self._remove_window_hider()
         self._proc = None
         self._embedded_hwnd = None
         self._last_error = error
@@ -772,6 +877,7 @@ class DirectGstVideoWidget(QWidget):
         if proc is not None and proc.poll() is not None:
             self._proc = None
             self._embedded_hwnd = None
+            self._remove_window_hider()
             try:
                 self._embed_timer.stop()
             except Exception:
@@ -893,6 +999,7 @@ class DirectGstVideoWidget(QWidget):
 
     def shutdown(self, release_only: bool = True, *, async_release: bool = True) -> None:
         self._stop_connect_worker(async_release=bool(async_release))
+        self._remove_window_hider()
         proc = self._proc
         self._proc = None
         self._embedded_hwnd = None
