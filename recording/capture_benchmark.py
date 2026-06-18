@@ -9,10 +9,18 @@ Two kinds of signal are produced per captured image:
 
 * hard rejection reasons reused from :mod:`video.frame_quality`
   (green/blank/collapse frames), plus ``decode_failed`` for unreadable bytes.
-* a continuous ``blockiness`` score. H.264 decode corruption from dropped
-  reference frames inflates discontinuity at 8-pixel block boundaries relative
-  to the discontinuity inside blocks. The score is reported as a distribution
-  (not a hard pass/fail) so a real threshold can be chosen from bench data.
+* a continuous ``chroma_speckle`` score. H.264 decode corruption from dropped
+  reference frames shows up as isolated high-saturation chroma noise (rainbow
+  speckle) and blocky garbage. The score is the mean absolute high-pass of the
+  Cr/Cb chroma channels (chroma minus its 3x3 median). It cleanly separated
+  clean vs corrupted bench frames (clean stills ~0.36-0.5; corrupted stereo
+  frames ~0.9-1.3), so a frame is flagged ``chroma_corruption`` above
+  :data:`CHROMA_SPECKLE_FLAG`.
+* a continuous ``blockiness`` score (luminance block-boundary discontinuity),
+  reported as a distribution for additional signal.
+
+Both scores are reported as distributions, not just pass/fail, so thresholds
+can be re-tuned from bench data.
 """
 
 from __future__ import annotations
@@ -27,6 +35,14 @@ import numpy as np
 from video.frame_quality import live_frame_rejection_reason
 
 
+# Frames whose chroma-speckle score exceeds this are flagged as corrupted.
+# Calibrated on bench data: the score is scene-dependent -- smooth scenes (e.g.
+# underwater) sit ~0.3, busy natural scenes (foliage/wood) reach ~0.62 while
+# still clean, and genuinely corrupted frames are ~0.9-1.8. The threshold sits
+# in that gap so detail-rich-but-clean frames are not false-flagged.
+CHROMA_SPECKLE_FLAG = 0.85
+
+
 # --------------------------------------------------------------------------- #
 # Sample records
 # --------------------------------------------------------------------------- #
@@ -36,6 +52,7 @@ class ImageQuality:
 
     label: str = "image"
     reasons: list[str] = field(default_factory=list)
+    chroma_speckle: float | None = None
     blockiness: float | None = None
     byte_count: int = 0
     width: int = 0
@@ -161,7 +178,31 @@ def blockiness_score(frame_bgr: np.ndarray, *, block: int = 8) -> float:
     return float(np.mean(scores)) if scores else 0.0
 
 
-def classify_image_bytes(data: bytes, *, label: str = "image") -> ImageQuality:
+def chroma_speckle_score(frame_bgr: np.ndarray) -> float:
+    """Mean absolute high-pass of the Cr/Cb chroma channels.
+
+    H.264 decode corruption from dropped reference frames produces isolated
+    high-saturation chroma noise; subtracting a 3x3 median isolates that speckle
+    while leaving spatially-coherent natural color edges alone. Requires cv2.
+    """
+
+    import cv2
+
+    ycc = cv2.cvtColor(np.ascontiguousarray(frame_bgr), cv2.COLOR_BGR2YCrCb)
+    total = 0.0
+    for index in (1, 2):  # Cr, Cb
+        channel = ycc[:, :, index]
+        median = cv2.medianBlur(channel, 3)
+        total += float(np.abs(channel.astype(np.float32) - median.astype(np.float32)).mean())
+    return total / 2.0
+
+
+def classify_image_bytes(
+    data: bytes,
+    *,
+    label: str = "image",
+    chroma_flag: float = CHROMA_SPECKLE_FLAG,
+) -> ImageQuality:
     """Decode encoded image bytes and score them. cv2 is imported lazily."""
 
     quality = ImageQuality(label=label, byte_count=len(data or b""))
@@ -182,7 +223,10 @@ def classify_image_bytes(data: bytes, *, label: str = "image") -> ImageQuality:
     reason = live_frame_rejection_reason(frame)
     if reason is not None:
         quality.reasons.append(reason)
+    quality.chroma_speckle = chroma_speckle_score(frame)
     quality.blockiness = blockiness_score(frame)
+    if quality.chroma_speckle > float(chroma_flag):
+        quality.reasons.append("chroma_corruption")
     return quality
 
 
@@ -214,6 +258,7 @@ def summarize(samples: list[CaptureSample]) -> dict[str, Any]:
             "clean": len(images) - len(flagged_images),
             "flagged": len(flagged_images),
             "reasons": dict(reason_counts),
+            "chroma_speckle": stats_block(img.chroma_speckle for img in images),
             "blockiness": stats_block(img.blockiness for img in images),
         },
     }
@@ -266,5 +311,6 @@ def format_report(title: str, summary: dict[str, Any]) -> str:
     if img.get("reasons"):
         reasons = ", ".join(f"{k}={v}" for k, v in sorted(img["reasons"].items()))
         lines.append(f"  reasons: {reasons}")
+    lines.append(f"  chroma_speckle: {_fmt_stats(img.get('chroma_speckle', {}))}")
     lines.append(f"  blockiness: {_fmt_stats(img.get('blockiness', {}))}")
     return "\n".join(lines)

@@ -100,6 +100,8 @@ class MainWindow(QMainWindow):
     pilot_msg_sig = pyqtSignal(dict)
     snapshot_result_sig = pyqtSignal(str, str, bool, str)
     stereo_capture_result_sig = pyqtSignal(str, str, bool, str)
+    stereo_recording_state_sig = pyqtSignal(bool, str)  # recording, session_dir
+    stereo_recording_progress_sig = pyqtSignal(int, float)  # count, last_delta_ms
 
     @staticmethod
     def _env_truthy(name: str, default: bool = False) -> bool:
@@ -866,6 +868,8 @@ class MainWindow(QMainWindow):
         self.pilot_msg_sig.connect(self._handle_pilot_msg_on_ui)
         self.snapshot_result_sig.connect(self._handle_snapshot_result_on_ui)
         self.stereo_capture_result_sig.connect(self._handle_stereo_capture_result_on_ui)
+        self.stereo_recording_state_sig.connect(self._handle_stereo_recording_state_on_ui)
+        self.stereo_recording_progress_sig.connect(self._handle_stereo_recording_progress_on_ui)
 
         self._last_ctrl_status: dict = {'controller': 'unknown'}
         self._last_pilot_msg_ts: float = 0.0
@@ -938,6 +942,14 @@ class MainWindow(QMainWindow):
         self._stereo_capture_session: StereoCaptureSession | None = None
         self._last_stereo_capture_request_mono: float = 0.0
         self._stereo_capture_in_flight = False
+        # Stereo burst recording ("orbit" mode): captures clean synced pairs
+        # back-to-back into a dedicated session until toggled off.
+        self._stereo_recording = False
+        self._stereo_recording_session: StereoCaptureSession | None = None
+        self._stereo_recording_thread: threading.Thread | None = None
+        self._stereo_recording_stop = threading.Event()
+        self._stereo_recording_count = 0
+        self._last_stereo_recording_toggle_mono: float = 0.0
         # 2) sensor subscriber (ROV -> topside)
         self.sensor_panel = SensorPanel()
         self.instrument_panel = InstrumentPanel()
@@ -997,6 +1009,7 @@ class MainWindow(QMainWindow):
                     self.video_panel = VideoTabs(self.cam_mgr, stream_names=stream_names)
                     self._reverse_camera_name = self._select_reverse_stream_name(stream_names)
                     self.video_panel.selectionChanged.connect(self._on_video_tab_changed)
+                    self._update_capture_status_label()
                     QTimer.singleShot(1000, self._prewarm_snapshot_capture_feeds)
                 else:
                     self.statusBar().showMessage("No enabled video streams in streams.json", 8000)
@@ -1425,6 +1438,9 @@ class MainWindow(QMainWindow):
                     if event.key() == Qt.Key.Key_N:
                         self._start_new_stereo_session()
                         return True
+                    if event.key() == Qt.Key.Key_B:
+                        self._toggle_stereo_recording()
+                        return True
                     direction = self._back_gripper_gain_shortcuts.get(event.key())
                     if direction is not None:
                         self._adjust_back_gripper_gain_from_keyboard(direction)
@@ -1590,6 +1606,8 @@ class MainWindow(QMainWindow):
             edges = (msg or {}).get("edges", {}) or {}
             if str(edges.get("x", "")).strip().lower() == "down":
                 self._capture_from_current_mode()
+            if str(edges.get("b", "")).strip().lower() == "down":
+                self._toggle_stereo_recording()
         except Exception as exc:
             logger.exception("Snapshot trigger failed: %s", exc)
 
@@ -2493,10 +2511,14 @@ class MainWindow(QMainWindow):
         return None
 
     def _toggle_capture_mode(self) -> None:
+        if self._stereo_recording:
+            self.statusBar().showMessage("Stop recording (B) before changing capture mode", 3000)
+            return
         if str(getattr(self, "_capture_mode", "standard")) == "stereo":
             self._capture_mode = "standard"
             self.statusBar().showMessage("Capture mode: standard snapshots", 3000)
             trace_event("capture_mode_changed", mode="standard")
+            self._update_capture_status_label()
             return
         pair = self._current_stereo_pair()
         if pair is None:
@@ -2506,8 +2528,12 @@ class MainWindow(QMainWindow):
         self._capture_mode = "stereo"
         self.statusBar().showMessage(f"Capture mode: stereo ({pair.left} + {pair.right})", 4000)
         trace_event("capture_mode_changed", mode="stereo", pair=pair.name, left=pair.left, right=pair.right)
+        self._update_capture_status_label()
 
     def _start_new_stereo_session(self) -> None:
+        if self._stereo_recording:
+            self.statusBar().showMessage("Stop recording (B) before starting a new session", 3000)
+            return
         if self._stereo_capture_in_flight:
             self.statusBar().showMessage("Stereo capture busy; wait for the current pair to finish", 3500)
             return
@@ -2551,7 +2577,156 @@ class MainWindow(QMainWindow):
         self._start_new_stereo_session()
         return getattr(self, "_stereo_capture_session", None)
 
+    # ------------- Stereo burst recording ("orbit" mode) ------------- #
+    def _update_capture_status_label(self) -> None:
+        panel = getattr(self, "video_panel", None)
+        setter = getattr(panel, "set_capture_status", None) if panel is not None else None
+        if not callable(setter):
+            return
+        if self._stereo_recording:
+            pair = self._current_stereo_pair()
+            name = pair.name if pair is not None else "Stereo"
+            setter(f"● REC  {name}  —  {self._stereo_recording_count} pairs", recording=True)
+            return
+        mode = str(getattr(self, "_capture_mode", "standard"))
+        if mode == "stereo":
+            pair = self._current_stereo_pair()
+            suffix = f" ({pair.name})" if pair is not None else ""
+            setter(f"Capture: Stereo{suffix}", recording=False)
+        else:
+            setter("Capture: Standard", recording=False)
+
+    def _toggle_stereo_recording(self) -> None:
+        now_mono = time.monotonic()
+        if now_mono - float(getattr(self, "_last_stereo_recording_toggle_mono", 0.0)) < 0.4:
+            trace_event("stereo_recording_toggle_ignored", reason="debounce")
+            return
+        self._last_stereo_recording_toggle_mono = now_mono
+        if self._stereo_recording:
+            self._stop_stereo_recording()
+        else:
+            self._start_stereo_recording()
+
+    def _start_stereo_recording(self) -> None:
+        if self._stereo_recording:
+            return
+        if self._stereo_capture_in_flight:
+            self.statusBar().showMessage("Stereo capture busy; wait for the current pair to finish", 3000)
+            return
+        pair = self._current_stereo_pair()
+        if pair is None or self.cam_mgr is None:
+            self.statusBar().showMessage("Stereo recording unavailable: no stereo pair configured", 5000)
+            trace_event("stereo_recording_start_failed", reason="no_pair_or_manager")
+            return
+        try:
+            output_root, _location = self._make_recording_session_dir()
+            session = StereoCaptureSession(
+                self.cam_mgr,
+                pair,
+                output_root=output_root,
+                session_name=default_stereo_session_name(),
+            )
+            session.start()
+        except Exception as exc:
+            self.statusBar().showMessage(f"Could not start stereo recording: {exc}", 7000)
+            trace_event("stereo_recording_start_failed", reason="exception", error=str(exc))
+            return
+        self._stereo_recording_session = session
+        self._stereo_recording_count = 0
+        self._stereo_recording_stop = threading.Event()
+        self._stereo_recording = True
+        self._capture_mode = "stereo"
+        thread = threading.Thread(
+            target=self._stereo_recording_worker,
+            args=(session, self._stereo_recording_stop),
+            name="stereo-recording",
+            daemon=True,
+        )
+        self._stereo_recording_thread = thread
+        thread.start()
+        self._update_capture_status_label()
+        self.statusBar().showMessage(f"Stereo recording -> {session.session_dir}", 4000)
+        trace_event("stereo_recording_started", pair=pair.name, session_dir=str(session.session_dir))
+
+    def _stop_stereo_recording(self) -> None:
+        if not self._stereo_recording:
+            return
+        self._stereo_recording = False
+        stop_event = getattr(self, "_stereo_recording_stop", None)
+        if stop_event is not None:
+            stop_event.set()
+        self.statusBar().showMessage("Stopping stereo recording...", 2500)
+        trace_event("stereo_recording_stopping", count=self._stereo_recording_count)
+        self._update_capture_status_label()
+
+    def _stereo_recording_worker(self, session: StereoCaptureSession, stop_event: threading.Event) -> None:
+        # Capture clean, synced pairs back-to-back (no artificial delay) until
+        # stopped. Each on-demand pair is already gated for sync + cleanliness,
+        # so "as fast as cleanly able" is just the natural per-pair latency.
+        pair_timeout_s = 6.0
+        consecutive_failures = 0
+        try:
+            while not stop_event.is_set():
+                try:
+                    record = session.capture_once(wait_s=pair_timeout_s)
+                    consecutive_failures = 0
+                except Exception as exc:
+                    consecutive_failures += 1
+                    trace_event(
+                        "stereo_recording_capture_failed",
+                        error=str(exc),
+                        consecutive=consecutive_failures,
+                    )
+                    if consecutive_failures >= 10:
+                        trace_event("stereo_recording_aborted", reason="too_many_failures")
+                        break
+                    if stop_event.wait(0.2):
+                        break
+                    continue
+                count = int(record.get("index", 0) or 0)
+                delta = float(record.get("pair_delta_ms", 0.0) or 0.0)
+                self.stereo_recording_progress_sig.emit(count, delta)
+        finally:
+            try:
+                session.stop()
+            except Exception:
+                pass
+            self.stereo_recording_state_sig.emit(False, str(session.session_dir))
+
+    def _handle_stereo_recording_progress_on_ui(self, count: int, delta_ms: float) -> None:
+        self._stereo_recording_count = int(count)
+        flasher = getattr(self.video_panel, "flash_snapshot_badge", None) if self.video_panel is not None else None
+        pair = self._current_stereo_pair()
+        if callable(flasher) and pair is not None:
+            for stream_name in (pair.left, pair.right):
+                try:
+                    flasher(stream_name)
+                except Exception:
+                    pass
+        self._update_capture_status_label()
+
+    def _handle_stereo_recording_state_on_ui(self, recording: bool, session_dir: str) -> None:
+        if not recording:
+            self._stereo_recording = False
+            self._stereo_recording_thread = None
+            self._stereo_recording_session = None
+            # The next single stereo capture starts a fresh session.
+            self._stereo_capture_session = None
+            self.statusBar().showMessage(
+                f"Stereo recording saved -> {session_dir} ({self._stereo_recording_count} pairs)", 6000
+            )
+            trace_event(
+                "stereo_recording_stopped",
+                session_dir=str(session_dir),
+                count=self._stereo_recording_count,
+            )
+        self._update_capture_status_label()
+
     def _capture_from_current_mode(self) -> None:
+        if self._stereo_recording:
+            self.statusBar().showMessage("Stereo recording in progress; press B to stop", 2500)
+            trace_event("capture_request_ignored", reason="recording")
+            return
         if str(getattr(self, "_capture_mode", "standard")) == "stereo":
             self._capture_stereo_pair_snapshot()
             return
@@ -2725,7 +2900,7 @@ class MainWindow(QMainWindow):
                 onboard_capturer = getattr(self.cam_mgr, "capture_onboard_snapshot", None)
                 if callable(onboard_capturer):
                     try:
-                        packet = onboard_capturer(stream_name, timeout_s=2.0)
+                        packet = onboard_capturer(stream_name, timeout_s=4.0)
                         data = bytes(getattr(packet, "image_bytes", b"") or b"")
                         if not data:
                             raise RuntimeError("ROV snapshot returned no image bytes")
@@ -2758,7 +2933,7 @@ class MainWindow(QMainWindow):
                 capturer = getattr(self.cam_mgr, "capture_snapshot_frame", None)
                 if not callable(capturer):
                     raise RuntimeError("source capture path is unavailable")
-                packet = capturer(stream_name, timeout_s=2.5)
+                packet = capturer(stream_name, timeout_s=4.0)
                 frame = getattr(packet, "frame_bgr", None)
                 if frame is None:
                     raise RuntimeError("source capture returned no frame")
@@ -2805,7 +2980,7 @@ class MainWindow(QMainWindow):
             err = ""
             path = str(session.manifest_path)
             try:
-                record = session.capture_once(wait_s=2.0)
+                record = session.capture_once(wait_s=5.0)
                 ok = True
                 path = str(session.manifest_path)
                 trace_event(
@@ -3265,6 +3440,17 @@ class MainWindow(QMainWindow):
                     timer.stop()
             except Exception:
                 pass
+        try:
+            if self._stereo_recording:
+                self._stereo_recording = False
+                stop_event = getattr(self, "_stereo_recording_stop", None)
+                if stop_event is not None:
+                    stop_event.set()
+            recording_thread = getattr(self, "_stereo_recording_thread", None)
+            if recording_thread is not None:
+                recording_thread.join(timeout=5.0)
+        except Exception:
+            pass
         try:
             if self.video_panel is not None:
                 self.video_panel.stop_all()

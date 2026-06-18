@@ -173,6 +173,7 @@ def _sample_to_dict(sample: CaptureSample) -> dict:
             {
                 "label": img.label,
                 "reasons": img.reasons,
+                "chroma_speckle": img.chroma_speckle,
                 "blockiness": img.blockiness,
                 "byte_count": img.byte_count,
                 "width": img.width,

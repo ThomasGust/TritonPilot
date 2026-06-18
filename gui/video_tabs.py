@@ -194,6 +194,11 @@ class VideoTabs(QWidget):
 
         controls_lay.addStretch(1)
 
+        self._capture_status_label = QLabel("Capture: Standard")
+        self._capture_status_label.setObjectName("captureStatusLabel")
+        self._capture_status_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        controls_lay.addWidget(self._capture_status_label, 0)
+
         self._panes: list[_VideoPane] = []
         self._grid = QGridLayout()
         self._grid.setContentsMargins(0, 0, 0, 0)
@@ -884,6 +889,17 @@ class VideoTabs(QWidget):
 
     def prev_stream(self) -> None:
         self.cycle_stream(-1)
+
+    def set_capture_status(self, text: str, *, recording: bool = False) -> None:
+        """Update the persistent capture-mode / recording indicator in the bar."""
+        label = getattr(self, "_capture_status_label", None)
+        if label is None:
+            return
+        label.setText(str(text))
+        if recording:
+            label.setStyleSheet("QLabel#captureStatusLabel { color: #ff4d4d; font-weight: bold; }")
+        else:
+            label.setStyleSheet("")
 
     def set_rov_link_status(self, status: str) -> None:
         status_key = str(status or "").strip().upper()

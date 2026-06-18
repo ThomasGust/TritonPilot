@@ -77,10 +77,20 @@ class ROVStreams:
         except Exception:
             pass
 
-    def _call(self, cmd: str, **args):
+    def _call(self, cmd: str, *, _recv_timeout_ms: int | None = None, **args):
+        # Long-running RPCs (snapshot / stereo capture decode on demand) can take
+        # several seconds. Without a per-call recv timeout the default 3s ZMQ
+        # timeout would fail any capture slower than 3s, so callers pass a recv
+        # timeout derived from their own timeout_s. Restored after the call.
+        use_long = bool(_recv_timeout_ms) and int(_recv_timeout_ms) > self.timeout_ms
         with self._rpc_lock:
                 try:
                     self.sock.send_json({"cmd": cmd, "args": args})
+                    if use_long:
+                        try:
+                            self.sock.setsockopt(zmq.RCVTIMEO, int(_recv_timeout_ms))
+                        except Exception:
+                            pass
                     reply = self.sock.recv_json()
                 except zmq.Again as e:
                     # Timeout (ROV down / not responding)
@@ -90,6 +100,12 @@ class ROVStreams:
                     # REQ state errors or disconnects
                     self._reset_sock()
                     raise ConnectionError(f"ROV video RPC error calling '{cmd}': {e}") from e
+                finally:
+                    if use_long:
+                        try:
+                            self.sock.setsockopt(zmq.RCVTIMEO, self.timeout_ms)
+                        except Exception:
+                            pass
 
                 data = reply.get("data")
                 # Messages may appear either top-level (error path) or inside data (success path)
@@ -134,13 +150,30 @@ class ROVStreams:
         """Return ROV-side stream config plus timing diagnostics when supported."""
         return self._call("list_stream_status")
 
+    @staticmethod
+    def _capture_recv_timeout_ms(kwargs: dict, default_s: float) -> int:
+        try:
+            timeout_s = float(kwargs.get("timeout_s", kwargs.get("wait_s", default_s)) or default_s)
+        except Exception:
+            timeout_s = float(default_s)
+        # Allow the ROV its full capture window plus margin for round-trip/decode.
+        return int(max(0.0, timeout_s) * 1000) + 2000
+
     def capture_snapshot(self, **kwargs):
         """Return one onboard still image payload from a named ROV stream."""
-        return self._call("capture_snapshot", **kwargs)
+        return self._call(
+            "capture_snapshot",
+            _recv_timeout_ms=self._capture_recv_timeout_ms(kwargs, 1.5),
+            **kwargs,
+        )
 
     def capture_stereo_pair(self, **kwargs):
         """Return one onboard left/right still-image pair payload."""
-        return self._call("capture_stereo_pair", **kwargs)
+        return self._call(
+            "capture_stereo_pair",
+            _recv_timeout_ms=self._capture_recv_timeout_ms(kwargs, 2.0),
+            **kwargs,
+        )
 
     def net_info(self):
         """Return ROV-side interface/IP info (best-effort)."""

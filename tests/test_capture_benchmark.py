@@ -5,6 +5,7 @@ from recording.capture_benchmark import (
     CaptureSample,
     ImageQuality,
     blockiness_score,
+    chroma_speckle_score,
     classify_error,
     classify_image_bytes,
     percentile,
@@ -67,6 +68,35 @@ def test_blockiness_detects_block_grid():
     noise = rng.integers(0, 255, size=(64, 64, 3), dtype=np.uint8)
     assert blocky > blockiness_score(noise)
     assert blocky > 1.0
+
+
+def test_chroma_speckle_clean_vs_speckled():
+    pytest.importorskip("cv2")
+    rng = np.random.default_rng(1)
+    # Smooth natural-ish image: low chroma speckle.
+    clean = np.zeros((128, 128, 3), dtype=np.uint8)
+    clean[:, :, 0] = np.linspace(40, 200, 128, dtype=np.uint8)[None, :]
+    clean[:, :, 2] = np.linspace(200, 40, 128, dtype=np.uint8)[None, :]
+    # Isolated high-saturation chroma speckle on ~8% of pixels.
+    speckled = clean.copy()
+    mask = rng.random((128, 128)) < 0.08
+    speckled[mask] = rng.integers(0, 255, size=(int(mask.sum()), 3), dtype=np.uint8)
+
+    assert chroma_speckle_score(speckled) > chroma_speckle_score(clean)
+    assert chroma_speckle_score(clean) < 0.6
+
+
+def test_classify_image_bytes_flags_chroma_corruption():
+    cv2 = pytest.importorskip("cv2")
+    rng = np.random.default_rng(2)
+    frame = np.full((96, 96, 3), 110, dtype=np.uint8)
+    mask = rng.random((96, 96)) < 0.25
+    frame[mask] = rng.integers(0, 255, size=(int(mask.sum()), 3), dtype=np.uint8)
+    ok, buf = cv2.imencode(".png", frame)
+    assert ok
+    quality = classify_image_bytes(buf.tobytes())
+    assert "chroma_corruption" in quality.reasons
+    assert quality.chroma_speckle is not None and quality.chroma_speckle > 0.6
 
 
 def test_classify_image_bytes_decode_failure():
