@@ -51,6 +51,7 @@ def test_on_station_is_zero_error_once_locked():
     assert est.error.ex == pytest.approx(0.0, abs=1e-6)
     assert est.error.ey == pytest.approx(0.0, abs=1e-6)
     assert est.error.es == pytest.approx(0.0, abs=1e-3)
+    assert est.error.er == pytest.approx(0.0, abs=1e-6)
     assert est.violation == 0.0
     assert est.clean is True
     assert est.margin_cm == pytest.approx(20.0, abs=0.5)   # full margin at center
@@ -67,6 +68,20 @@ def test_position_error_hits_unity_at_geometric_tolerance():
     assert est.error.ey == pytest.approx(0.0, abs=1e-6)
     # 20 cm offset at the sweet spot => zero margin.
     assert est.margin_cm == pytest.approx(0.0, abs=1.0)
+
+
+def test_rotation_drives_er_and_squares_up_at_zero():
+    m = TransectModel(rot_norm_deg=45.0)
+    p = TransectPolicy(m)
+    # A 22.5deg-rotated square -> er ~ +0.5; squared-on -> er ~ 0.
+    rot = _lock(p, _on_station(m, blue_rotation_deg=22.5), n=15)
+    assert rot.error.er == pytest.approx(0.5, abs=0.05)
+    p.reset()
+    full = _lock(p, _on_station(m, blue_rotation_deg=-45.0), n=15)
+    assert full.error.er == pytest.approx(-1.0, abs=0.05)
+    p.reset()
+    square = _lock(p, _on_station(m, blue_rotation_deg=0.0), n=15)
+    assert square.error.er == pytest.approx(0.0, abs=1e-6)
 
 
 def test_es_sign_and_unity_bounds():
@@ -193,7 +208,7 @@ def test_payload_round_trips_to_controller_schema():
     est = _lock(p, _on_station(m, blue_cx=m.target_cx + 0.05, red_top=0.2))
     payload = est.error.to_visual_payload()
     assert payload["valid"] is True
-    for k in ("ex", "ey", "es", "violation", "confidence", "ts"):
+    for k in ("ex", "ey", "es", "er", "violation", "confidence", "ts"):
         assert k in payload
         assert math.isfinite(payload[k])
     assert 0.0 <= payload["violation"] <= 1.0

@@ -210,6 +210,7 @@ class _FakeVideoPanel(QWidget):
         self.square_display_enabled = False
         self.refresh_layout_count = 0
         self.snapshot_badges = []
+        self.stop_hidden_streams_calls = []
         self._widgets = {name: _FakeVideoWidget() for name in self.stream_names}
 
     def _visible_count(self):
@@ -284,6 +285,12 @@ class _FakeVideoPanel(QWidget):
 
     def set_tether_status(self, ready, message=""):
         self.tether_statuses.append((bool(ready), str(message)))
+
+    def is_stop_hidden_streams_enabled(self):
+        return False
+
+    def set_stop_hidden_streams(self, enabled):
+        self.stop_hidden_streams_calls.append(bool(enabled))
 
     def stop_all(self):
         return None
@@ -415,6 +422,7 @@ def test_transect_page_applies_square_single_camera_layout(monkeypatch, tmp_path
         # Transect defaults to the arm camera (the square-aspect task feed).
         assert panel.apply_temporary_layout_calls[-1][0] == (1, ["Arm Camera"])
         assert panel.apply_temporary_layout_calls[-1][1]["active_name"] == "Arm Camera"
+        assert panel.stop_hidden_streams_calls == []
 
         win._transect_page.set_current_stream("Aux Camera", emit=True)
         app.processEvents()
@@ -1373,19 +1381,20 @@ def test_transect_cv_inert_without_rov(monkeypatch, tmp_path):
     try:
         app.processEvents()
         # The fake cam manager has no .rov, so the CV source must NOT start
-        # (no GStreamer spawn / mirror) and the overlay stays hidden -- the
-        # normal Direct3D transect view shows through.
+        # (no GStreamer spawn / mirror); the transect tab just shows the normal
+        # Direct3D video and the chip reports unavailable.
         win._set_center_page("transect", announce=False)
         app.processEvents()
         assert win._transect_cv_source is None
         assert win._start_transect_cv() is False
-        assert win._transect_overlay_view.isVisible() is False
+        win._update_transect_cv_status()
+        assert "unavailable" in win._transect_page.cv_status_label.text().lower()
     finally:
         win.close()
         app.processEvents()
 
 
-def test_transect_estimate_paints_overlay_view(monkeypatch, tmp_path):
+def test_transect_estimate_records_state_for_chip(monkeypatch, tmp_path):
     app = _app()
     streams_path = tmp_path / "streams.json"
     streams_path.write_text("{}", encoding="utf-8")
@@ -1408,16 +1417,50 @@ def test_transect_estimate_paints_overlay_view(monkeypatch, tmp_path):
         obs = TransectObservation(
             blue_found=True, blue_cx=model.target_cx, blue_cy=model.target_cy,
             blue_fraction=model.nominal_blue_fraction, fit_quality=0.95,
+            blue_rotation_deg=22.5,
         )
         est = TransectPolicy(model).evaluate(obs)
         frame = np.zeros((48, 64, 3), np.uint8)
-        win._on_transect_estimate(est, obs, frame)  # bakes overlay + submits frame
+        # The CV no longer drives the video; the estimate is just recorded (for the
+        # non-covering lock/error chip) and published when engaged.
+        win._on_transect_estimate(est, obs, frame)
         app.processEvents()
-        assert win._transect_overlay_view._qimage is not None
-        assert win._transect_overlay_view._qimage.width() == 64
+        assert win._transect_last_lock == est.lock_state
+        ex, ey, es, er, viol = win._transect_last_err
+        assert er == pytest.approx(0.5, abs=0.05)   # 22.5deg / 45 rot_norm
     finally:
         win.close()
         app.processEvents()
+
+
+def test_set_stream_mirror_skips_noop_updates():
+    class _Rov:
+        def __init__(self):
+            self.extra = {"udp_mirror_ports": [53111]}
+            self.updates = []
+
+        def list_status(self):
+            return {"Arm Camera": {"extra": dict(self.extra)}}
+
+        def update_stream(self, **kwargs):
+            self.updates.append(kwargs)
+            self.extra = dict(kwargs["extra"])
+
+    rov = _Rov()
+    win = main_window.MainWindow.__new__(main_window.MainWindow)
+    win.cam_mgr = SimpleNamespace(rov=rov)
+
+    win._set_stream_mirror("Arm Camera", 53111, add=True)
+    assert rov.updates == []
+
+    win._set_stream_mirror("Arm Camera", 53112, add=False)
+    assert rov.updates == []
+
+    win._set_stream_mirror("Arm Camera", 53112, add=True)
+    assert rov.updates[-1]["extra"]["udp_mirror_ports"] == [53111, 53112]
+
+    win._set_stream_mirror("Arm Camera", 53111, add=False)
+    assert rov.updates[-1]["extra"]["udp_mirror_ports"] == [53112]
 
 
 def test_depth_hold_status_uses_rov_runtime_target(monkeypatch, tmp_path):

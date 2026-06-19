@@ -43,6 +43,17 @@ class _FakeReceiver:
         return _Pkt(data=bytes(n), seq=self._seq)
 
 
+class _NoFrameReceiver:
+    def start(self):
+        return None
+
+    def stop(self, *a, **k):
+        return None
+
+    def latest_frame_packet(self):
+        return None
+
+
 class _OnStationDetector:
     def __init__(self, model):
         self.m = model
@@ -110,6 +121,57 @@ def test_source_skips_wrong_sized_frames_without_crashing():
     src.stop()
     assert fired is False  # mismatched frames are dropped, never delivered
     assert got == []
+
+
+def test_source_retries_mirror_while_waiting_for_frames():
+    calls = []
+    src = TransectVisionSource(
+        width=W,
+        height=H,
+        on_estimate=lambda *a: None,
+        receiver_factory=_NoFrameReceiver,
+        detector=_OnStationDetector(TransectModel()),
+        target_fps=200.0,
+        mirror_retry_interval_s=0.03,
+        mirror_setter=calls.append,
+    )
+
+    src.start()
+    deadline = time.monotonic() + 0.4
+    while time.monotonic() < deadline and calls.count(True) < 3:
+        time.sleep(0.01)
+    src.stop()
+
+    assert calls.count(True) >= 3
+    assert calls[-1] is False
+
+
+def test_source_restarts_receiver_while_waiting_for_frames():
+    factories = []
+
+    def factory():
+        rx = _NoFrameReceiver()
+        factories.append(rx)
+        return rx
+
+    src = TransectVisionSource(
+        width=W,
+        height=H,
+        on_estimate=lambda *a: None,
+        receiver_factory=factory,
+        detector=_OnStationDetector(TransectModel()),
+        target_fps=200.0,
+        mirror_retry_interval_s=0.03,
+        receiver_restart_interval_s=0.06,
+    )
+
+    src.start()
+    deadline = time.monotonic() + 0.5
+    while time.monotonic() < deadline and len(factories) < 3:
+        time.sleep(0.01)
+    src.stop()
+
+    assert len(factories) >= 3
 
 
 def test_start_stop_is_idempotent_and_manages_receiver():

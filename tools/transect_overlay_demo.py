@@ -61,6 +61,21 @@ def _fake(_frame, model: TransectModel) -> TransectObservation:
 _DETECTORS = {"stub": _stub, "fake": _fake}
 
 
+def _build_detector(args):
+    """Return a callable(frame, model) -> TransectObservation for the chosen mode."""
+    if args.mode == "classical":
+        from tracking.transect_cv import ClassicalDetectorConfig, ClassicalTransectDetector
+
+        cfg = ClassicalDetectorConfig()
+        if args.wb:
+            cfg.white_balance = True
+        if args.no_gripper_mask:
+            cfg.gripper_roi = None
+        det = ClassicalTransectDetector(cfg)
+        return lambda frame, _model: det.detect(frame)
+    return _DETECTORS[args.mode]
+
+
 def _build_model(args) -> TransectModel:
     kw = dict(blue_cm=args.blue_cm, red_cm=args.red_cm,
               target_cx=args.target_cx, target_cy=args.target_cy)
@@ -118,8 +133,9 @@ def _run_video(args, model, policy, detector) -> None:
         ok, frame = cap.read()
         if not ok:
             break
-        est = policy.evaluate(detector(frame, model))
-        draw_transect_overlay(frame, model, est, detector(frame, model))
+        obs = detector(frame, model)
+        est = policy.evaluate(obs)
+        draw_transect_overlay(frame, model, est, obs)
         if writer is not None:
             writer.write(frame)
         if args.show:
@@ -148,8 +164,9 @@ def _run_live(args, model, policy, detector) -> None:
                 time.sleep(0.005)
                 continue
             frame = np.frombuffer(pkt.data, np.uint8).reshape((args.height, args.width, 3)).copy()
-            est = policy.evaluate(detector(frame, model))
-            draw_transect_overlay(frame, model, est, detector(frame, model))
+            obs = detector(frame, model)
+            est = policy.evaluate(obs)
+            draw_transect_overlay(frame, model, est, obs)
             if args.show:
                 cv2.imshow("transect (live)", frame)
                 if cv2.waitKey(1) & 0xFF == 27:
@@ -166,9 +183,11 @@ def main() -> None:
     src.add_argument("--images", help="image file, dir, or glob")
     src.add_argument("--video", help="mp4 path")
     src.add_argument("--port", type=int, help="live UDP mirror port (raw receiver)")
-    ap.add_argument("--mode", choices=list(_DETECTORS), default="stub")
+    ap.add_argument("--mode", choices=list(_DETECTORS) + ["classical"], default="stub")
     ap.add_argument("--out", help="output dir (images) or mp4 path (video)")
     ap.add_argument("--show", action="store_true", help="display in a window")
+    ap.add_argument("--wb", action="store_true", help="classical: enable gray-world white balance (off by default)")
+    ap.add_argument("--no-gripper-mask", action="store_true", help="classical: don't mask the gripper ROI for red")
     # live
     ap.add_argument("--codec", choices=["h264", "jpeg"], default="h264")
     ap.add_argument("--width", type=int, default=1920)
@@ -184,7 +203,7 @@ def main() -> None:
 
     model = _build_model(args)
     policy = TransectPolicy(model)
-    detector = _DETECTORS[args.mode]
+    detector = _build_detector(args)
 
     if args.images:
         _run_images(args, model, policy, detector)

@@ -179,6 +179,51 @@ def apply_modern_style(app: QApplication) -> None:
     QWidget#transectControls {
         background: transparent;
     }
+    QLabel#transectCvStatus {
+        padding: 1px 8px;
+        border-radius: 8px;
+        color: #c8c8d0;
+        background: #1c1c22;
+    }
+    QLabel#transectCvStatus[tone="ok"] {
+        color: #0c140c;
+        background: #46c84b;
+        font-weight: 600;
+    }
+    QLabel#transectCvStatus[tone="warn"] {
+        color: #14110a;
+        background: #e0a72e;
+    }
+    QLabel#transectCvStatus[tone="bad"] {
+        color: #160b0b;
+        background: #e0563c;
+        font-weight: 600;
+    }
+    QLabel#transectCvStatus[tone="neutral"] {
+        color: #d8d8e0;
+        background: #2a2a32;
+    }
+    QPushButton#transectEngageButton {
+        padding: 4px 18px;
+        border-radius: 6px;
+        font-weight: 700;
+        color: #e8e8ee;
+        background: #33333d;
+        border: 1px solid #44444f;
+    }
+    QPushButton#transectEngageButton:hover {
+        border: 1px solid #6a6a7a;
+    }
+    QPushButton#transectEngageButton[tone="ready"] {
+        color: #0c140c;
+        background: #46c84b;
+        border: 1px solid #5fe065;
+    }
+    QPushButton#transectEngageButton[tone="engaged"] {
+        color: #ffffff;
+        background: #c0392b;
+        border: 1px solid #e0563c;
+    }
     QFrame#transectSquareHost {
         background: #0f1015;
         border: 1px solid #2a2a32;

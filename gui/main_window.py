@@ -82,7 +82,6 @@ from tracking import (
     TransectPolicy,
     VisualTargetError,
 )
-from gui.transect_overlay_view import TransectOverlayView
 from gui.direct_gst_video_widget import (
     _resolve_windows_host as resolve_video_host,
     _start_kwargs as video_start_kwargs,
@@ -94,6 +93,7 @@ from gui.instruments import InstrumentPanel, HoldTestPanel, PilotTelemetryColumn
 from gui.raw_sensor_page import RawSensorPage
 from gui.management_page import ManagementPage
 from gui.transect_page import TransectPage
+from gui.transect_overlay_view import TransectHudOverlayView
 from gui.ssh_page import SshConsolePage, default_pilot_ssh_presets
 from gui.responsive import resize_to_available_screen, vertical_scroll_area
 from network.net_select import LocalAddr, list_local_ipv4_addrs, parse_zmq_endpoint
@@ -428,14 +428,25 @@ class MainWindow(QMainWindow):
             return
         try:
             svc.set_station_keep_enabled(enabled)
-            if not enabled and hasattr(self._optical_tracker, "reset"):
+            if enabled:
+                # The transect hold relies on depth hold owning bulk altitude and a
+                # level attitude for stable camera geometry; enable both with the
+                # hold (enable-only -- disengaging leaves the pilot's holds as-is).
+                for setter in ("set_depth_hold_enabled", "set_roll_pitch_level_enabled"):
+                    fn = getattr(svc, setter, None)
+                    if callable(fn):
+                        try:
+                            fn(True)
+                        except Exception as exc:
+                            logger.debug("%s failed: %s", setter, exc)
+            elif hasattr(self._optical_tracker, "reset"):
                 self._optical_tracker.reset()
         except Exception as exc:
             logger.exception("Station-keep toggle failed: %s", exc)
         self._sync_station_keep_action()
         self._refresh_drive_status()
         self.statusBar().showMessage(
-            "Optical Hold ENGAGED (station-keep)" if enabled else "Optical Hold OFF",
+            "Optical Hold ENGAGED (station-keep + depth + level)" if enabled else "Optical Hold OFF",
             3000,
         )
         trace_event("station_keep_toggle", enabled=enabled)
@@ -596,7 +607,12 @@ class MainWindow(QMainWindow):
                 self._reverse_page_owns_mode = False
                 self._set_reverse_mode(False, announce=False)
         if previous_page == "transect" and page_name != "transect":
+            try:
+                self._transect_status_timer.stop()
+            except Exception:
+                pass
             self._stop_transect_cv()  # also clears/hides the overlay view
+            self._transect_page.set_cv_status("Autopilot CV: off", "off")
             if self.video_panel is not None:
                 try:
                     self._transect_page.detach_video_panel(self.video_panel)
@@ -641,11 +657,14 @@ class MainWindow(QMainWindow):
                 self._resume_video_panel()
                 self._transect_page.attach_video_panel(self.video_panel)
                 self._apply_transect_camera_view()
-            # Run the live CV while this tab is open. The annotated overlay reveals
-            # itself only once real frames arrive; until then (or if no ROV is
-            # connected) the normal Direct3D video shows through.
-            self._start_transect_cv()
             self._page_stack.setCurrentWidget(self._transect_page)
+            # Start the live CV AFTER the page is shown and on the next event-loop
+            # tick: spawning the receiver subprocess + the mirror RPC must not
+            # stall the tab switch. The overlay reveals itself once frames arrive;
+            # until then (or with no ROV) the normal Direct3D video shows through.
+            self._transect_page.set_cv_status("Autopilot CV: starting…", "warn")
+            self._transect_status_timer.start()
+            QTimer.singleShot(0, self._maybe_start_transect_cv)
         elif page_name == "hold_test":
             if self.video_panel is not None:
                 if self._active_page_name == "pilot":
@@ -776,7 +795,10 @@ class MainWindow(QMainWindow):
             )
             codec = "h264" if tx_is_h264 else "jpeg"
             channel_order = str(opts.get("channel_order", "BGR") or "BGR")
-            latency_ms = int(opts.get("receiver_latency_ms", opts.get("latency_ms", 60)) or 60)
+            # Bigger jitter buffer than the display feed: the CV view is a
+            # hold-assist overlay, so absorbing motion-burst jitter (fewer decode
+            # stalls when the arm swings) is worth ~150ms of extra latency.
+            latency_ms = int(opts.get("transect_cv_latency_ms", 150) or 150)
             # Mirror to a freshly-allocated local port (same proven approach as the
             # snapshot taps) rather than a fixed offset, so it never collides with
             # the display/recorder receivers.
@@ -786,8 +808,11 @@ class MainWindow(QMainWindow):
             logger.debug("transect CV: could not resolve stream '%s': %s", stream, exc)
             return False
 
-        from tracking.transect_detector import StubTransectDetector
         from tracking.transect_source import TransectVisionSource, default_receiver_factory
+
+        if getattr(self, "_transect_detector", None) is None:
+            from tracking.transect_cv import ClassicalTransectDetector
+            self._transect_detector = ClassicalTransectDetector()
 
         def _mirror(add: bool) -> None:
             try:
@@ -796,7 +821,6 @@ class MainWindow(QMainWindow):
                 logger.debug("transect CV mirror %s failed: %s", "add" if add else "remove", exc)
 
         try:
-            self._transect_overlay_view.clear()  # hidden until a real frame lands
             source = TransectVisionSource(
                 width=width, height=height,
                 on_estimate=self._on_transect_estimate,
@@ -804,7 +828,7 @@ class MainWindow(QMainWindow):
                     port=mirror_port, codec=codec, width=width, height=height,
                     bind_address=bind, channel_order=channel_order, latency_ms=latency_ms,
                 ),
-                detector=StubTransectDetector(),
+                detector=self._transect_detector,
                 policy=self._transect_policy,
                 mirror_setter=_mirror,
                 name=f"transect-cv:{stream}",
@@ -819,30 +843,108 @@ class MainWindow(QMainWindow):
                     width=width, height=height)
         return True
 
-    def _stop_transect_cv(self) -> None:
+    def _maybe_start_transect_cv(self) -> None:
+        """Deferred CV start; no-op if the user already left the Transect tab."""
+        if getattr(self, "_active_page_name", "") != "transect":
+            return
+        self._start_transect_cv()
+        self._update_transect_cv_status()
+
+    def _stop_transect_cv(self, *, background: bool = True) -> None:
         source = self._transect_cv_source
         self._transect_cv_source = None
         self._transect_cv_stream = None
         try:
-            self._transect_overlay_view.clear()  # reveal the live video again
+            self._transect_overlay_view.clear()
         except Exception:
             pass
-        if source is not None:
-            try:
-                source.stop()
-            except Exception as exc:
-                logger.debug("transect CV stop failed: %s", exc)
-            trace_event("transect_cv_stopped")
+        if source is None:
+            return
+        if background:
+            # source.stop() joins the worker (<=2s) + receiver shutdown + mirror
+            # RPC; do it off the GUI thread so leaving the tab is instant.
+            threading.Thread(
+                target=self._stop_transect_source_safe, args=(source,),
+                name="transect-cv-stop", daemon=True,
+            ).start()
+        else:
+            self._stop_transect_source_safe(source)
+
+    def _stop_transect_source_safe(self, source) -> None:
+        try:
+            source.stop()
+        except Exception as exc:
+            logger.debug("transect CV stop failed: %s", exc)
+        trace_event("transect_cv_stopped")
+
+    def _on_transect_engage_toggled(self, checked: bool) -> None:
+        """The transect-page Engage button (mirrors the K-key Optical Hold toggle)."""
+        self._set_station_keep_enabled(bool(checked))
+
+    def _update_transect_cv_status(self) -> None:
+        """Poll the CV source health + last lock and refresh the status chip."""
+        page = getattr(self, "_transect_page", None)
+        if page is None:
+            return
+        # Keep the engage button in sync with the actual hold state (it may have
+        # been toggled by the K key) and highlight it green when a lock is ready.
+        try:
+            svc = getattr(self, "pilot_svc", None)
+            engaged = bool(svc.is_station_keep_enabled()) if svc is not None else False
+            page.update_engage_state(engaged=engaged, lock_ready=(self._transect_last_lock == "lock"))
+        except Exception:
+            pass
+        source = self._transect_cv_source
+        if source is None:
+            page.set_cv_status("Autopilot CV: unavailable (no ROV)", "off")
+            return
+        st = source.stats()
+        frames = int(st.get("frames", 0) or 0)
+        age = st.get("last_frame_age_s")
+        since_start = st.get("age_since_start_s") or 0.0
+        if frames == 0:
+            if since_start < 4.0:
+                page.set_cv_status("Autopilot CV: connecting…", "warn")
+            else:
+                page.set_cv_status("Autopilot CV: no frames", "bad")
+            return
+        if age is not None and age > 2.0:
+            page.set_cv_status(f"Autopilot CV: stalled ({age:.0f}s)", "bad")
+            return
+        fps = float(st.get("fps", 0.0) or 0.0)
+        lock = self._transect_last_lock
+        tone = {"lock": "ok", "acquiring": "warn"}.get(lock, "neutral")
+        label = {"lock": "LOCK", "acquiring": "ACQUIRING", "lost": "LOST", "no_target": "searching"}.get(lock, lock)
+        ex, ey, es, er, viol = getattr(self, "_transect_last_err", (0.0, 0.0, 0.0, 0.0, 0.0))
+        txt = f"Optical Hold: {label} {self._transect_last_conf * 100:.0f}% · {fps:.0f}fps"
+        if lock in ("lock", "acquiring"):
+            txt += f"  |  ex{ex:+.2f} ey{ey:+.2f} es{es:+.2f} er{er:+.2f}"
+            if viol > 0.05:
+                txt += f"  RED {viol * 100:.0f}%"
+        page.set_cv_status(txt, tone)
 
     def _on_transect_estimate(self, estimate, observation, frame) -> None:
-        """CV worker-thread callback: paint the overlay, then publish if engaged."""
-        try:
-            from tracking.transect_overlay import draw_transect_overlay
+        """CV worker-thread callback: record the result, then publish if engaged.
 
-            draw_transect_overlay(frame, self._transect_model, estimate, observation)
-            self._transect_overlay_view.submit_frame(frame)  # thread-safe (queued)
+        The CV does NOT drive the transect video any more -- the tab shows the
+        smooth hardware-decoded (d3d11) feed and never gets replaced by raw CV
+        frames, so the CV's own decode stalls during a fast arm move can't
+        flicker the picture. The detection result only feeds the transparent
+        lock/error HUD + the ROV.
+        """
+        self._transect_last_lock = estimate.lock_state
+        self._transect_last_conf = float(estimate.confidence)
+        e = estimate.error
+        self._transect_last_err = (e.ex, e.ey, e.es, e.er, estimate.violation)
+        try:
+            self._transect_overlay_view.submit_estimate(
+                self._transect_model,
+                estimate,
+                observation,
+                getattr(frame, "shape", None),
+            )
         except Exception as exc:
-            logger.debug("transect overlay render failed: %s", exc)
+            logger.debug("transect overlay submit failed: %s", exc)
         # Only stream the visual target to the ROV once the pilot has engaged
         # Optical Hold; otherwise this is a passive lock preview.
         try:
@@ -932,15 +1034,24 @@ class MainWindow(QMainWindow):
         # with it is safe (the ROV controller stays inert without a valid lock).
         self._station_keep_act = None
         self._optical_tracker = NullOpticalTracker()
-        # Transect autopilot CV: geometry model + policy + annotated overlay view,
-        # fed by a live raw frame source that runs only while the Transect tab is
-        # open (lazily created; the detector is a stub until the CV lands). The
-        # view layers over the transect video when the source is actually running.
+        # Transect autopilot CV: geometry model + policy + a live raw frame source
+        # that runs only while the Transect tab is open (lazily created; the
+        # detector is a stub until the CV lands). The CV is detection-only and does
+        # NOT drive the video -- the tab keeps the smooth d3d11 feed, and results
+        # surface in the transparent lock/error HUD so a CV decode stall can
+        # never replace/flicker the picture.
         self._transect_model = TransectModel()
         self._transect_policy = TransectPolicy(self._transect_model)
-        self._transect_overlay_view = TransectOverlayView()
+        self._transect_detector = None  # lazily created ClassicalTransectDetector
+        self._transect_overlay_view = TransectHudOverlayView()
         self._transect_cv_source = None
         self._transect_cv_stream: str | None = None
+        self._transect_last_lock: str = "no_target"
+        self._transect_last_conf: float = 0.0
+        self._transect_last_err = (0.0, 0.0, 0.0, 0.0, 0.0)  # ex, ey, es, er, violation
+        self._transect_status_timer = QTimer(self)
+        self._transect_status_timer.setInterval(500)
+        self._transect_status_timer.timeout.connect(self._update_transect_cv_status)
 
         self._link_lbl = QLabel("Heartbeat: (no data)")
         self.statusBar().addPermanentWidget(self._link_lbl)
@@ -1346,6 +1457,7 @@ class MainWindow(QMainWindow):
         if transect_default:
             self._transect_page.set_current_stream(transect_default, emit=False)
         self._transect_page.cameraSelectionChanged.connect(self._on_transect_camera_changed)
+        self._transect_page.engageToggled.connect(self._on_transect_engage_toggled)
         self._transect_page.set_overlay_widget(self._transect_overlay_view)
         if self.video_panel is None:
             self._transect_page.attach_video_placeholder("Video unavailable.")
@@ -2952,9 +3064,19 @@ class MainWindow(QMainWindow):
     def _set_stream_mirror(self, stream_name: str, mirror_port: int, *, add: bool) -> None:
         """Add/remove one recording mirror UDP port on the ROV stream (live)."""
         extra = self._stream_current_extra(stream_name)
-        ports = [int(p) for p in (extra.get("udp_mirror_ports") or []) if int(p) != int(mirror_port)]
+        port = int(mirror_port)
+        existing: list[int] = []
+        for raw in extra.get("udp_mirror_ports") or []:
+            try:
+                existing.append(int(raw))
+            except Exception:
+                continue
+        present = port in existing
+        if (add and present) or ((not add) and not present):
+            return
+        ports = [p for p in existing if p != port]
         if add:
-            ports.append(int(mirror_port))
+            ports.append(port)
         if ports:
             extra["udp_mirror_ports"] = ports
         else:
@@ -4024,7 +4146,7 @@ class MainWindow(QMainWindow):
                 app.removeEventFilter(self)
         except Exception:
             pass
-        for timer_name in ("_link_timer", "_analysis_transfer_timer", "_sensor_ui_timer", "_tether_ui_timer", "_ui_lag_timer"):
+        for timer_name in ("_link_timer", "_analysis_transfer_timer", "_sensor_ui_timer", "_tether_ui_timer", "_ui_lag_timer", "_transect_status_timer"):
             try:
                 timer = getattr(self, timer_name, None)
                 if timer is not None:
@@ -4032,7 +4154,7 @@ class MainWindow(QMainWindow):
             except Exception:
                 pass
         try:
-            self._stop_transect_cv()
+            self._stop_transect_cv(background=False)  # finish receiver shutdown before exit
         except Exception:
             pass
         try:

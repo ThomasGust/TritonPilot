@@ -16,9 +16,11 @@ import pytest
 
 pytest.importorskip("PyQt6")
 
-from PyQt6.QtWidgets import QApplication
+from PyQt6.QtCore import Qt
+from PyQt6.QtWidgets import QApplication, QWidget
 
-from gui.transect_overlay_view import TransectOverlayView
+from gui.transect_overlay_view import TransectHudOverlayView, TransectOverlayView
+from tracking.transect_policy import TransectModel, TransectObservation, TransectPolicy
 
 
 def _app():
@@ -72,4 +74,78 @@ def test_clear_and_bad_frame_are_safe():
         assert view._qimage is None
     finally:
         view.deleteLater()
+        app.processEvents()
+
+
+def test_hud_overlay_accepts_estimates_and_clears():
+    app = _app()
+    view = TransectHudOverlayView()
+    try:
+        view.resize(320, 320)
+        model = TransectModel()
+        obs = TransectObservation(
+            blue_found=True,
+            blue_cx=model.target_cx,
+            blue_cy=model.target_cy,
+            blue_fraction=model.nominal_blue_fraction,
+            fit_quality=0.95,
+        )
+        est = TransectPolicy(model).evaluate(obs)
+
+        view._on_estimate(model, est, obs, (1080, 1920, 3))
+        view.show()
+        app.processEvents()
+
+        assert view._estimate is est
+        assert view._observation is obs
+        assert view._source_shape == (1080, 1920)
+
+        view.clear()
+        assert view._estimate is None
+        assert not view.isVisible()
+    finally:
+        view.deleteLater()
+        app.processEvents()
+
+
+def test_hud_overlay_hides_and_stays_hidden_when_app_inactive(monkeypatch):
+    app = _app()
+    anchor = QWidget()
+    view = TransectHudOverlayView()
+    try:
+        anchor.resize(360, 360)
+        anchor.show()
+        app.processEvents()
+        view.set_anchor_widget(anchor)
+
+        monkeypatch.setattr(TransectHudOverlayView, "_application_is_active", staticmethod(lambda: True))
+        view.show_for_anchor()
+        app.processEvents()
+        assert view.isVisible()
+
+        view._on_application_state_changed(Qt.ApplicationState.ApplicationInactive)
+        app.processEvents()
+        assert not view.isVisible()
+
+        monkeypatch.setattr(TransectHudOverlayView, "_application_is_active", staticmethod(lambda: False))
+        model = TransectModel()
+        obs = TransectObservation(
+            blue_found=True,
+            blue_cx=model.target_cx,
+            blue_cy=model.target_cy,
+            blue_fraction=model.nominal_blue_fraction,
+            fit_quality=0.95,
+        )
+        est = TransectPolicy(model).evaluate(obs)
+        view._on_estimate(model, est, obs, (1080, 1920, 3))
+        app.processEvents()
+        assert not view.isVisible()
+
+        monkeypatch.setattr(TransectHudOverlayView, "_application_is_active", staticmethod(lambda: True))
+        view._on_application_state_changed(Qt.ApplicationState.ApplicationActive)
+        app.processEvents()
+        assert view.isVisible()
+    finally:
+        view.deleteLater()
+        anchor.deleteLater()
         app.processEvents()

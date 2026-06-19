@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 from PyQt6.QtCore import QRect, Qt, pyqtSignal
-from PyQt6.QtWidgets import QComboBox, QFrame, QHBoxLayout, QLabel, QSizePolicy, QVBoxLayout, QWidget
+from PyQt6.QtWidgets import (
+    QComboBox, QFrame, QHBoxLayout, QLabel, QPushButton, QSizePolicy, QVBoxLayout, QWidget,
+)
 
 
 class SquareVideoHost(QFrame):
@@ -25,15 +27,23 @@ class SquareVideoHost(QFrame):
     def set_overlay(self, widget: QWidget | None) -> None:
         self._overlay = widget
         if widget is not None:
-            widget.setParent(self)
+            anchor_setter = getattr(widget, "set_anchor_widget", None)
+            if callable(anchor_setter):
+                anchor_setter(self)
+            else:
+                widget.setParent(self)
             widget.hide()
         self._layout_child()
 
     def show_overlay(self) -> None:
         if self._overlay is not None:
             self._layout_child()
-            self._overlay.show()
-            self._overlay.raise_()
+            show_for_anchor = getattr(self._overlay, "show_for_anchor", None)
+            if callable(show_for_anchor):
+                show_for_anchor()
+            else:
+                self._overlay.show()
+                self._overlay.raise_()
 
     def hide_overlay(self) -> None:
         if self._overlay is not None:
@@ -84,8 +94,12 @@ class SquareVideoHost(QFrame):
                     pass
         self._placeholder.setGeometry(rect)
         if self._overlay is not None:
-            self._overlay.setGeometry(rect)
-            if self._overlay.isVisible():
+            sync_to_anchor = getattr(self._overlay, "sync_to_anchor", None)
+            if callable(sync_to_anchor):
+                sync_to_anchor()
+            else:
+                self._overlay.setGeometry(rect)
+            if self._overlay.isVisible() and not callable(sync_to_anchor):
                 self._overlay.raise_()
 
     def resizeEvent(self, event) -> None:
@@ -97,6 +111,7 @@ class TransectPage(QWidget):
     """Operator page for a square, single-camera transect view."""
 
     cameraSelectionChanged = pyqtSignal(str)
+    engageToggled = pyqtSignal(bool)   # operator pressed the Engage Optical Hold button
 
     def __init__(self, stream_names: list[str], parent=None):
         super().__init__(parent)
@@ -120,9 +135,24 @@ class TransectPage(QWidget):
         self.camera_combo.addItems(self.stream_names)
         self.camera_combo.currentTextChanged.connect(self.cameraSelectionChanged.emit)
 
+        self.cv_status_label = QLabel("Autopilot CV: off")
+        self.cv_status_label.setObjectName("transectCvStatus")
+        self.cv_status_label.setProperty("tone", "off")
+
+        # Big, obvious engage control (also bound to the K key elsewhere).
+        self.engage_btn = QPushButton("Engage Optical Hold")
+        self.engage_btn.setObjectName("transectEngageButton")
+        self.engage_btn.setCheckable(True)
+        self.engage_btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self.engage_btn.setMinimumHeight(34)
+        self.engage_btn.setProperty("tone", "idle")
+        self.engage_btn.toggled.connect(self.engageToggled.emit)
+
         controls_lay.addWidget(label, 0)
         controls_lay.addWidget(self.camera_combo, 0)
         controls_lay.addStretch(1)
+        controls_lay.addWidget(self.cv_status_label, 0)
+        controls_lay.addWidget(self.engage_btn, 0)
 
         self.square_host = SquareVideoHost()
 
@@ -154,6 +184,40 @@ class TransectPage(QWidget):
     def attach_video_placeholder(self, text: str) -> None:
         self.square_host.set_placeholder_text(text)
         self.square_host.set_widget(None)
+
+    def set_cv_status(self, text: str, tone: str = "off") -> None:
+        """Update the small non-covering autopilot CV status chip."""
+        self.cv_status_label.setText(str(text))
+        self._set_tone(self.cv_status_label, tone)
+
+    def update_engage_state(self, *, engaged: bool, lock_ready: bool) -> None:
+        """Reflect the hold state on the engage button (also driven by the K key).
+
+        ``lock_ready`` highlights the button green when a clean lock is available
+        so the operator knows it's a good moment to engage.
+        """
+        b = self.engage_btn
+        blocked = b.blockSignals(True)
+        b.setChecked(bool(engaged))
+        b.blockSignals(blocked)
+        if engaged:
+            b.setText("● HOLDING — click to release")
+            tone = "engaged"
+        elif lock_ready:
+            b.setText("Engage Optical Hold  ✓ lock")
+            tone = "ready"
+        else:
+            b.setText("Engage Optical Hold")
+            tone = "idle"
+        self._set_tone(b, tone)
+
+    @staticmethod
+    def _set_tone(widget, tone: str) -> None:
+        if widget.property("tone") != tone:
+            widget.setProperty("tone", tone)
+            style = widget.style()
+            style.unpolish(widget)
+            style.polish(widget)
 
     def set_overlay_widget(self, widget: QWidget | None) -> None:
         """Install the autopilot overlay view (layered above the video)."""

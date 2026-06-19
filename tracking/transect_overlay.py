@@ -143,7 +143,7 @@ def draw_transect_overlay(
         elif estimate.violation > 0:
             lines.append((f"RED VISIBLE  {estimate.violation*100:3.0f}%", _RED))
         e = estimate.error
-        lines.append((f"ex {e.ex:+.2f}  ey {e.ey:+.2f}  es {e.es:+.2f}", _WHITE))
+        lines.append((f"ex {e.ex:+.2f}  ey {e.ey:+.2f}  es {e.es:+.2f}  er {e.er:+.2f}", _WHITE))
         if estimate.footprint_cm is not None:
             lines.append((f"footprint {estimate.footprint_cm:5.0f}cm  (W* {model.footprint_target_cm:.0f})", _WHITE))
         if estimate.margin_cm is not None:

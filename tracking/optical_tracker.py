@@ -19,6 +19,8 @@ Error sign convention (normalized to roughly [-1, 1]):
         (+ = target is right of desired)        -> drives sway by default
     ey  vertical offset (+ = target below desired) -> (optional) heave
     es  scale/size error (+ = target too large => too close) -> drives surge
+    er  rotation error (+ = target rotated CW in frame; 0 = squared-on) -> yaw.
+        Squaring the target up maximizes the see-all-blue/no-red margin.
     violation  0..1 amount of forbidden content visible (red border) -> bias
 
 The exact error-component -> thrust-DOF mapping, gains, and signs are tuned in
@@ -45,6 +47,7 @@ class VisualTargetError:
     ex: float = 0.0
     ey: float = 0.0
     es: float = 0.0
+    er: float = 0.0          # rotation error (+ = target rotated CW); 0 = squared-on
     violation: float = 0.0
     confidence: float = 0.0
     ts: Optional[float] = None
@@ -69,6 +72,7 @@ class VisualTargetError:
             "ex": _clamp(float(self.ex)),
             "ey": _clamp(float(self.ey)),
             "es": _clamp(float(self.es)),
+            "er": _clamp(float(self.er)),
             "violation": _clamp(float(self.violation), 0.0, 1.0),
             "confidence": _clamp(float(self.confidence), 0.0, 1.0),
         }

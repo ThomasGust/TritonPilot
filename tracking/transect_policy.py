@@ -122,6 +122,10 @@ class TransectModel:
     # Optional override of the on-station apparent blue size (fraction of frame).
     # None => use the nadir-geometric value blue_cm / W*.
     target_blue_fraction: Optional[float] = None
+    # Rotation (deg) at which |er| reaches 1.0. The square is 90deg-symmetric, so
+    # the detector reports rotation in [-45, 45]; squaring up (er -> 0) maximizes
+    # the see-all-blue/no-red margin.
+    rot_norm_deg: float = 45.0
 
     # Lock hysteresis (the "good lock" the pilot needs before engaging).
     lock_on_conf: float = 0.6
@@ -338,6 +342,12 @@ class TransectPolicy:
         ex = _clamp((cx - tcx) / tol + bias_x, -1.0, 1.0)
         ey = _clamp((cy - tcy) / tol + bias_y, -1.0, 1.0)
 
+        # Rotation error: drive yaw to square the target up (er -> 0). Uses the raw
+        # detector rotation (already in [-rot_norm, rot_norm]); not EMA-smoothed to
+        # avoid wrap artifacts near the +/-45deg symmetry boundary (the loop drives
+        # away from that boundary anyway).
+        er = _clamp(float(obs.blue_rotation_deg) / m.rot_norm_deg, -1.0, 1.0)
+
         # Size error: anchored to the on-station apparent size so es == 0 when
         # blue_fraction == nominal, for ANY calibration. We compare the metric-
         # ruler footprint (blue_cm / fraction) against the on-station footprint
@@ -378,6 +388,7 @@ class TransectPolicy:
             ex=ex,
             ey=ey,
             es=es,
+            er=er,
             violation=violation,
             confidence=confidence,
             ts=ts,

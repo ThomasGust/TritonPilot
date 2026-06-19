@@ -61,7 +61,12 @@ def default_receiver_factory(
             name="transect-cv", codec=codec, port=port, mode="raw",
             width=width, height=height, latency_ms=latency_ms,
             channel_order=channel_order, bind_address=bind_address,
-            extra={"receiver_kill_port_users": bool(kill_port_users)},
+            extra={
+                "receiver_kill_port_users": bool(kill_port_users),
+                # Negotiate against any decoded colorimetry + rescale if needed, so
+                # the CV pull doesn't "no-frames" on strict raw caps.
+                "raw_caps_loose": True,
+            },
         ))
 
     return _make
@@ -82,6 +87,8 @@ class TransectVisionSource:
         model: Optional[TransectModel] = None,
         mirror_setter: Optional[Callable[[bool], None]] = None,
         target_fps: float = 15.0,
+        mirror_retry_interval_s: float = 1.0,
+        receiver_restart_interval_s: float = 4.0,
         name: str = "transect-cv",
     ):
         self.width = int(width)
@@ -93,6 +100,10 @@ class TransectVisionSource:
         self.policy = policy or TransectPolicy(model or TransectModel())
         self._mirror_setter = mirror_setter
         self._period = 1.0 / max(1e-3, float(target_fps))
+        self._mirror_retry_interval_s = max(0.0, float(mirror_retry_interval_s))
+        self._last_mirror_attempt_mono = 0.0
+        self._receiver_restart_interval_s = max(0.0, float(receiver_restart_interval_s))
+        self._last_receiver_restart_mono = 0.0
         self._name = name
 
         self._receiver: Optional[_Receiver] = None
@@ -101,9 +112,28 @@ class TransectVisionSource:
         self._lock = threading.Lock()
         self._last_seq: Optional[int] = None
         self._warned_size = False
+        # Health stats (read from the GUI thread for the status line).
+        self._stats_lock = threading.Lock()
+        self._frames = 0
+        self._fps = 0.0
+        self._last_frame_mono: Optional[float] = None
+        self._started_mono: Optional[float] = None
 
     def is_running(self) -> bool:
         return self._thread is not None and self._thread.is_alive()
+
+    def stats(self) -> dict:
+        """Thread-safe snapshot for a UI status line."""
+        now = time.monotonic()
+        with self._stats_lock:
+            last = self._last_frame_mono
+            return {
+                "running": self.is_running(),
+                "frames": self._frames,
+                "fps": self._fps,
+                "last_frame_age_s": (now - last) if last is not None else None,
+                "age_since_start_s": (now - self._started_mono) if self._started_mono else None,
+            }
 
     def start(self) -> None:
         with self._lock:
@@ -111,18 +141,20 @@ class TransectVisionSource:
                 return
             self._stop.clear()
             self._last_seq = None
+            with self._stats_lock:
+                self._frames = 0
+                self._fps = 0.0
+                self._last_frame_mono = None
+                self._started_mono = time.monotonic()
             self.policy.reset()
             try:
                 self.detector.reset()
             except Exception:
                 pass
-            if self._mirror_setter is not None:
-                try:
-                    self._mirror_setter(True)
-                except Exception as exc:
-                    logger.warning("[%s] mirror enable failed: %s", self._name, exc)
+            self._ensure_mirror(force=True)
             self._receiver = self._receiver_factory()
             self._receiver.start()
+            self._last_receiver_restart_mono = time.monotonic()
             self._thread = threading.Thread(target=self._run, name=self._name, daemon=True)
             self._thread.start()
             logger.info("[%s] started (%dx%d)", self._name, self.width, self.height)
@@ -146,13 +178,69 @@ class TransectVisionSource:
                 logger.debug("[%s] mirror disable: %s", self._name, exc)
         logger.info("[%s] stopped", self._name)
 
-    def _run(self) -> None:
-        receiver = self._receiver
-        if receiver is None:
+    def _ensure_mirror(self, *, force: bool = False) -> None:
+        if self._mirror_setter is None:
             return
+        now = time.monotonic()
+        if not force:
+            if self._mirror_retry_interval_s <= 0.0:
+                return
+            if now - self._last_mirror_attempt_mono < self._mirror_retry_interval_s:
+                return
+        self._last_mirror_attempt_mono = now
+        try:
+            self._mirror_setter(True)
+        except Exception as exc:
+            logger.warning("[%s] mirror enable failed: %s", self._name, exc)
+
+    def _mirror_needs_refresh(self, now: float) -> bool:
+        with self._stats_lock:
+            frames = self._frames
+            last = self._last_frame_mono
+        if frames <= 0:
+            return True
+        return last is not None and now - last > 2.0
+
+    def _receiver_needs_restart(self, now: float) -> bool:
+        if self._receiver_restart_interval_s <= 0.0:
+            return False
+        if now - self._last_receiver_restart_mono < self._receiver_restart_interval_s:
+            return False
+        with self._stats_lock:
+            frames = self._frames
+            last = self._last_frame_mono
+            started = self._started_mono
+        if frames <= 0 and started is not None:
+            return now - started >= self._receiver_restart_interval_s
+        return last is not None and now - last > max(2.0, self._receiver_restart_interval_s)
+
+    def _restart_receiver(self) -> None:
+        with self._lock:
+            if self._stop.is_set():
+                return
+            old = self._receiver
+            if old is not None:
+                try:
+                    old.stop()
+                except Exception as exc:
+                    logger.debug("[%s] receiver restart stop: %s", self._name, exc)
+            self._last_seq = None
+            self._receiver = self._receiver_factory()
+            self._receiver.start()
+            self._last_receiver_restart_mono = time.monotonic()
+        logger.info("[%s] restarted raw receiver while waiting for frames", self._name)
+
+    def _run(self) -> None:
         while not self._stop.is_set():
             t0 = time.monotonic()
+            if self._mirror_needs_refresh(t0):
+                self._ensure_mirror(force=False)
+            if self._receiver_needs_restart(t0):
+                self._restart_receiver()
             try:
+                receiver = self._receiver
+                if receiver is None:
+                    return
                 pkt = receiver.latest_frame_packet()
             except Exception as exc:
                 logger.debug("[%s] read failed: %s", self._name, exc)
@@ -173,6 +261,15 @@ class TransectVisionSource:
                 )
                 self._warned_size = True
             return
+        now = time.monotonic()
+        with self._stats_lock:
+            self._frames += 1
+            if self._last_frame_mono is not None:
+                dt = now - self._last_frame_mono
+                if dt > 0:
+                    inst = 1.0 / dt
+                    self._fps = inst if self._fps <= 0 else 0.3 * inst + 0.7 * self._fps
+            self._last_frame_mono = now
         try:
             frame = np.frombuffer(data, np.uint8).reshape((self.height, self.width, 3)).copy()
             obs = self.detector.detect(frame)

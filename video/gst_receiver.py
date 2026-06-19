@@ -602,13 +602,21 @@ class ReceiverProcess:
         return [decoder]
 
     def _raw_caps(self, cfg: RxConfig, *, include_size: bool) -> str:
+        # ``raw_caps_loose`` (opt-in) drops the fixed colorimetry/range fields so
+        # the appsink negotiates with any decoded color metadata. The strict caps
+        # otherwise cause "not-negotiated" (zero frames) unless the source's
+        # colorimetry matches exactly -- fine for the known display feed, but the
+        # CV pull just wants BGR bytes, not exact color science.
+        loose = bool(cfg.extra.get("raw_caps_loose"))
         parts = ["video/x-raw", "format=BGR"]
         if include_size:
             parts.extend([f"width={cfg.width}", f"height={cfg.height}"])
-        parts.extend(["colorimetry=1:4:0:0", "range=full"])
+        if not loose:
+            parts.extend(["colorimetry=1:4:0:0", "range=full"])
         return ",".join(parts)
 
     def _raw_output_chain(self, cfg: RxConfig) -> list[str]:
+        loose = bool(cfg.extra.get("raw_caps_loose"))
         output_fps = self._extra_int(
             cfg.extra,
             "receiver_output_fps",
@@ -621,11 +629,12 @@ class ReceiverProcess:
             except Exception:
                 source_fps = 0
             if source_fps <= 0 or output_fps < source_fps:
+                color = "" if loose else ",colorimetry=1:4:0:0,range=full"
                 return [
                     "videorate", "drop-only=true", f"max-rate={output_fps}",
                     "!", (
                         f"video/x-raw,format=BGR,width={cfg.width},height={cfg.height},"
-                        f"framerate={output_fps}/1,colorimetry=1:4:0:0,range=full"
+                        f"framerate={output_fps}/1{color}"
                     ),
                 ]
         return [self._raw_caps(cfg, include_size=True)]

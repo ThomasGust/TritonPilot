@@ -577,6 +577,21 @@ class VideoTabs(QWidget):
             if name not in visible:
                 self._stop_stream_widget(name)
 
+    def is_stop_hidden_streams_enabled(self) -> bool:
+        return bool(self._stop_hidden_streams_enabled)
+
+    def set_stop_hidden_streams(self, enabled: bool) -> None:
+        """Toggle stopping the ROV streams of hidden panes.
+
+        The transect tab turns this on so only the arm camera streams -- freeing
+        the shared USB2 bus + topside decode for the CV feed. Restoring the pilot
+        layout restarts the other streams. (No effect if hidden streams are kept
+        warm via TRITON_VIDEO_WARM_HIDDEN_STREAMS.)
+        """
+        self._stop_hidden_streams_enabled = bool(enabled)
+        if self._stop_hidden_streams_enabled:
+            self._stop_hidden_streams()
+
     def _ensure_stream_started(self, name: str) -> None:
         cont = self._containers.get(name)
         if cont is None:

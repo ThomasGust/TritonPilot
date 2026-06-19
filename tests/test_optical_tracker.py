@@ -16,7 +16,7 @@ def test_no_lock_payload_is_minimal_and_invalid():
 
 
 def test_valid_payload_has_full_schema_and_clamps():
-    err = VisualTargetError(valid=True, ex=2.0, ey=-2.0, es=0.5, violation=3.0, confidence=0.9, ts=123.0)
+    err = VisualTargetError(valid=True, ex=2.0, ey=-2.0, es=0.5, er=-2.0, violation=3.0, confidence=0.9, ts=123.0)
     payload = err.to_visual_payload()
     assert payload == {
         "valid": True,
@@ -24,6 +24,7 @@ def test_valid_payload_has_full_schema_and_clamps():
         "ex": 1.0,        # clamped to [-1, 1]
         "ey": -1.0,
         "es": 0.5,
+        "er": -1.0,        # clamped to [-1, 1]
         "violation": 1.0,  # clamped to [0, 1]
         "confidence": 0.9,
     }
