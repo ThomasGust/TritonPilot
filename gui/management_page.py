@@ -6,6 +6,7 @@ import time
 
 from PyQt6.QtCore import QTimer, Qt, pyqtSignal
 from PyQt6.QtWidgets import (
+    QCheckBox,
     QDoubleSpinBox,
     QFormLayout,
     QFrame,
@@ -109,9 +110,12 @@ class ManagementPage(QWidget):
 
     rpc_result_sig = pyqtSignal(dict)
 
-    def __init__(self, endpoint: str = MANAGEMENT_RPC_ENDPOINT, parent=None):
+    def __init__(self, endpoint: str = MANAGEMENT_RPC_ENDPOINT, parent=None, *, pilot_svc=None):
         super().__init__(parent)
         self.endpoint = str(endpoint)
+        # Topside pilot publisher: used to stream LIVE arm-tuning overrides (the
+        # persistent save still goes through the management RPC).
+        self._pilot_svc = pilot_svc
         self._svc = ManagementRpcService(
             endpoint=self.endpoint,
             on_result=self._on_rpc_result_from_thread,
@@ -127,6 +131,7 @@ class ManagementPage(QWidget):
 
         self._config_spins: dict[str, QDoubleSpinBox] = {}
         self._status_labels: dict[str, QLabel] = {}
+        self._arm_tune_checks: dict[str, QCheckBox] = {}
 
         self._build_ui()
         self.rpc_result_sig.connect(self._handle_rpc_result)
@@ -274,6 +279,8 @@ class ManagementPage(QWidget):
         service_card.body.addLayout(service_buttons)
         root.addWidget(service_card)
 
+        root.addWidget(self._build_arm_tuning_card())
+
         config_card = _SectionCard(
             "Config Values",
             "Only a selected set of safe fields is exposed here. Values are saved immediately on the ROV and typically require a TritonOS restart to fully apply.",
@@ -311,6 +318,94 @@ class ManagementPage(QWidget):
         if suffix:
             spin.setSuffix(suffix)
         return spin
+
+    def _build_arm_tuning_card(self) -> "_SectionCard":
+        card = _SectionCard(
+            "Arm Tuning (Live)",
+            "Differential-wrist inverts and neutral, streamed to the ROV instantly over "
+            "the control link -- no restart. Use these to un-swap pitch/roll and fix "
+            "direction. 'Reset' clears the live overrides; 'Save to ROV config' writes "
+            "them to rov_config.py (TritonOS restart required to persist).",
+        )
+        check_specs = [
+            ("right_invert", "Invert RIGHT servo (un-swap pitch / roll)"),
+            ("left_invert", "Invert LEFT servo"),
+            ("pitch_invert", "Invert pitch direction"),
+            ("yaw_invert", "Invert wrist direction"),
+        ]
+        for key, label in check_specs:
+            cb = QCheckBox(label)
+            cb.toggled.connect(lambda checked, k=key: self._on_arm_tune_invert(k, checked))
+            card.body.addWidget(cb)
+            self._arm_tune_checks[key] = cb
+
+        form = QFormLayout()
+        form.setContentsMargins(0, 6, 0, 0)
+        form.setSpacing(8)
+        self._arm_tune_neutral_spin = self._make_spinbox(0.0, 90.0, 1.0, 1, suffix=" deg")
+        self._set_spin_value(self._arm_tune_neutral_spin, 25.0)
+        self._arm_tune_neutral_spin.valueChanged.connect(
+            lambda v: self._on_arm_tune_value("pitch_neutral_deg", v)
+        )
+        form.addRow("Pitch neutral", self._arm_tune_neutral_spin)
+        card.body.addLayout(form)
+
+        buttons = QHBoxLayout()
+        buttons.setSpacing(8)
+        self.arm_tune_reset_btn = QPushButton("Reset (use config)")
+        self.arm_tune_reset_btn.clicked.connect(self._reset_arm_tune)
+        self.arm_tune_save_btn = QPushButton("Save to ROV config")
+        self.arm_tune_save_btn.clicked.connect(self._save_arm_tune_config)
+        buttons.addWidget(self.arm_tune_reset_btn)
+        buttons.addWidget(self.arm_tune_save_btn)
+        buttons.addStretch(1)
+        card.body.addLayout(buttons)
+
+        if self._pilot_svc is None:
+            for cb in self._arm_tune_checks.values():
+                cb.setEnabled(False)
+            self._arm_tune_neutral_spin.setEnabled(False)
+            self.arm_tune_reset_btn.setEnabled(False)
+        return card
+
+    def _on_arm_tune_invert(self, key: str, checked: bool) -> None:
+        if self._pilot_svc is None:
+            return
+        try:
+            self._pilot_svc.set_arm_tune(key, -1.0 if checked else 1.0)
+        except Exception:
+            pass
+
+    def _on_arm_tune_value(self, key: str, value) -> None:
+        if self._pilot_svc is None:
+            return
+        try:
+            self._pilot_svc.set_arm_tune(key, float(value))
+        except Exception:
+            pass
+
+    def _reset_arm_tune(self) -> None:
+        if self._pilot_svc is not None:
+            try:
+                self._pilot_svc.clear_arm_tune()
+            except Exception:
+                pass
+        for cb in self._arm_tune_checks.values():
+            cb.blockSignals(True)
+            cb.setChecked(False)
+            cb.blockSignals(False)
+        self._set_spin_value(self._arm_tune_neutral_spin, 25.0)
+        self._set_feedback("Arm tuning overrides cleared; ROV using rov_config values.", tone="info")
+
+    def _save_arm_tune_config(self) -> None:
+        updates = {
+            "GRIPPER_LEFT_INVERT": -1.0 if self._arm_tune_checks["left_invert"].isChecked() else 1.0,
+            "GRIPPER_RIGHT_INVERT": -1.0 if self._arm_tune_checks["right_invert"].isChecked() else 1.0,
+            "GRIPPER_PITCH_INVERT": -1.0 if self._arm_tune_checks["pitch_invert"].isChecked() else 1.0,
+            "GRIPPER_YAW_INVERT": -1.0 if self._arm_tune_checks["yaw_invert"].isChecked() else 1.0,
+            "GRIPPER_PITCH_NEUTRAL_DEG": float(self._arm_tune_neutral_spin.value()),
+        }
+        self._queue_request("set_config", {"updates": updates}, request_meta={"refresh_after_success": True})
 
     def _on_rpc_result_from_thread(self, result: dict) -> None:
         self.rpc_result_sig.emit(result)
@@ -478,6 +573,8 @@ class ManagementPage(QWidget):
 
         has_enabled_config_field = any(spin.isEnabled() for spin in self._config_spins.values())
         self.save_config_btn.setEnabled((not busy) and can_set_config and has_enabled_config_field)
+        if hasattr(self, "arm_tune_save_btn"):
+            self.arm_tune_save_btn.setEnabled((not busy) and can_set_config)
 
         if not has_state:
             self.save_sensor_offset_btn.setEnabled(False)
@@ -488,6 +585,8 @@ class ManagementPage(QWidget):
             self.update_restart_btn.setEnabled(False)
             self.restart_service_btn.setEnabled(False)
             self.save_config_btn.setEnabled(False)
+            if hasattr(self, "arm_tune_save_btn"):
+                self.arm_tune_save_btn.setEnabled(False)
 
     def _save_sensor_offset(self) -> None:
         self._queue_request(

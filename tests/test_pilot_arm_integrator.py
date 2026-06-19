@@ -65,6 +65,26 @@ def test_arm_gain_scales_speed():
     assert moved_fast == pytest.approx(2.0 * moved_slow)
 
 
+def test_arm_tune_overrides_ride_in_modes():
+    svc = _svc("arm_tune")
+    assert svc.current_arm_tune() == {}
+
+    svc.set_arm_tune("right_invert", -1.0)
+    svc.set_arm_tune("pitch_neutral_deg", 30.0)
+    svc.set_arm_tune("bogus_key", 5.0)  # ignored
+
+    tune = svc.current_modes()["arm_tune"]
+    assert tune["right_invert"] == -1.0
+    assert tune["pitch_neutral_deg"] == 30.0
+    assert "bogus_key" not in tune
+
+    svc.set_arm_tune("right_invert", None)  # clear one key
+    assert "right_invert" not in svc.current_arm_tune()
+
+    svc.clear_arm_tune()
+    assert svc.current_arm_tune() == {}
+
+
 def test_clear_keyboard_intent_stops_motion():
     svc = _svc("arm_clear")
     svc.set_arm_keyboard_intent(1.0, 1.0)

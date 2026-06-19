@@ -1251,7 +1251,7 @@ class MainWindow(QMainWindow):
         hold_outer.addWidget(self.hold_test_panel, 1)
         self._page_stack.addWidget(self._hold_test_page)
 
-        self._management_page = ManagementPage(endpoint=MANAGEMENT_RPC_ENDPOINT)
+        self._management_page = ManagementPage(endpoint=MANAGEMENT_RPC_ENDPOINT, pilot_svc=self.pilot_svc)
         self._page_stack.addWidget(self._management_page)
 
         self._raw_sensor_page = self.raw_sensor_page

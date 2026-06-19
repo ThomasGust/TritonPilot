@@ -181,6 +181,8 @@ class PilotPublisherService:
             # Compatibility alias for older TritonOS builds and recordings.
             "t200_wrist_gain": float(self._back_gripper_gain),
             "arm_gain": float(self._arm_gain),
+            # Live differential-arm tuning overrides (empty = ROV uses rov_config).
+            "arm_tune": {},
         }
         self._prev_buttons: Optional[PilotButtons] = None
 
@@ -341,6 +343,42 @@ class PilotPublisherService:
             self._emit_status(self._status_payload(controller="connected"))
         return changed
 
+    # --- live differential-arm tuning -------------------------------------
+    def set_arm_tune(self, key: str, value) -> None:
+        """Set one live arm-tuning override (streamed in modes["arm_tune"]).
+
+        The ROV applies these per-frame on top of its rov_config defaults, so
+        inverts / neutral / range can be dialed in without a TritonOS restart.
+        Pass ``value=None`` to clear that key (fall back to rov_config).
+        """
+        valid = {
+            "left_invert", "right_invert", "pitch_invert", "yaw_invert",
+            "pitch_neutral_deg", "wrist_neutral_deg", "servo_range_deg",
+            "pitch_span_deg", "wrist_span_deg",
+        }
+        k = str(key or "").strip()
+        if k not in valid:
+            return
+        with self._mode_lock:
+            tune = dict(self._modes.get("arm_tune") or {})
+            if value is None:
+                tune.pop(k, None)
+            else:
+                try:
+                    tune[k] = float(value)
+                except Exception:
+                    return
+            self._modes["arm_tune"] = tune
+
+    def clear_arm_tune(self) -> None:
+        """Drop all arm-tuning overrides so the ROV uses its rov_config values."""
+        with self._mode_lock:
+            self._modes["arm_tune"] = {}
+
+    def current_arm_tune(self) -> dict:
+        with self._mode_lock:
+            return dict(self._modes.get("arm_tune") or {})
+
 
     @staticmethod
     def _clamp_unit(x: float) -> float:
@@ -479,6 +517,9 @@ class PilotPublisherService:
     @staticmethod
     def _copy_modes_payload(modes: dict) -> dict:
         out = dict(modes or {})
+        tune = out.get("arm_tune")
+        if isinstance(tune, dict):
+            out["arm_tune"] = dict(tune)
         ap = out.get("autopilot")
         if isinstance(ap, dict):
             ap_copy = dict(ap)
