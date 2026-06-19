@@ -13,6 +13,12 @@ from tracking.optical_tracker import (
     VisualTargetError,
     station_keep_modes,
 )
+from tracking.transect_policy import (
+    TransectEstimate,
+    TransectModel,
+    TransectObservation,
+    TransectPolicy,
+)
 
 __all__ = [
     "VisualTargetError",
@@ -20,4 +26,8 @@ __all__ = [
     "OpticalTracker",
     "NullOpticalTracker",
     "station_keep_modes",
+    "TransectModel",
+    "TransectObservation",
+    "TransectEstimate",
+    "TransectPolicy",
 ]
