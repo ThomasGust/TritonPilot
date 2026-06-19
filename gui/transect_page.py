@@ -14,10 +14,30 @@ class SquareVideoHost(QFrame):
         self.setObjectName("transectSquareHost")
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
         self._widget: QWidget | None = None
+        # Optional autopilot overlay layered above the video (shown only while the
+        # transect CV is running); kept square-aligned with the video below it.
+        self._overlay: QWidget | None = None
         self._placeholder = QLabel("Video unavailable.", self)
         self._placeholder.setObjectName("videoPanePlaceholder")
         self._placeholder.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self._placeholder.setWordWrap(True)
+
+    def set_overlay(self, widget: QWidget | None) -> None:
+        self._overlay = widget
+        if widget is not None:
+            widget.setParent(self)
+            widget.hide()
+        self._layout_child()
+
+    def show_overlay(self) -> None:
+        if self._overlay is not None:
+            self._layout_child()
+            self._overlay.show()
+            self._overlay.raise_()
+
+    def hide_overlay(self) -> None:
+        if self._overlay is not None:
+            self._overlay.hide()
 
     def current_widget(self) -> QWidget | None:
         return self._widget
@@ -63,6 +83,10 @@ class SquareVideoHost(QFrame):
                 except Exception:
                     pass
         self._placeholder.setGeometry(rect)
+        if self._overlay is not None:
+            self._overlay.setGeometry(rect)
+            if self._overlay.isVisible():
+                self._overlay.raise_()
 
     def resizeEvent(self, event) -> None:
         super().resizeEvent(event)
@@ -130,3 +154,13 @@ class TransectPage(QWidget):
     def attach_video_placeholder(self, text: str) -> None:
         self.square_host.set_placeholder_text(text)
         self.square_host.set_widget(None)
+
+    def set_overlay_widget(self, widget: QWidget | None) -> None:
+        """Install the autopilot overlay view (layered above the video)."""
+        self.square_host.set_overlay(widget)
+
+    def show_overlay(self) -> None:
+        self.square_host.show_overlay()
+
+    def hide_overlay(self) -> None:
+        self.square_host.hide_overlay()

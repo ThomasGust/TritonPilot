@@ -75,7 +75,14 @@ from recording.save_location import DEFAULT_RECORDINGS_DIR, SaveLocation, is_ava
 from stereo.capture import StereoCaptureSession, default_stereo_session_name, safe_filename_component
 from stereo.pairs import load_stereo_pairs
 from recording.video_recorder import VideoRecorder, VideoRecorderConfig
-from tracking import NullOpticalTracker, StationKeepCommand, VisualTargetError
+from tracking import (
+    NullOpticalTracker,
+    StationKeepCommand,
+    TransectModel,
+    TransectPolicy,
+    VisualTargetError,
+)
+from gui.transect_overlay_view import TransectOverlayView
 from gui.direct_gst_video_widget import (
     _resolve_windows_host as resolve_video_host,
     _start_kwargs as video_start_kwargs,
@@ -589,6 +596,11 @@ class MainWindow(QMainWindow):
                 self._reverse_page_owns_mode = False
                 self._set_reverse_mode(False, announce=False)
         if previous_page == "transect" and page_name != "transect":
+            self._stop_transect_cv()
+            try:
+                self._transect_page.hide_overlay()
+            except Exception:
+                pass
             if self.video_panel is not None:
                 try:
                     self._transect_page.detach_video_panel(self.video_panel)
@@ -633,6 +645,12 @@ class MainWindow(QMainWindow):
                 self._resume_video_panel()
                 self._transect_page.attach_video_panel(self.video_panel)
                 self._apply_transect_camera_view()
+            # Run the live CV + annotated overlay while this tab is open. When no
+            # ROV is connected this is a no-op and the normal video shows through.
+            if self._start_transect_cv():
+                self._transect_page.show_overlay()
+            else:
+                self._transect_page.hide_overlay()
             self._page_stack.setCurrentWidget(self._transect_page)
         elif page_name == "hold_test":
             if self.video_panel is not None:
@@ -726,6 +744,107 @@ class MainWindow(QMainWindow):
     def _on_transect_camera_changed(self, name: str) -> None:
         if getattr(self, "_active_page_name", "") == "transect":
             self._apply_transect_camera_view(name)
+            # Re-point the CV source at the newly selected camera.
+            if self._start_transect_cv():
+                self._transect_page.show_overlay()
+            else:
+                self._transect_page.hide_overlay()
+
+    def _start_transect_cv(self) -> bool:
+        """Start the live transect CV source on the selected camera. Returns started.
+
+        Inert/safe when no ROV is connected (no mirror, no receiver) so the normal
+        Direct3D transect view is shown instead. The annotated overlay is layered
+        on top only while this is running.
+        """
+        cam_mgr = getattr(self, "cam_mgr", None)
+        if cam_mgr is None or getattr(cam_mgr, "rov", None) is None:
+            return False
+        try:
+            stream = str(self._transect_page.current_stream_name() or "").strip()
+        except Exception:
+            stream = ""
+        if not stream:
+            return False
+        if self._transect_cv_source is not None and self._transect_cv_stream == stream:
+            return True
+        self._stop_transect_cv()
+        try:
+            opts = video_stream_options(cam_mgr, stream)
+            host = resolve_video_host(cam_mgr, opts)
+            kwargs = video_start_kwargs(opts, host=host)
+            port = int(kwargs.get("port", 5000))
+            mirror_port = port + 300  # distinct from the recorder mirror (+200)
+            tx_is_h264 = (
+                str(kwargs.get("video_format", "")).lower() == "h264"
+                or str(kwargs.get("encode", "")).lower() == "h264"
+            )
+            codec = "h264" if tx_is_h264 else "jpeg"
+            width = int(opts.get("width", 1920) or 1920)
+            height = int(opts.get("height", 1080) or 1080)
+            bind = host if bool(opts.get("bind_receiver_to_host", True)) else "0.0.0.0"
+        except Exception as exc:
+            logger.debug("transect CV: could not resolve stream '%s': %s", stream, exc)
+            return False
+
+        from tracking.transect_detector import StubTransectDetector
+        from tracking.transect_source import TransectVisionSource, default_receiver_factory
+
+        def _mirror(add: bool) -> None:
+            try:
+                self._set_stream_mirror(stream, mirror_port, add=add)
+            except Exception as exc:
+                logger.debug("transect CV mirror %s failed: %s", "add" if add else "remove", exc)
+
+        try:
+            source = TransectVisionSource(
+                width=width, height=height,
+                on_estimate=self._on_transect_estimate,
+                receiver_factory=default_receiver_factory(
+                    port=mirror_port, codec=codec, width=width, height=height, bind_address=bind,
+                ),
+                detector=StubTransectDetector(),
+                policy=self._transect_policy,
+                mirror_setter=_mirror,
+                name=f"transect-cv:{stream}",
+            )
+            source.start()
+        except Exception as exc:
+            logger.warning("transect CV start failed: %s", exc)
+            return False
+        self._transect_cv_source = source
+        self._transect_cv_stream = stream
+        trace_event("transect_cv_started", stream=stream, mirror_port=mirror_port, codec=codec)
+        return True
+
+    def _stop_transect_cv(self) -> None:
+        source = self._transect_cv_source
+        self._transect_cv_source = None
+        self._transect_cv_stream = None
+        if source is not None:
+            try:
+                source.stop()
+            except Exception as exc:
+                logger.debug("transect CV stop failed: %s", exc)
+            trace_event("transect_cv_stopped")
+
+    def _on_transect_estimate(self, estimate, observation, frame) -> None:
+        """CV worker-thread callback: paint the overlay, then publish if engaged."""
+        try:
+            from tracking.transect_overlay import draw_transect_overlay
+
+            draw_transect_overlay(frame, self._transect_model, estimate, observation)
+            self._transect_overlay_view.submit_frame(frame)  # thread-safe (queued)
+        except Exception as exc:
+            logger.debug("transect overlay render failed: %s", exc)
+        # Only stream the visual target to the ROV once the pilot has engaged
+        # Optical Hold; otherwise this is a passive lock preview.
+        try:
+            svc = getattr(self, "pilot_svc", None)
+            if svc is not None and bool(svc.is_station_keep_enabled()):
+                self.publish_visual_target(estimate.error)
+        except Exception as exc:
+            logger.debug("transect publish failed: %s", exc)
 
     def _apply_transect_camera_view(self, name: str | None = None) -> None:
         if self.video_panel is None:
@@ -807,6 +926,15 @@ class MainWindow(QMainWindow):
         # with it is safe (the ROV controller stays inert without a valid lock).
         self._station_keep_act = None
         self._optical_tracker = NullOpticalTracker()
+        # Transect autopilot CV: geometry model + policy + annotated overlay view,
+        # fed by a live raw frame source that runs only while the Transect tab is
+        # open (lazily created; the detector is a stub until the CV lands). The
+        # view layers over the transect video when the source is actually running.
+        self._transect_model = TransectModel()
+        self._transect_policy = TransectPolicy(self._transect_model)
+        self._transect_overlay_view = TransectOverlayView()
+        self._transect_cv_source = None
+        self._transect_cv_stream: str | None = None
 
         self._link_lbl = QLabel("Heartbeat: (no data)")
         self.statusBar().addPermanentWidget(self._link_lbl)
@@ -1212,6 +1340,7 @@ class MainWindow(QMainWindow):
         if transect_default:
             self._transect_page.set_current_stream(transect_default, emit=False)
         self._transect_page.cameraSelectionChanged.connect(self._on_transect_camera_changed)
+        self._transect_page.set_overlay_widget(self._transect_overlay_view)
         if self.video_panel is None:
             self._transect_page.attach_video_placeholder("Video unavailable.")
         self._page_stack.addWidget(self._transect_page)
@@ -3896,6 +4025,10 @@ class MainWindow(QMainWindow):
                     timer.stop()
             except Exception:
                 pass
+        try:
+            self._stop_transect_cv()
+        except Exception:
+            pass
         try:
             if self._stereo_recording:
                 self._stereo_recording = False

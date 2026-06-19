@@ -1355,6 +1355,71 @@ def test_yaw_hold_status_uses_rov_runtime_target(monkeypatch, tmp_path):
         app.processEvents()
 
 
+def test_transect_cv_inert_without_rov(monkeypatch, tmp_path):
+    app = _app()
+    streams_path = tmp_path / "streams.json"
+    streams_path.write_text("{}", encoding="utf-8")
+
+    monkeypatch.setattr(main_window, "QSettings", lambda *args, **kwargs: _FakeSettings())
+    monkeypatch.setattr(main_window, "PilotPublisherService", _FakePilotService)
+    monkeypatch.setattr(main_window, "SensorSubscriberService", _FakeSensorService)
+    monkeypatch.setattr(main_window, "RemoteCameraManager", _FakeRemoteCameraManager)
+    monkeypatch.setattr(main_window, "VideoTabs", _FakeVideoPanel)
+    monkeypatch.setattr(main_window, "HoldTestPanel", _SimplePage)
+    monkeypatch.setattr(main_window, "ManagementPage", _SimplePage)
+    monkeypatch.setattr(main_window.threading, "Thread", _NoopThread)
+
+    win = main_window.MainWindow(str(streams_path))
+    try:
+        app.processEvents()
+        # The fake cam manager has no .rov, so the CV source must NOT start
+        # (no GStreamer spawn / mirror) and the overlay stays hidden -- the
+        # normal Direct3D transect view shows through.
+        win._set_center_page("transect", announce=False)
+        app.processEvents()
+        assert win._transect_cv_source is None
+        assert win._start_transect_cv() is False
+        assert win._transect_overlay_view.isVisible() is False
+    finally:
+        win.close()
+        app.processEvents()
+
+
+def test_transect_estimate_paints_overlay_view(monkeypatch, tmp_path):
+    app = _app()
+    streams_path = tmp_path / "streams.json"
+    streams_path.write_text("{}", encoding="utf-8")
+
+    monkeypatch.setattr(main_window, "QSettings", lambda *args, **kwargs: _FakeSettings())
+    monkeypatch.setattr(main_window, "PilotPublisherService", _FakePilotService)
+    monkeypatch.setattr(main_window, "SensorSubscriberService", _FakeSensorService)
+    monkeypatch.setattr(main_window, "RemoteCameraManager", _FakeRemoteCameraManager)
+    monkeypatch.setattr(main_window, "VideoTabs", _FakeVideoPanel)
+    monkeypatch.setattr(main_window, "HoldTestPanel", _SimplePage)
+    monkeypatch.setattr(main_window, "ManagementPage", _SimplePage)
+    monkeypatch.setattr(main_window.threading, "Thread", _NoopThread)
+
+    from tracking import TransectObservation, TransectPolicy
+
+    win = main_window.MainWindow(str(streams_path))
+    try:
+        app.processEvents()
+        model = win._transect_model
+        obs = TransectObservation(
+            blue_found=True, blue_cx=model.target_cx, blue_cy=model.target_cy,
+            blue_fraction=model.nominal_blue_fraction, fit_quality=0.95,
+        )
+        est = TransectPolicy(model).evaluate(obs)
+        frame = np.zeros((48, 64, 3), np.uint8)
+        win._on_transect_estimate(est, obs, frame)  # bakes overlay + submits frame
+        app.processEvents()
+        assert win._transect_overlay_view._qimage is not None
+        assert win._transect_overlay_view._qimage.width() == 64
+    finally:
+        win.close()
+        app.processEvents()
+
+
 def test_depth_hold_status_uses_rov_runtime_target(monkeypatch, tmp_path):
     app = _app()
     streams_path = tmp_path / "streams.json"
