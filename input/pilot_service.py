@@ -159,11 +159,13 @@ class PilotPublisherService:
             "reverse": bool(REVERSE_MODE_DEFAULT),
             "roll_pitch_level": bool(ROLL_PITCH_LEVEL_DEFAULT),
             "yaw_hold": bool(YAW_HOLD_DEFAULT),
+            "station_keep": False,
             "autopilot": {
                 "depth": bool(DEPTH_HOLD_DEFAULT),
                 "roll": "level" if bool(ROLL_PITCH_LEVEL_DEFAULT) else "off",
                 "pitch": "level" if bool(ROLL_PITCH_LEVEL_DEFAULT) else "off",
                 "yaw": "hold" if bool(YAW_HOLD_DEFAULT) else "off",
+                "station_keep": False,
                 "targets": {},
             },
             "back_gripper_gain": float(self._back_gripper_gain),
@@ -385,6 +387,13 @@ class PilotPublisherService:
             ap_copy = dict(ap)
             targets = ap_copy.get("targets")
             ap_copy["targets"] = dict(targets) if isinstance(targets, dict) else {}
+            visual = ap_copy.get("visual")
+            if isinstance(visual, dict):
+                visual_copy = dict(visual)
+                command = visual_copy.get("command")
+                if isinstance(command, dict):
+                    visual_copy["command"] = dict(command)
+                ap_copy["visual"] = visual_copy
             out["autopilot"] = ap_copy
         return out
 
@@ -422,6 +431,7 @@ class PilotPublisherService:
         ap.setdefault("roll", "off")
         ap.setdefault("pitch", "off")
         ap.setdefault("yaw", "off")
+        ap.setdefault("station_keep", bool(self._modes.get("station_keep", False)))
         return ap
 
     def set_autopilot_axis_mode(self, axis: str, mode: str) -> bool:
@@ -555,6 +565,57 @@ class PilotPublisherService:
         new_state = not self.is_yaw_hold_enabled()
         self.set_yaw_hold_enabled(new_state)
         return new_state
+
+    # --- visual station-keeping (optical-tracking autopilot) ------------------
+    def is_station_keep_enabled(self) -> bool:
+        return bool(self.current_modes().get("station_keep", False))
+
+    def set_station_keep_enabled(self, enabled: bool) -> bool:
+        """Engage/disengage the ROV visual station-keep controller.
+
+        While engaged, the per-frame visual error/command set via
+        :meth:`set_visual_target` is published in the pilot command; the ROV
+        falls back to manual whenever there is no valid lock, so engaging it with
+        no CV running is safe (the controller stays inert).
+        """
+        enabled = bool(enabled)
+        with self._mode_lock:
+            ap = self._autopilot_modes_locked()
+            prev = bool(self._modes.get("station_keep", False))
+            ap["station_keep"] = enabled
+            if not enabled:
+                ap.pop("visual", None)  # drop any stale lock when disengaging
+            self._modes["station_keep"] = enabled
+            self._modes["autopilot"] = ap
+        changed = prev != enabled
+        if changed:
+            self._emit_status(self._status_payload(controller="connected"))
+        return changed
+
+    def toggle_station_keep(self) -> bool:
+        new_state = not self.is_station_keep_enabled()
+        self.set_station_keep_enabled(new_state)
+        return new_state
+
+    def set_visual_target(self, payload: Optional[dict]) -> None:
+        """Inject the optical tracker's per-frame error/command into the modes.
+
+        High-rate hook for the (future) CV model: it rides the normal pilot
+        frame and only affects the ROV while station-keep is engaged. Pass the
+        dict from ``VisualTargetError.to_visual_payload()`` /
+        ``StationKeepCommand.to_autopilot_modes()["autopilot"]["visual"]``.
+        ``None`` clears it (controller treats absence as no-lock).
+        """
+        with self._mode_lock:
+            ap = self._autopilot_modes_locked()
+            if payload is None:
+                ap.pop("visual", None)
+            else:
+                ap["visual"] = dict(payload)
+            self._modes["autopilot"] = ap
+
+    def clear_visual_target(self) -> None:
+        self.set_visual_target(None)
 
     def _handle_mode_edges(self, edges: dict[str, str]) -> None:
         if edges.get(self._depth_hold_toggle_button) == "down":

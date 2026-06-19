@@ -264,6 +264,7 @@ class _DirectConnectWorker(QThread):
         self.host_height = max(1, int(host_height or 1))
         self.square_crop = bool(square_crop)
         self.proc: subprocess.Popen | None = None
+        self.suppressor: "_RendererSuppressor | None" = None
 
     def run(self) -> None:
         try:
@@ -330,6 +331,14 @@ class _DirectConnectWorker(QThread):
                 startupinfo=startupinfo,
                 bufsize=0,
             )
+            # Start suppressing the renderer's top-level window immediately, on
+            # this worker thread, so it is hidden the instant it appears (before
+            # any UI-thread signal round-trip can let it flash).
+            try:
+                self.suppressor = _RendererSuppressor(self.proc)
+                self.suppressor.start()
+            except Exception:
+                self.suppressor = None
             receiver_info = {
                 "codec": codec,
             }
@@ -472,83 +481,79 @@ if os.name == "nt":
         _get_window_long = _user32.GetWindowLongW
         _set_window_long = _user32.SetWindowLongW
 
-    # WinEvent hook so we can hide the d3d11 renderer's top-level window the
-    # instant it is shown -- before it ever paints to screen -- instead of
-    # waiting for a polling timer to catch it (which lets it flash briefly).
-    _EVENT_OBJECT_SHOW = 0x8002
-    _OBJID_WINDOW = 0
-    _WINEVENT_OUTOFCONTEXT = 0x0000
-    _WinEventProcType = ctypes.WINFUNCTYPE(
-        None, ctypes.c_void_p, ctypes.c_uint, ctypes.c_void_p,
-        ctypes.c_long, ctypes.c_long, ctypes.c_uint, ctypes.c_uint,
-    )
-    try:
-        _user32.SetWinEventHook.restype = ctypes.c_void_p
-        _user32.SetWinEventHook.argtypes = [
-            ctypes.c_uint, ctypes.c_uint, ctypes.c_void_p, _WinEventProcType,
-            ctypes.c_uint, ctypes.c_uint, ctypes.c_uint,
-        ]
-        _user32.UnhookWinEvent.argtypes = [ctypes.c_void_p]
-    except Exception:
-        pass
+
+def _pid_top_level_windows(pid: int) -> list[int]:
+    """All top-level window handles owned by ``pid`` (no title filter)."""
+    if os.name != "nt" or not pid:
+        return []
+    matches: list[int] = []
+
+    @_EnumWindowsProc
+    def _callback(hwnd, _lparam):
+        proc_id = ctypes.c_ulong()
+        _user32.GetWindowThreadProcessId(hwnd, ctypes.byref(proc_id))
+        if int(proc_id.value) == int(pid):
+            matches.append(int(hwnd))
+        return True
+
+    _user32.EnumWindows(_callback, 0)
+    return matches
 
 
-class _RendererWindowHider:
-    """Hide the renderer's top-level window on show so it never flashes.
+class _RendererSuppressor:
+    """Keep the renderer's top-level window hidden until it is embedded.
 
     The d3d11videosink subprocess creates a top-level "Direct3D11 renderer"
-    window that we reparent into the Qt pane. Between creation and reparent the
-    window would briefly appear on screen. This installs a per-process WinEvent
-    hook (delivered on the GUI thread message loop) that hides the window the
-    moment it is shown; the normal embed path then adopts and re-shows it as a
-    child. Windows already embedded (WS_CHILD) are left alone so re-show events
-    during embedding don't fight the reparent.
+    window that we reparent into the Qt pane; between creation and reparent it
+    would briefly flash on screen. This runs a tight poll on its OWN thread,
+    started the instant the subprocess is spawned (off the UI thread, so a busy
+    loading->pilot transition can't delay it), hiding any top-level (non-child)
+    window the renderer process owns. Once the embed path reparents the window
+    (it becomes WS_CHILD), the suppressor leaves it alone, so the reparent's
+    re-show wins. Self-terminates when embedded, on process exit, or on timeout.
     """
 
-    def __init__(self, pid: int):
-        self._pid = int(pid or 0)
-        self._hook = None
-        self._proc = None  # keep a strong ref so the callback isn't GC'd
+    def __init__(self, proc: "subprocess.Popen", *, timeout_s: float = 15.0, interval_s: float = 0.004):
+        self._proc = proc
+        self._timeout_s = float(timeout_s)
+        self._interval_s = float(interval_s)
+        self._stop = threading.Event()
+        self._thread: threading.Thread | None = None
 
-    def install(self) -> None:
-        if os.name != "nt" or not self._pid:
+    def start(self) -> None:
+        if os.name != "nt" or self._proc is None:
             return
-        try:
-            self._proc = _WinEventProcType(self._callback)
-            self._hook = _user32.SetWinEventHook(
-                _EVENT_OBJECT_SHOW, _EVENT_OBJECT_SHOW, 0, self._proc,
-                self._pid, 0, _WINEVENT_OUTOFCONTEXT,
-            )
-        except Exception:
-            self._hook = None
-            self._proc = None
-
-    def _callback(self, _hook, event, hwnd, id_object, _id_child, _thread, _time) -> None:
-        try:
-            if not hwnd or int(id_object) != _OBJID_WINDOW:
-                return
-            length = _user32.GetWindowTextLengthW(hwnd)
-            buf = ctypes.create_unicode_buffer(length + 1)
-            _user32.GetWindowTextW(hwnd, buf, length + 1)
-            if str(buf.value or "") != "Direct3D11 renderer":
-                return
-            style = int(_get_window_long(hwnd, _GWL_STYLE))
-            if style & _WS_CHILD:
-                return  # already embedded; leave it visible
-            _user32.ShowWindow(hwnd, _SW_HIDE)
-        except Exception:
-            pass
-
-    def remove(self) -> None:
-        hook = self._hook
-        self._hook = None
-        self._proc = None
-        if os.name != "nt" or not hook:
+        pid = int(getattr(self._proc, "pid", 0) or 0)
+        if not pid:
             return
-        try:
-            _user32.UnhookWinEvent(hook)
-        except Exception:
-            pass
+        self._thread = threading.Thread(
+            target=self._run, name=f"renderer-suppress-{pid}", daemon=True
+        )
+        self._thread.start()
+
+    def stop(self) -> None:
+        self._stop.set()
+
+    def _run(self) -> None:
+        pid = int(getattr(self._proc, "pid", 0) or 0)
+        deadline = time.monotonic() + self._timeout_s
+        while not self._stop.is_set() and time.monotonic() < deadline:
+            try:
+                if self._proc.poll() is not None:
+                    return
+            except Exception:
+                return
+            try:
+                for hwnd in _pid_top_level_windows(pid):
+                    try:
+                        style = int(_get_window_long(hwnd, _GWL_STYLE))
+                        if not (style & _WS_CHILD):
+                            _user32.ShowWindow(hwnd, _SW_HIDE)
+                    except Exception:
+                        pass
+            except Exception:
+                pass
+            self._stop.wait(self._interval_s)
 
 
 def _top_level_windows_for_pid(pid: int) -> list[int]:
@@ -649,7 +654,7 @@ class DirectGstVideoWidget(QWidget):
         self._connect_worker: _DirectConnectWorker | None = None
         self._connect_attempt_active = False
         self._embedded_hwnd: int | None = None
-        self._window_hider: _RendererWindowHider | None = None
+        self._window_suppressor: "_RendererSuppressor | None" = None
         self._state = "waiting"
         self._last_error: str | None = None
         self._connected_ts = 0.0
@@ -732,33 +737,24 @@ class DirectGstVideoWidget(QWidget):
         self._connect_attempt_active = True
         self._connect_worker.start()
 
-    def _install_window_hider(self, pid: int) -> None:
-        self._remove_window_hider()
-        try:
-            hider = _RendererWindowHider(int(pid))
-            hider.install()
-            self._window_hider = hider
-        except Exception:
-            self._window_hider = None
-
-    def _remove_window_hider(self) -> None:
-        hider = self._window_hider
-        self._window_hider = None
-        if hider is not None:
+    def _remove_window_suppressor(self) -> None:
+        suppressor = self._window_suppressor
+        self._window_suppressor = None
+        if suppressor is not None:
             try:
-                hider.remove()
+                suppressor.stop()
             except Exception:
                 pass
 
     def _on_receiver_started(self, proc: subprocess.Popen, info: object = 0) -> None:
         self._proc = proc
-        # Hide the renderer window the moment it appears so it never flashes
-        # on screen before we reparent it into this pane.
-        try:
-            if proc is not None and proc.pid:
-                self._install_window_hider(int(proc.pid))
-        except Exception:
-            pass
+        # Adopt the suppressor the worker already started at spawn time (it keeps
+        # the renderer window hidden until we reparent it) so we can stop it once
+        # embedded / torn down.
+        worker = self._connect_worker
+        if worker is not None and getattr(worker, "suppressor", None) is not None:
+            self._remove_window_suppressor()
+            self._window_suppressor = worker.suppressor
         embedded_hwnd = 0
         if isinstance(info, dict):
             pass
@@ -804,7 +800,7 @@ class DirectGstVideoWidget(QWidget):
             self._embed_timer.stop()
         except Exception:
             pass
-        self._remove_window_hider()
+        self._remove_window_suppressor()
         self._proc = None
         self._embedded_hwnd = None
         self._last_error = error
@@ -877,7 +873,7 @@ class DirectGstVideoWidget(QWidget):
         if proc is not None and proc.poll() is not None:
             self._proc = None
             self._embedded_hwnd = None
-            self._remove_window_hider()
+            self._remove_window_suppressor()
             try:
                 self._embed_timer.stop()
             except Exception:
@@ -999,7 +995,7 @@ class DirectGstVideoWidget(QWidget):
 
     def shutdown(self, release_only: bool = True, *, async_release: bool = True) -> None:
         self._stop_connect_worker(async_release=bool(async_release))
-        self._remove_window_hider()
+        self._remove_window_suppressor()
         proc = self._proc
         self._proc = None
         self._embedded_hwnd = None

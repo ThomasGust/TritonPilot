@@ -75,6 +75,7 @@ from recording.save_location import DEFAULT_RECORDINGS_DIR, SaveLocation, is_ava
 from stereo.capture import StereoCaptureSession, default_stereo_session_name, safe_filename_component
 from stereo.pairs import load_stereo_pairs
 from recording.video_recorder import VideoRecorder, VideoRecorderConfig
+from tracking import NullOpticalTracker, StationKeepCommand, VisualTargetError
 from gui.direct_gst_video_widget import (
     _resolve_windows_host as resolve_video_host,
     _start_kwargs as video_start_kwargs,
@@ -315,6 +316,9 @@ class MainWindow(QMainWindow):
             self._attitude_hold_status_text,
             self._yaw_hold_status_text,
         ]
+        sk_text = self._format_station_keep_status()
+        if sk_text:
+            parts.append(sk_text)
         self._set_status(self._mode_lbl, " | ".join(parts))
         self._set_status_tone(self._mode_lbl, "alert" if self._reverse_enabled else None)
 
@@ -394,6 +398,79 @@ class MainWindow(QMainWindow):
             checked = not self._reverse_enabled
         checked = bool(checked)
         self._set_reverse_mode(checked)
+
+    # --- optical-tracking station-keep (CV-era) -------------------------------
+    def _sync_station_keep_action(self) -> None:
+        act = getattr(self, "_station_keep_act", None)
+        if act is None:
+            return
+        try:
+            enabled = bool(self.pilot_svc.is_station_keep_enabled())
+        except Exception:
+            enabled = False
+        act.blockSignals(True)
+        try:
+            act.setChecked(enabled)
+        finally:
+            act.blockSignals(False)
+
+    def _set_station_keep_enabled(self, enabled: bool) -> None:
+        enabled = bool(enabled)
+        svc = getattr(self, "pilot_svc", None)
+        if svc is None:
+            return
+        try:
+            svc.set_station_keep_enabled(enabled)
+            if not enabled and hasattr(self._optical_tracker, "reset"):
+                self._optical_tracker.reset()
+        except Exception as exc:
+            logger.exception("Station-keep toggle failed: %s", exc)
+        self._sync_station_keep_action()
+        self._refresh_drive_status()
+        self.statusBar().showMessage(
+            "Optical Hold ENGAGED (station-keep)" if enabled else "Optical Hold OFF",
+            3000,
+        )
+        trace_event("station_keep_toggle", enabled=enabled)
+
+    def _toggle_station_keep_from_ui(self, checked: bool | None = None) -> None:
+        if checked is None:
+            try:
+                checked = not bool(self.pilot_svc.is_station_keep_enabled())
+            except Exception:
+                checked = True
+        self._set_station_keep_enabled(bool(checked))
+
+    def _toggle_station_keep_from_keyboard(self) -> None:
+        try:
+            new_state = not bool(self.pilot_svc.is_station_keep_enabled())
+        except Exception:
+            new_state = True
+        self._set_station_keep_enabled(new_state)
+
+    def publish_visual_target(self, sample) -> None:
+        """Integration point for the future CV: push one tracker output to the ROV.
+
+        Accepts a :class:`VisualTargetError`, a :class:`StationKeepCommand`, or a
+        ready-made ``visual`` payload dict. Only takes effect while Optical Hold
+        is engaged; logged to the active capture's ``tracking`` stream.
+        """
+        svc = getattr(self, "pilot_svc", None)
+        if svc is None:
+            return
+        try:
+            if isinstance(sample, StationKeepCommand):
+                payload = sample.to_autopilot_modes()["autopilot"].get("visual")
+            elif isinstance(sample, VisualTargetError):
+                payload = sample.to_visual_payload()
+            elif isinstance(sample, dict) or sample is None:
+                payload = sample
+            else:
+                return
+            svc.set_visual_target(payload)
+            self.record_tracking_sample({"visual": payload})
+        except Exception as exc:
+            logger.debug("publish_visual_target failed: %s", exc)
 
     def _on_video_tab_changed(self, *_args) -> None:
         self._refresh_video_status()
@@ -725,6 +802,11 @@ class MainWindow(QMainWindow):
         self._depth_hold_status_text: str = "Depth Hold: OFF"
         self._attitude_hold_status_text: str = "RP Level: OFF"
         self._yaw_hold_status_text: str = "Yaw Hold: OFF"
+        # Optical-tracking station-keep (CV-era). The tracker is a no-lock
+        # placeholder until the real CV model is dropped in; engaging the mode
+        # with it is safe (the ROV controller stays inert without a valid lock).
+        self._station_keep_act = None
+        self._optical_tracker = NullOpticalTracker()
 
         self._link_lbl = QLabel("Heartbeat: (no data)")
         self.statusBar().addPermanentWidget(self._link_lbl)
@@ -1485,6 +1567,9 @@ class MainWindow(QMainWindow):
                     if event.key() == Qt.Key.Key_B:
                         self._toggle_recording_for_mode()
                         return True
+                    if event.key() == Qt.Key.Key_K:
+                        self._toggle_station_keep_from_keyboard()
+                        return True
                     direction = self._back_gripper_gain_shortcuts.get(event.key())
                     if direction is not None:
                         self._adjust_back_gripper_gain_from_keyboard(direction)
@@ -1612,6 +1697,31 @@ class MainWindow(QMainWindow):
         if stale:
             text += " [ATT STALE]"
         return text
+
+    def _format_station_keep_status(self) -> str:
+        """Optical-hold status for the drive bar; empty string when disengaged."""
+        svc = getattr(self, "pilot_svc", None)
+        try:
+            enabled = bool(svc.is_station_keep_enabled()) if svc is not None else False
+        except Exception:
+            enabled = False
+        if not enabled:
+            return ""
+        sk = self._last_autopilot_status.get("station_keep") if isinstance(self._last_autopilot_status, dict) else None
+        if not isinstance(sk, dict):
+            return "Optical Hold: ON (no data)"
+        if bool(sk.get("active")):
+            return "Optical Hold: ACTIVE"
+        reason = str(sk.get("reason", "")).strip().lower()
+        label = {
+            "no_lock": "NO LOCK",
+            "stale_lock": "STALE",
+            "locked_idle": "LOCK",
+            "active": "ACTIVE",
+            "disabled": "OFF",
+            "off": "ON",
+        }.get(reason, reason.upper() or "ON")
+        return f"Optical Hold: {label}"
 
     # Background thread to UI thread.
     def _on_sensor_msg_from_thread(self, msg: dict):
@@ -1749,6 +1859,12 @@ class MainWindow(QMainWindow):
                 yaw_target = self._finite_float(runtime_yaw.get("target_deg"))
                 if yaw_target is not None:
                     self._yh_target_deg = self._wrap_degrees(yaw_target)
+                # Reflect live optical-hold state (NO LOCK / ACTIVE / ...).
+                try:
+                    if self.pilot_svc.is_station_keep_enabled():
+                        self._refresh_drive_status()
+                except Exception:
+                    pass
 
             # Update a compact depth readout in the status bar.
             if typ == "external_depth":
@@ -3714,7 +3830,22 @@ class MainWindow(QMainWindow):
         file_menu = bar.addMenu("&File")
         rec_menu = bar.addMenu("&Record")
         transfer_menu = bar.addMenu("&Transfer")
+        autopilot_menu = bar.addMenu("&Autopilot")
         view_menu = bar.addMenu("&View")
+
+        # Optical-tracking station-keep (CV-era). Engaging is safe with no CV
+        # running (ROV stays inert without a valid lock). Toggle key handled in
+        # eventFilter (K) to match the other vehicle shortcuts.
+        self._station_keep_act = QAction("Optical Hold (Station-Keep)  [K]", self)
+        self._station_keep_act.setCheckable(True)
+        self._station_keep_act.setChecked(False)
+        self._station_keep_act.setToolTip(
+            "Engage the visual station-keep autopilot. Holds position in current "
+            "from the transect camera once the CV target tracker is running; "
+            "inert (falls back to manual) until then."
+        )
+        self._station_keep_act.toggled.connect(self._toggle_station_keep_from_ui)
+        autopilot_menu.addAction(self._station_keep_act)
 
         self._fullscreen_act = QAction("Full Screen", self)
         self._fullscreen_act.setCheckable(True)
