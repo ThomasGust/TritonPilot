@@ -349,9 +349,35 @@ ARM_GAIN_STEP = float(os.environ.get("TRITON_ARM_GAIN_STEP", "0.05"))
 
 # Keyboard WASD arm motion rate in normalized command units per second at 100%
 # ARM gain. Lower values make the servo target walk more slowly while a key is
-# held. The default takes about 3 seconds to cross the full normalized range at
-# 100% gain, and about 6 seconds at the default 50% ARM gain.
+# held. (Legacy name; the live default is now ARM_RATE below.)
 ARM_KEYBOARD_RAMP_RATE = float(os.environ.get("TRITON_ARM_KEYBOARD_RAMP_RATE", "0.35"))
+
+# --- Differential arm (servo wrist) input ----------------------------------
+# Publish rate for the pilot control stream (Hz). Match the ROV control loop
+# (50 Hz) to minimize manipulator latency.
+PILOT_PUBLISH_RATE_HZ = float(os.environ.get("TRITON_PILOT_PUBLISH_RATE_HZ", "50.0"))
+
+# The differential arm is driven by a centralized POSITION integrator in
+# PilotPublisherService. Two input paths feed it:
+#   - keyboard W/A/S/D (always available), and
+#   - the right stick while the modifier button is held (so it does not fight
+#     driving). While the modifier is held, the yaw/heave stick axes are zeroed
+#     so the ROV holds station while you aim the arm.
+ARM_AIM_MODIFIER_BUTTON = os.environ.get("TRITON_ARM_AIM_MODIFIER", "rb").strip().lower()
+ARM_STICK_PITCH_AXIS = os.environ.get("TRITON_ARM_STICK_PITCH_AXIS", "ry").strip().lower()
+ARM_STICK_WRIST_AXIS = os.environ.get("TRITON_ARM_STICK_WRIST_AXIS", "rx").strip().lower()
+ARM_STICK_DEADZONE = float(os.environ.get("TRITON_ARM_STICK_DEADZONE", "0.12"))
+ARM_STICK_PITCH_INVERT = float(os.environ.get("TRITON_ARM_STICK_PITCH_INVERT", "1.0"))
+ARM_STICK_WRIST_INVERT = float(os.environ.get("TRITON_ARM_STICK_WRIST_INVERT", "1.0"))
+
+# Arm motion rate in normalized position units/sec at 100% ARM gain. Both the
+# keyboard (full rate while held) and the stick (deflection scales the rate)
+# feed this. 2.5 crosses the full -1..+1 range in ~0.8 s at 100% gain.
+ARM_RATE = float(os.environ.get("TRITON_ARM_RATE", "2.5"))
+
+# Startup arm position (normalized): pitch -1 = flat/folded, wrist 0 = centered.
+ARM_INIT_PITCH = float(os.environ.get("TRITON_ARM_INIT_PITCH", "-1.0"))
+ARM_INIT_WRIST = float(os.environ.get("TRITON_ARM_INIT_WRIST", "0.0"))
 
 
 # Legacy topside walk-target display settings. Current depth-hold manual

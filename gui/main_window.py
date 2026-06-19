@@ -61,7 +61,7 @@ from config import (
     LIGHTS_TOGGLE_SHORTCUT,
     REVERSE_TOGGLE_BUTTON,
     REVERSE_TOGGLE_SHORTCUT,
-    ARM_KEYBOARD_RAMP_RATE,
+    PILOT_PUBLISH_RATE_HZ,
     TETHER_ROV_HOST,
     TETHER_WINDOWS_HOST,
 )
@@ -979,10 +979,9 @@ class MainWindow(QMainWindow):
         self._last_pilot_msg: dict = {}
 
         # 1) pilot publisher (xbox -> ROV)
-        # These keyboard controls drive the two-axis servo wrist. We keep the
-        # legacy wire keys ("gripper_pitch"/"gripper_yaw") for compatibility
-        # with the ROV-side controller until that side is renamed too. The keys
-        # behave like discrete triggers: held = command, released = neutral.
+        # These keyboard controls feed a direction intent (A/D -> pitch,
+        # W/S -> wrist) to the arm position integrator that lives in
+        # PilotPublisherService; the integrator publishes the absolute pose.
         self._servo_wrist_keys_down: set[str] = set()
         self._servo_wrist_keymap = {
             Qt.Key.Key_W: ("gripper_yaw", +1.0, "W"),
@@ -990,10 +989,6 @@ class MainWindow(QMainWindow):
             Qt.Key.Key_D: ("gripper_pitch", +1.0, "D"),
             Qt.Key.Key_A: ("gripper_pitch", -1.0, "A"),
         }
-        self._servo_wrist_pitch = 0.0
-        self._servo_wrist_yaw = 0.0
-        self._servo_wrist_last_update = time.monotonic()
-        self._servo_wrist_ramp_rate = max(0.01, float(ARM_KEYBOARD_RAMP_RATE))
         self._back_gripper_gain_shortcuts = {
             Qt.Key.Key_1: -1.0,
             Qt.Key.Key_2: +1.0,
@@ -1016,12 +1011,12 @@ class MainWindow(QMainWindow):
         self._arm_disarm_edge = str(ARM_DISARM_TOGGLE_EDGE or "menu").strip().lower() or "menu"
         self._servo_wrist_timer = QTimer(self)
         self._servo_wrist_timer.setInterval(33)
-        self._servo_wrist_timer.timeout.connect(self._update_servo_wrist_keyboard_axes)
+        self._servo_wrist_timer.timeout.connect(self._push_servo_wrist_keyboard_intent)
         self._servo_wrist_timer.start()
 
         self.pilot_svc = PilotPublisherService(
             endpoint=PILOT_PUB_ENDPOINT,
-            rate_hz=30.0,
+            rate_hz=PILOT_PUBLISH_RATE_HZ,
             deadzone=CONTROLLER_DEADZONE,
             debug=CONTROLLER_DEBUG,
             index=CONTROLLER_INDEX,
@@ -1294,9 +1289,8 @@ class MainWindow(QMainWindow):
 
 
     def _servo_wrist_keyboard_targets(self) -> tuple[float, float]:
-        # Trigger-like semantics for a position-controlled servo pair: a held
-        # key contributes direction/speed; release stops commanding movement
-        # while the ROV-side gripper hold keeps the physical pose.
+        # A/D -> arm pitch direction, W/S -> wrist direction. A held key sets a
+        # direction intent; the pilot-side integrator turns that into motion.
         pitch_dir = 0.0
         yaw_dir = 0.0
         if "D" in self._servo_wrist_keys_down and "A" not in self._servo_wrist_keys_down:
@@ -1309,46 +1303,10 @@ class MainWindow(QMainWindow):
             yaw_dir = -1.0
         return pitch_dir, yaw_dir
 
-    @staticmethod
-    def _approach_axis(current: float, target: float, max_step: float) -> float:
-        if current < target:
-            return min(target, current + max_step)
-        if current > target:
-            return max(target, current - max_step)
-        return current
-
-    def _update_servo_wrist_keyboard_axes(self) -> None:
-        pitch_dir, yaw_dir = self._servo_wrist_keyboard_targets()
-        now = time.monotonic()
-        dt = max(0.0, min(0.1, now - self._servo_wrist_last_update))
-        self._servo_wrist_last_update = now
-
+    def _push_servo_wrist_keyboard_intent(self) -> None:
+        pitch_dir, wrist_dir = self._servo_wrist_keyboard_targets()
         try:
-            arm_gain = float(self.pilot_svc.current_arm_gain())
-        except Exception:
-            arm_gain = 1.0
-        arm_gain = max(0.0, min(1.0, arm_gain))
-        step = float(self._servo_wrist_ramp_rate) * arm_gain * dt
-
-        if pitch_dir != 0.0 and step > 0.0:
-            self._servo_wrist_pitch = self._approach_axis(
-                self._servo_wrist_pitch,
-                float(pitch_dir),
-                step,
-            )
-        if yaw_dir != 0.0 and step > 0.0:
-            self._servo_wrist_yaw = self._approach_axis(
-                self._servo_wrist_yaw,
-                float(yaw_dir),
-                step,
-            )
-
-        pitch_cmd = self._servo_wrist_pitch if pitch_dir != 0.0 else 0.0
-        yaw_cmd = self._servo_wrist_yaw if yaw_dir != 0.0 else 0.0
-
-        try:
-            self.pilot_svc.set_aux_axis("gripper_pitch", pitch_cmd)
-            self.pilot_svc.set_aux_axis("gripper_yaw", yaw_cmd)
+            self.pilot_svc.set_arm_keyboard_intent(pitch_dir, wrist_dir)
         except Exception:
             pass
 
@@ -1468,15 +1426,12 @@ class MainWindow(QMainWindow):
 
     def _release_keyboard_vehicle_controls(self) -> None:
         """Neutralize keyboard-only vehicle controls when focus belongs to text input."""
-        if not self._servo_wrist_keys_down and self._servo_wrist_pitch == 0.0 and self._servo_wrist_yaw == 0.0:
+        if not self._servo_wrist_keys_down:
             return
         self._servo_wrist_keys_down.clear()
-        self._servo_wrist_pitch = 0.0
-        self._servo_wrist_yaw = 0.0
-        self._servo_wrist_last_update = time.monotonic()
         try:
-            self.pilot_svc.set_aux_axis("gripper_pitch", 0.0)
-            self.pilot_svc.set_aux_axis("gripper_yaw", 0.0)
+            # Stop commanding arm motion; the ROV holds the last pose.
+            self.pilot_svc.clear_arm_keyboard_intent()
         except Exception:
             pass
 
@@ -1537,8 +1492,7 @@ class MainWindow(QMainWindow):
                         self._servo_wrist_keys_down.add(label)
                     else:
                         self._servo_wrist_keys_down.discard(label)
-                    self._servo_wrist_last_update = time.monotonic()
-                    self._update_servo_wrist_keyboard_axes()
+                    self._push_servo_wrist_keyboard_intent()
                     return True
                 if et == QEvent.Type.KeyPress:
                     if event.key() == Qt.Key.Key_R:
@@ -2062,9 +2016,12 @@ class MainWindow(QMainWindow):
             if self._hb_period_ema_s is not None:
                 parts.append(f"hb~{(1.0/max(1e-3,float(self._hb_period_ema_s))):.1f}Hz")
             parts.append("ARMED" if armed else "disarmed")
+            try:
+                arm_pitch, arm_wrist = self.pilot_svc.arm_position()
+            except Exception:
+                arm_pitch, arm_wrist = 0.0, 0.0
             parts.append(
-                f"gripper_pitch={self._servo_wrist_pitch:+.2f} "
-                f"gripper_yaw={self._servo_wrist_yaw:+.2f}"
+                f"arm_pitch={arm_pitch:+.2f} arm_wrist={arm_wrist:+.2f}"
             )
         elif sensor_age is not None:
             parts.append(f"sensor_age={sensor_age:.2f}s")

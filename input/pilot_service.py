@@ -91,10 +91,19 @@ class PilotPublisherService:
 
         # --- modes / toggles ----------------------------------------------
         from config import (
+            ARM_AIM_MODIFIER_BUTTON,
             ARM_GAIN_DEFAULT,
             ARM_GAIN_MAX,
             ARM_GAIN_MIN,
             ARM_GAIN_STEP,
+            ARM_INIT_PITCH,
+            ARM_INIT_WRIST,
+            ARM_RATE,
+            ARM_STICK_DEADZONE,
+            ARM_STICK_PITCH_AXIS,
+            ARM_STICK_PITCH_INVERT,
+            ARM_STICK_WRIST_AXIS,
+            ARM_STICK_WRIST_INVERT,
             BACK_GRIPPER_GAIN_DEFAULT,
             BACK_GRIPPER_GAIN_MAX,
             BACK_GRIPPER_GAIN_MIN,
@@ -180,6 +189,26 @@ class PilotPublisherService:
         self._aux_axes: dict[str, float] = {}
         self._edge_lock = threading.Lock()
         self._pending_edges: list[tuple[str, str]] = []
+
+        # --- Differential arm (servo wrist) position integrator ---------------
+        # Single source of truth for the arm pose. Keyboard W/A/S/D supplies a
+        # direction intent (set_arm_keyboard_intent); the right stick supplies a
+        # proportional intent while ARM_AIM_MODIFIER_BUTTON is held. The publish
+        # loop integrates position from those intents at ARM_RATE * arm_gain and
+        # publishes the absolute pose as PilotFrame.aux gripper_pitch/gripper_yaw.
+        self._arm_lock = threading.Lock()
+        self._arm_pitch = self._clamp_unit(ARM_INIT_PITCH)
+        self._arm_wrist = self._clamp_unit(ARM_INIT_WRIST)
+        self._arm_kb_pitch_dir = 0.0
+        self._arm_kb_wrist_dir = 0.0
+        self._arm_last_t: Optional[float] = None
+        self._arm_modifier_button = str(ARM_AIM_MODIFIER_BUTTON or "").strip().lower()
+        self._arm_stick_pitch_axis = str(ARM_STICK_PITCH_AXIS or "ry").strip().lower()
+        self._arm_stick_wrist_axis = str(ARM_STICK_WRIST_AXIS or "rx").strip().lower()
+        self._arm_stick_deadzone = max(0.0, min(0.95, float(ARM_STICK_DEADZONE)))
+        self._arm_stick_pitch_invert = float(ARM_STICK_PITCH_INVERT)
+        self._arm_stick_wrist_invert = float(ARM_STICK_WRIST_INVERT)
+        self._arm_rate = max(0.0, float(ARM_RATE))
 
         # Controller is created inside the run loop thread
         self._controller: Optional[GamepadSource] = None
@@ -346,6 +375,74 @@ class PilotPublisherService:
     def get_aux_axes(self) -> dict[str, float]:
         with self._aux_lock:
             return dict(self._aux_axes)
+
+    # --- differential arm position integrator -----------------------------
+    def set_arm_keyboard_intent(self, pitch_dir: float, wrist_dir: float) -> None:
+        """Set the keyboard direction intent for the differential arm.
+
+        Each value is -1, 0, or +1 (A/D -> pitch, W/S -> wrist). The publish loop
+        integrates these into the absolute arm position at ARM_RATE * arm_gain.
+        """
+        with self._arm_lock:
+            self._arm_kb_pitch_dir = self._clamp_unit(pitch_dir)
+            self._arm_kb_wrist_dir = self._clamp_unit(wrist_dir)
+
+    def clear_arm_keyboard_intent(self) -> None:
+        """Drop any held keyboard arm intent (e.g. on focus loss)."""
+        with self._arm_lock:
+            self._arm_kb_pitch_dir = 0.0
+            self._arm_kb_wrist_dir = 0.0
+
+    def arm_position(self) -> tuple[float, float]:
+        """Return the current integrated (pitch, wrist) arm position in [-1, 1]."""
+        with self._arm_lock:
+            return float(self._arm_pitch), float(self._arm_wrist)
+
+    @staticmethod
+    def _stick_axis(value: float, deadzone: float) -> float:
+        """Deadzone + rescale a stick axis into a proportional [-1, 1] intent."""
+        x = max(-1.0, min(1.0, float(value)))
+        dz = max(0.0, min(0.95, float(deadzone)))
+        if abs(x) <= dz:
+            return 0.0
+        span = max(1e-6, 1.0 - dz)
+        sign = 1.0 if x > 0 else -1.0
+        return sign * min(1.0, (abs(x) - dz) / span)
+
+    def _integrate_arm(self, snap: ControllerSnapshot, modifier_held: bool, dt: float) -> tuple[float, float]:
+        """Advance the arm position from keyboard + (modifier-gated) stick intent."""
+        with self._arm_lock:
+            kp = self._arm_kb_pitch_dir
+            kw = self._arm_kb_wrist_dir
+
+        sp = sw = 0.0
+        if modifier_held:
+            try:
+                pv = float(getattr(snap, self._arm_stick_pitch_axis, 0.0) or 0.0)
+            except Exception:
+                pv = 0.0
+            try:
+                wv = float(getattr(snap, self._arm_stick_wrist_axis, 0.0) or 0.0)
+            except Exception:
+                wv = 0.0
+            sp = self._stick_axis(pv, self._arm_stick_deadzone) * self._arm_stick_pitch_invert
+            sw = self._stick_axis(wv, self._arm_stick_deadzone) * self._arm_stick_wrist_invert
+
+        # Stick takes priority when deflected; otherwise hold the keyboard intent.
+        pitch_intent = sp if abs(sp) > 1e-6 else kp
+        wrist_intent = sw if abs(sw) > 1e-6 else kw
+
+        try:
+            gain = float(self.current_arm_gain())
+        except Exception:
+            gain = 1.0
+        gain = max(0.0, min(1.0, gain))
+        step = float(self._arm_rate) * gain * max(0.0, min(0.1, float(dt)))
+
+        with self._arm_lock:
+            self._arm_pitch = self._clamp_unit(self._arm_pitch + pitch_intent * step)
+            self._arm_wrist = self._clamp_unit(self._arm_wrist + wrist_intent * step)
+            return float(self._arm_pitch), float(self._arm_wrist)
 
     def queue_edge(self, name: str, state: str = "down") -> None:
         key = str(name or "").strip().lower()
@@ -914,6 +1011,22 @@ class PilotPublisherService:
                 if bool(frame.modes.get("reverse", False)):
                     self._apply_reverse_axes(frame)
                 self._prev_buttons = frame.buttons
+
+                # Differential arm: integrate position from keyboard + the
+                # modifier-gated right stick, and publish the absolute pose.
+                dt_arm = self.period if self._arm_last_t is None else (t0 - self._arm_last_t)
+                self._arm_last_t = t0
+                modifier_held = (
+                    bool(getattr(snap, self._arm_modifier_button, False))
+                    if self._arm_modifier_button
+                    else False
+                )
+                arm_pitch, arm_wrist = self._integrate_arm(snap, modifier_held, dt_arm)
+                frame.aux = {**(frame.aux or {}), "gripper_pitch": arm_pitch, "gripper_yaw": arm_wrist}
+                if modifier_held:
+                    # While aiming the arm, suppress yaw/heave so the ROV holds station.
+                    frame.axes.rx = 0.0
+                    frame.axes.ry = 0.0
 
                 self.seq += 1
 

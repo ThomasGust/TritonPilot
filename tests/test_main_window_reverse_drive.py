@@ -43,6 +43,10 @@ class _FakePilotService:
         self.max_gain = 1.0
         self.back_gripper_gain = 0.5
         self.arm_gain = 0.5
+        self.arm_kb_pitch_dir = 0.0
+        self.arm_kb_wrist_dir = 0.0
+        self.arm_pitch = -1.0
+        self.arm_wrist = 0.0
 
     def start(self):
         return None
@@ -114,6 +118,19 @@ class _FakePilotService:
 
     def current_arm_gain(self):
         return self.arm_gain
+
+    def set_arm_keyboard_intent(self, pitch_dir, wrist_dir):
+        self.arm_kb_pitch_dir = float(pitch_dir)
+        self.arm_kb_wrist_dir = float(wrist_dir)
+        return None
+
+    def clear_arm_keyboard_intent(self):
+        self.arm_kb_pitch_dir = 0.0
+        self.arm_kb_wrist_dir = 0.0
+        return None
+
+    def arm_position(self):
+        return (self.arm_pitch, self.arm_wrist)
 
     def t200_wrist_gain_step(self):
         return self.back_gripper_gain_step()
@@ -1185,16 +1202,13 @@ def test_switching_to_ssh_releases_keyboard_wrist_controls(monkeypatch, tmp_path
         app.processEvents()
 
         win._servo_wrist_keys_down = {"W", "D"}
-        win._servo_wrist_pitch = 0.5
-        win._servo_wrist_yaw = 0.5
+        win.pilot_svc.set_arm_keyboard_intent(1.0, 1.0)
 
         win._set_center_page("ssh", announce=False)
 
         assert win._servo_wrist_keys_down == set()
-        assert win._servo_wrist_pitch == pytest.approx(0.0)
-        assert win._servo_wrist_yaw == pytest.approx(0.0)
-        assert win.pilot_svc.aux_axes["gripper_pitch"] == pytest.approx(0.0)
-        assert win.pilot_svc.aux_axes["gripper_yaw"] == pytest.approx(0.0)
+        assert win.pilot_svc.arm_kb_pitch_dir == pytest.approx(0.0)
+        assert win.pilot_svc.arm_kb_wrist_dir == pytest.approx(0.0)
     finally:
         win.close()
         app.processEvents()
@@ -1222,32 +1236,25 @@ def test_keyboard_wrist_controls_swap_ws_and_ad_axes(monkeypatch, tmp_path):
         assert win._servo_wrist_keymap[Qt.Key.Key_D][0] == "gripper_pitch"
         assert win._servo_wrist_keymap[Qt.Key.Key_A][0] == "gripper_pitch"
 
-        win._servo_wrist_pitch = 0.0
-        win._servo_wrist_yaw = 0.0
+        # W/S drive the wrist intent; A/D drive the pitch intent.
         win._servo_wrist_keys_down = {"W"}
-        win._servo_wrist_last_update = main_window.time.monotonic() - 0.1
-        win._update_servo_wrist_keyboard_axes()
-        assert win.pilot_svc.aux_axes["gripper_pitch"] == pytest.approx(0.0)
-        assert win.pilot_svc.aux_axes["gripper_yaw"] > 0.0
-        assert win.pilot_svc.aux_axes["gripper_yaw"] < 0.05
+        win._push_servo_wrist_keyboard_intent()
+        assert win.pilot_svc.arm_kb_pitch_dir == pytest.approx(0.0)
+        assert win.pilot_svc.arm_kb_wrist_dir == pytest.approx(1.0)
 
-        win._servo_wrist_pitch = 0.0
-        win._servo_wrist_yaw = 0.0
         win._servo_wrist_keys_down = {"D"}
-        win._servo_wrist_last_update = main_window.time.monotonic() - 0.1
-        win._update_servo_wrist_keyboard_axes()
-        assert win.pilot_svc.aux_axes["gripper_pitch"] > 0.0
-        assert win.pilot_svc.aux_axes["gripper_pitch"] < 0.05
-        assert win.pilot_svc.aux_axes["gripper_yaw"] == pytest.approx(0.0)
+        win._push_servo_wrist_keyboard_intent()
+        assert win.pilot_svc.arm_kb_pitch_dir == pytest.approx(1.0)
+        assert win.pilot_svc.arm_kb_wrist_dir == pytest.approx(0.0)
 
         win._servo_wrist_keys_down = {"S"}
         assert win._servo_wrist_keyboard_targets()[1] == pytest.approx(-1.0)
         win._servo_wrist_keys_down = {"A"}
         assert win._servo_wrist_keyboard_targets()[0] == pytest.approx(-1.0)
         win._servo_wrist_keys_down = set()
-        win._update_servo_wrist_keyboard_axes()
-        assert win.pilot_svc.aux_axes["gripper_pitch"] == pytest.approx(0.0)
-        assert win.pilot_svc.aux_axes["gripper_yaw"] == pytest.approx(0.0)
+        win._push_servo_wrist_keyboard_intent()
+        assert win.pilot_svc.arm_kb_pitch_dir == pytest.approx(0.0)
+        assert win.pilot_svc.arm_kb_wrist_dir == pytest.approx(0.0)
     finally:
         win.close()
         app.processEvents()
