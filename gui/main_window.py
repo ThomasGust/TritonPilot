@@ -596,11 +596,7 @@ class MainWindow(QMainWindow):
                 self._reverse_page_owns_mode = False
                 self._set_reverse_mode(False, announce=False)
         if previous_page == "transect" and page_name != "transect":
-            self._stop_transect_cv()
-            try:
-                self._transect_page.hide_overlay()
-            except Exception:
-                pass
+            self._stop_transect_cv()  # also clears/hides the overlay view
             if self.video_panel is not None:
                 try:
                     self._transect_page.detach_video_panel(self.video_panel)
@@ -645,12 +641,10 @@ class MainWindow(QMainWindow):
                 self._resume_video_panel()
                 self._transect_page.attach_video_panel(self.video_panel)
                 self._apply_transect_camera_view()
-            # Run the live CV + annotated overlay while this tab is open. When no
-            # ROV is connected this is a no-op and the normal video shows through.
-            if self._start_transect_cv():
-                self._transect_page.show_overlay()
-            else:
-                self._transect_page.hide_overlay()
+            # Run the live CV while this tab is open. The annotated overlay reveals
+            # itself only once real frames arrive; until then (or if no ROV is
+            # connected) the normal Direct3D video shows through.
+            self._start_transect_cv()
             self._page_stack.setCurrentWidget(self._transect_page)
         elif page_name == "hold_test":
             if self.video_panel is not None:
@@ -744,11 +738,9 @@ class MainWindow(QMainWindow):
     def _on_transect_camera_changed(self, name: str) -> None:
         if getattr(self, "_active_page_name", "") == "transect":
             self._apply_transect_camera_view(name)
-            # Re-point the CV source at the newly selected camera.
-            if self._start_transect_cv():
-                self._transect_page.show_overlay()
-            else:
-                self._transect_page.hide_overlay()
+            # Re-point the CV source at the newly selected camera (overlay
+            # re-reveals itself when frames arrive on the new stream).
+            self._start_transect_cv()
 
     def _start_transect_cv(self) -> bool:
         """Start the live transect CV source on the selected camera. Returns started.
@@ -772,17 +764,24 @@ class MainWindow(QMainWindow):
         try:
             opts = video_stream_options(cam_mgr, stream)
             host = resolve_video_host(cam_mgr, opts)
-            kwargs = video_start_kwargs(opts, host=host)
-            port = int(kwargs.get("port", 5000))
-            mirror_port = port + 300  # distinct from the recorder mirror (+200)
+            bind = host if bool(opts.get("bind_receiver_to_host", True)) else "0.0.0.0"
+            width = int(opts.get("width", 0) or 0)
+            height = int(opts.get("height", 0) or 0)
+            if width <= 0 or height <= 0:
+                logger.warning("transect CV: stream '%s' has no dimensions; CV disabled", stream)
+                return False
             tx_is_h264 = (
-                str(kwargs.get("video_format", "")).lower() == "h264"
-                or str(kwargs.get("encode", "")).lower() == "h264"
+                str(opts.get("video_format", "")).lower() == "h264"
+                or str(opts.get("encode", "")).lower() == "h264"
             )
             codec = "h264" if tx_is_h264 else "jpeg"
-            width = int(opts.get("width", 1920) or 1920)
-            height = int(opts.get("height", 1080) or 1080)
-            bind = host if bool(opts.get("bind_receiver_to_host", True)) else "0.0.0.0"
+            channel_order = str(opts.get("channel_order", "BGR") or "BGR")
+            latency_ms = int(opts.get("receiver_latency_ms", opts.get("latency_ms", 60)) or 60)
+            # Mirror to a freshly-allocated local port (same proven approach as the
+            # snapshot taps) rather than a fixed offset, so it never collides with
+            # the display/recorder receivers.
+            alloc = getattr(cam_mgr, "_allocate_udp_port", None)
+            mirror_port = int(alloc(bind)) if callable(alloc) else int(opts.get("port", 5000)) + 300
         except Exception as exc:
             logger.debug("transect CV: could not resolve stream '%s': %s", stream, exc)
             return False
@@ -797,11 +796,13 @@ class MainWindow(QMainWindow):
                 logger.debug("transect CV mirror %s failed: %s", "add" if add else "remove", exc)
 
         try:
+            self._transect_overlay_view.clear()  # hidden until a real frame lands
             source = TransectVisionSource(
                 width=width, height=height,
                 on_estimate=self._on_transect_estimate,
                 receiver_factory=default_receiver_factory(
-                    port=mirror_port, codec=codec, width=width, height=height, bind_address=bind,
+                    port=mirror_port, codec=codec, width=width, height=height,
+                    bind_address=bind, channel_order=channel_order, latency_ms=latency_ms,
                 ),
                 detector=StubTransectDetector(),
                 policy=self._transect_policy,
@@ -814,13 +815,18 @@ class MainWindow(QMainWindow):
             return False
         self._transect_cv_source = source
         self._transect_cv_stream = stream
-        trace_event("transect_cv_started", stream=stream, mirror_port=mirror_port, codec=codec)
+        trace_event("transect_cv_started", stream=stream, mirror_port=mirror_port, codec=codec,
+                    width=width, height=height)
         return True
 
     def _stop_transect_cv(self) -> None:
         source = self._transect_cv_source
         self._transect_cv_source = None
         self._transect_cv_stream = None
+        try:
+            self._transect_overlay_view.clear()  # reveal the live video again
+        except Exception:
+            pass
         if source is not None:
             try:
                 source.stop()

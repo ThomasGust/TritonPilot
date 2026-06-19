@@ -45,14 +45,22 @@ class TransectOverlayView(QWidget):
             self.update()
 
     def clear(self) -> None:
+        """Drop the current frame and hide the view (revealing the video below)."""
         self._qimage = None
+        self.hide()
         self.update()
 
     def _on_frame(self, frame_bgr) -> None:
         img = self._qimage_from_bgr(frame_bgr)
-        if img is not None:
-            self._qimage = img
-            self.update()
+        if img is None:
+            return
+        self._qimage = img
+        # Reveal the overlay only once a real frame exists, so a slow/absent CV
+        # feed never hides the working video underneath with a placeholder.
+        if not self.isVisible():
+            self.show()
+            self.raise_()
+        self.update()
 
     @staticmethod
     def _qimage_from_bgr(frame_bgr) -> Optional[QImage]:

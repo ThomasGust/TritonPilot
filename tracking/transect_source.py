@@ -45,8 +45,14 @@ EstimateCallback = Callable[[TransectEstimate, TransectObservation, "np.ndarray"
 def default_receiver_factory(
     *, port: int, codec: str, width: int, height: int,
     latency_ms: int = 60, channel_order: str = "BGR", bind_address: str = "0.0.0.0",
+    kill_port_users: bool = False,
 ) -> Callable[[], _Receiver]:
-    """Build a factory that creates the app's raw ``ReceiverProcess`` on ``port``."""
+    """Build a factory that creates the app's raw ``ReceiverProcess`` on ``port``.
+
+    ``kill_port_users`` defaults False: the caller is expected to hand us a
+    dedicated (freshly allocated) mirror port, so we must NOT kill whatever holds
+    it (killing would target the display/snapshot receivers if a port collided).
+    """
 
     def _make() -> _Receiver:
         from video.gst_receiver import ReceiverProcess, RxConfig
@@ -55,6 +61,7 @@ def default_receiver_factory(
             name="transect-cv", codec=codec, port=port, mode="raw",
             width=width, height=height, latency_ms=latency_ms,
             channel_order=channel_order, bind_address=bind_address,
+            extra={"receiver_kill_port_users": bool(kill_port_users)},
         ))
 
     return _make
