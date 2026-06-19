@@ -71,11 +71,15 @@ def test_arm_tune_overrides_ride_in_modes():
 
     svc.set_arm_tune("right_invert", -1.0)
     svc.set_arm_tune("pitch_neutral_deg", 30.0)
+    svc.set_arm_tune("servo_range_deg", 100.0)
+    svc.set_arm_tune("pitch_span_deg", 90.0)
     svc.set_arm_tune("bogus_key", 5.0)  # ignored
 
     tune = svc.current_modes()["arm_tune"]
     assert tune["right_invert"] == -1.0
     assert tune["pitch_neutral_deg"] == 30.0
+    assert tune["servo_range_deg"] == 100.0
+    assert tune["pitch_span_deg"] == 90.0
     assert "bogus_key" not in tune
 
     svc.set_arm_tune("right_invert", None)  # clear one key

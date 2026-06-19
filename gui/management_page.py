@@ -132,6 +132,16 @@ class ManagementPage(QWidget):
         self._config_spins: dict[str, QDoubleSpinBox] = {}
         self._status_labels: dict[str, QLabel] = {}
         self._arm_tune_checks: dict[str, QCheckBox] = {}
+        self._arm_tune_spins: dict[str, QDoubleSpinBox] = {}
+        self._arm_tune_config_defaults = {
+            "left_invert": 1.0,
+            "right_invert": -1.0,
+            "pitch_invert": 1.0,
+            "yaw_invert": 1.0,
+            "servo_range_deg": 70.0,
+            "pitch_span_deg": 90.0,
+            "pitch_neutral_deg": 70.0,
+        }
 
         self._build_ui()
         self.rpc_result_sig.connect(self._handle_rpc_result)
@@ -342,12 +352,23 @@ class ManagementPage(QWidget):
         form = QFormLayout()
         form.setContentsMargins(0, 6, 0, 0)
         form.setSpacing(8)
-        self._arm_tune_neutral_spin = self._make_spinbox(0.0, 90.0, 1.0, 1, suffix=" deg")
-        self._set_spin_value(self._arm_tune_neutral_spin, 25.0)
-        self._arm_tune_neutral_spin.valueChanged.connect(
-            lambda v: self._on_arm_tune_value("pitch_neutral_deg", v)
-        )
-        form.addRow("Pitch neutral", self._arm_tune_neutral_spin)
+        spin_specs = [
+            ("servo_range_deg", "Servo range", 30.0, 120.0, 70.0),
+            ("pitch_span_deg", "Pitch span", 30.0, 140.0, 90.0),
+            ("pitch_neutral_deg", "Pitch neutral", 0.0, 140.0, 70.0),
+        ]
+        for key, label, minimum, maximum, default in spin_specs:
+            spin = self._make_spinbox(minimum, maximum, 1.0, 1, suffix=" deg")
+            self._set_spin_value(spin, default)
+            spin.valueChanged.connect(lambda v, k=key: self._on_arm_tune_value(k, v))
+            self._arm_tune_spins[key] = spin
+            if key == "servo_range_deg":
+                self._arm_tune_servo_range_spin = spin
+            if key == "pitch_neutral_deg":
+                self._arm_tune_neutral_spin = spin
+            if key == "pitch_span_deg":
+                self._arm_tune_pitch_span_spin = spin
+            form.addRow(label, spin)
         card.body.addLayout(form)
 
         buttons = QHBoxLayout()
@@ -364,7 +385,8 @@ class ManagementPage(QWidget):
         if self._pilot_svc is None:
             for cb in self._arm_tune_checks.values():
                 cb.setEnabled(False)
-            self._arm_tune_neutral_spin.setEnabled(False)
+            for spin in self._arm_tune_spins.values():
+                spin.setEnabled(False)
             self.arm_tune_reset_btn.setEnabled(False)
         return card
 
@@ -390,12 +412,8 @@ class ManagementPage(QWidget):
                 self._pilot_svc.clear_arm_tune()
             except Exception:
                 pass
-        for cb in self._arm_tune_checks.values():
-            cb.blockSignals(True)
-            cb.setChecked(False)
-            cb.blockSignals(False)
-        self._set_spin_value(self._arm_tune_neutral_spin, 25.0)
-        self._set_feedback("Arm tuning overrides cleared; ROV using rov_config values.", tone="info")
+        self._apply_arm_tune_config(dict((self._last_state or {}).get("config") or {}))
+        self._set_feedback("Arm tuning overrides cleared; controls restored to ROV config values.", tone="info")
 
     def _save_arm_tune_config(self) -> None:
         updates = {
@@ -403,7 +421,9 @@ class ManagementPage(QWidget):
             "GRIPPER_RIGHT_INVERT": -1.0 if self._arm_tune_checks["right_invert"].isChecked() else 1.0,
             "GRIPPER_PITCH_INVERT": -1.0 if self._arm_tune_checks["pitch_invert"].isChecked() else 1.0,
             "GRIPPER_YAW_INVERT": -1.0 if self._arm_tune_checks["yaw_invert"].isChecked() else 1.0,
-            "GRIPPER_PITCH_NEUTRAL_DEG": float(self._arm_tune_neutral_spin.value()),
+            "GRIPPER_SERVO_RANGE_DEG": float(self._arm_tune_spins["servo_range_deg"].value()),
+            "GRIPPER_PITCH_SPAN_DEG": float(self._arm_tune_spins["pitch_span_deg"].value()),
+            "GRIPPER_PITCH_NEUTRAL_DEG": float(self._arm_tune_spins["pitch_neutral_deg"].value()),
         }
         self._queue_request("set_config", {"updates": updates}, request_meta={"refresh_after_success": True})
 
@@ -494,6 +514,7 @@ class ManagementPage(QWidget):
             if present:
                 self._set_spin_value(spin, config.get(key))
 
+        self._apply_arm_tune_config(config)
         self._sync_action_state()
 
     def _handle_mutation_success(self, cmd: str, data: dict) -> None:
@@ -689,6 +710,49 @@ class ManagementPage(QWidget):
         self.style().unpolish(self.feedback_label)
         self.style().polish(self.feedback_label)
         self.feedback_label.update()
+
+    @staticmethod
+    def _float_or_default(value, default: float) -> float:
+        try:
+            return float(value)
+        except Exception:
+            return float(default)
+
+    @staticmethod
+    def _set_check_value(check: QCheckBox, checked: bool) -> None:
+        prev = check.blockSignals(True)
+        try:
+            check.setChecked(bool(checked))
+        finally:
+            check.blockSignals(prev)
+
+    def _apply_arm_tune_config(self, config: dict) -> None:
+        cfg = dict(config or {})
+        defaults = dict(self._arm_tune_config_defaults)
+        key_map = {
+            "left_invert": "GRIPPER_LEFT_INVERT",
+            "right_invert": "GRIPPER_RIGHT_INVERT",
+            "pitch_invert": "GRIPPER_PITCH_INVERT",
+            "yaw_invert": "GRIPPER_YAW_INVERT",
+        }
+        for tune_key, cfg_key in key_map.items():
+            check = self._arm_tune_checks.get(tune_key)
+            if check is None:
+                continue
+            value = self._float_or_default(cfg.get(cfg_key), defaults[tune_key])
+            self._set_check_value(check, value < 0.0)
+
+        spin_map = {
+            "servo_range_deg": "GRIPPER_SERVO_RANGE_DEG",
+            "pitch_span_deg": "GRIPPER_PITCH_SPAN_DEG",
+            "pitch_neutral_deg": "GRIPPER_PITCH_NEUTRAL_DEG",
+        }
+        for tune_key, cfg_key in spin_map.items():
+            spin = self._arm_tune_spins.get(tune_key)
+            if spin is None:
+                continue
+            value = self._float_or_default(cfg.get(cfg_key), defaults[tune_key])
+            self._set_spin_value(spin, value)
 
     @staticmethod
     def _set_spin_value(spin: QDoubleSpinBox, value) -> None:

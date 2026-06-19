@@ -252,11 +252,13 @@ $env:TRITON_ARM_GAIN_DEFAULT="0.50"
 $env:TRITON_ARM_GAIN_MIN="0.10"
 $env:TRITON_ARM_GAIN_MAX="1.0"
 $env:TRITON_ARM_GAIN_STEP="0.05"
-$env:TRITON_ARM_KEYBOARD_RAMP_RATE="0.35"
+$env:TRITON_ARM_RATE="2.5"
 ```
 
-`TRITON_ARM_KEYBOARD_RAMP_RATE` controls how quickly WASD walks the arm target
-while a key is held, in normalized command units per second at 100% ARM gain.
+`TRITON_ARM_RATE` controls how quickly WASD and the modifier-held right stick walk
+the arm target, in normalized command units per second at 100% ARM gain. Geometry
+knobs such as servo range, pitch span, and pitch neutral are onboard TritonOS settings; the
+Vehicle Setup page can stream and save those values while tuning.
 
 These values are transmitted in `PilotFrame.modes`. TritonOS decides how they
 map to actuator output.
