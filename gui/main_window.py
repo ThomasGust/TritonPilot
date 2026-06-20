@@ -1040,6 +1040,11 @@ class MainWindow(QMainWindow):
         # NOT drive the video -- the tab keeps the smooth d3d11 feed, and results
         # surface in the transparent lock/error HUD so a CV decode stall can
         # never replace/flicker the picture.
+        # Nadir arm camera (post 90-deg mount fix): the geometric defaults are
+        # correct -- target_cx/cy=0.5 and on-station blue_fraction = blue_cm/W* (90cm
+        # footprint). Do NOT set target_blue_fraction from a recording's median: that
+        # only reflects how high the ROV happened to fly (usually too high). Use
+        # tools/transect_replay.py --calibrate to re-check centering if the mount moves.
         self._transect_model = TransectModel()
         self._transect_policy = TransectPolicy(self._transect_model)
         self._transect_detector = None  # lazily created ClassicalTransectDetector

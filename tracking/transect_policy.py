@@ -58,7 +58,7 @@ Error sign conventions (match ``StationKeepController`` / the contract docstring
 from __future__ import annotations
 
 from collections import deque
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Deque, Dict, List, Optional, Tuple
 import time
 
@@ -142,6 +142,20 @@ class TransectModel:
 
     # Temporal smoothing of the centroid/size before computing the error.
     ema_alpha: float = 0.4
+
+    # Robustness against the lock flapping seen in the pool (detection drops out
+    # for a frame or two while the vehicle moves, which otherwise slams the ROV
+    # command to zero and chatters the hold):
+    #   coast_frames        keep re-emitting the last good error (valid=True) for
+    #                       up to this many consecutive no-detection frames before
+    #                       declaring no_lock. Short, so a real target loss still
+    #                       drops the hold quickly. Must be < lock_drop_frames.
+    #   centroid_jump_reject a single-frame centroid jump (frame fractions, |dcx|+
+    #                       |dcy|) larger than this is treated as a spurious
+    #                       re-detection: hold the previous centroid + penalize
+    #                       confidence so one bad frame can't fling ex/ey. 0 = off.
+    coast_frames: int = 3
+    centroid_jump_reject: float = 0.2
 
     # Optional directional retreat-from-red bias added to ex/ey. OFF by default
     # (the centering loop already keeps red out, and the sign depends on the
@@ -236,6 +250,10 @@ class TransectPolicy:
         self._low_conf_run: int = 0
         self._locked: bool = False
         self._recent: Deque[float] = deque(maxlen=8)
+        # Coast/outlier robustness state.
+        self._last_good: Optional[TransectEstimate] = None
+        self._coast_count: int = 0
+        self._reject_run: int = 0
 
     # -- internals -----------------------------------------------------------
     def _smooth(self, raw: Optional[float], state: Optional[float]) -> float:
@@ -309,6 +327,26 @@ class TransectPolicy:
 
         if not obs.blue_found:
             lock_state = self._update_lock(False, 0.0)
+            # Coast: bridge a brief detection dropout by re-emitting the last good
+            # error (valid stays True) for a few frames, so the ROV command doesn't
+            # slam to zero and chatter the hold. Capped by coast_frames; after that
+            # (or once the lock FSM drops) we fall through to a real no_lock.
+            if (self._last_good is not None and self._locked
+                    and self._coast_count < m.coast_frames):
+                self._coast_count += 1
+                g = self._last_good
+                return TransectEstimate(
+                    error=replace(g.error, ts=ts),
+                    lock_state="lock",
+                    confidence=g.confidence,
+                    violation=violation,
+                    clean=bool(g.clean and violation <= m.violation_clean_eps),
+                    footprint_cm=g.footprint_cm,
+                    offset_cm=g.offset_cm,
+                    margin_cm=g.margin_cm,
+                    target_center=g.target_center,
+                    reasons=["coasting"],
+                )
             return TransectEstimate(
                 error=VisualTargetError.no_lock(ts=ts),
                 lock_state=lock_state,
@@ -322,15 +360,34 @@ class TransectPolicy:
                 reasons=["no_target"],
             )
 
-        # Smooth centroid/size and track jitter (raw-vs-smoothed residual, low-passed).
-        cx = self._smooth(obs.blue_cx, self._cx)
-        cy = self._smooth(obs.blue_cy, self._cy)
-        frac = self._smooth(obs.blue_fraction, self._frac)
-        resid = abs(obs.blue_cx - cx) + abs(obs.blue_cy - cy)
-        self._jitter = self._smooth(resid, self._jitter)
+        # Outlier reject: a single huge centroid jump is almost always the detector
+        # latching a different blob for a frame. Hold the previous centroid/size and
+        # penalize confidence so it can't fling ex/ey -- but give up after a couple of
+        # consecutive rejects so we still follow the target if it really moved.
+        outlier = False
+        if (self._cx is not None and m.centroid_jump_reject > 0.0
+                and self._reject_run < 2):
+            jump = abs(obs.blue_cx - self._cx) + abs(obs.blue_cy - (self._cy or 0.0))
+            outlier = jump > m.centroid_jump_reject
+
+        if outlier:
+            self._reject_run += 1
+            cx, cy = self._cx, (self._cy if self._cy is not None else obs.blue_cy)
+            frac = self._frac if self._frac is not None else obs.blue_fraction
+        else:
+            self._reject_run = 0
+            # Smooth centroid/size and track jitter (raw-vs-smoothed residual, low-passed).
+            cx = self._smooth(obs.blue_cx, self._cx)
+            cy = self._smooth(obs.blue_cy, self._cy)
+            frac = self._smooth(obs.blue_fraction, self._frac)
+            resid = abs(obs.blue_cx - cx) + abs(obs.blue_cy - cy)
+            self._jitter = self._smooth(resid, self._jitter)
         self._cx, self._cy, self._frac = cx, cy, frac
 
         confidence, reasons = self._confidence(obs, self._jitter)
+        if outlier:
+            confidence *= 0.2
+            reasons.append("centroid_jump")
         lock_state = self._update_lock(True, confidence)
 
         # Effective setpoint, optionally biased to retreat from red (off by default).
@@ -393,7 +450,7 @@ class TransectPolicy:
             confidence=confidence,
             ts=ts,
         )
-        return TransectEstimate(
+        est = TransectEstimate(
             error=error,
             lock_state=lock_state,
             confidence=confidence,
@@ -405,3 +462,9 @@ class TransectPolicy:
             target_center=(tcx + bias_x, tcy + bias_y),
             reasons=reasons,
         )
+        # A real detection refreshes the coast budget; remember the last valid error
+        # so a following dropout can coast on it.
+        self._coast_count = 0
+        if valid:
+            self._last_good = est
+        return est

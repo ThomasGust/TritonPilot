@@ -191,6 +191,56 @@ def test_calibrated_setpoint_makes_offcenter_on_station():
     assert est.error.es == pytest.approx(0.0, abs=1e-3)
 
 
+# -- robustness: coast-hold + outlier reject --------------------------------
+def test_coast_hold_bridges_brief_dropout_then_drops():
+    m = TransectModel(min_lock_frames=3, coast_frames=3, lock_drop_frames=5)
+    p = TransectPolicy(m)
+    _lock(p, _on_station(m))                       # establish a solid lock
+    valids = [p.evaluate(TransectObservation.no_target(ts=float(i))).error.valid
+              for i in range(6)]
+    # First coast_frames dropouts keep a valid error (coasting), then it gives up.
+    assert valids[:3] == [True, True, True]
+    assert valids[3] is False
+    # During the coast the error mirrors the last good one (centered -> ~zero).
+    p2 = TransectPolicy(m)
+    _lock(p2, _on_station(m, blue_cx=m.target_cx + 0.5 * m.image_pos_tol), n=15)
+    coasted = p2.evaluate(TransectObservation.no_target())
+    assert coasted.error.valid is True
+    assert "coasting" in coasted.reasons
+    assert coasted.error.ex == pytest.approx(0.5, abs=0.1)   # held, not zeroed
+
+
+def test_coast_budget_refreshes_after_a_real_detection():
+    m = TransectModel(min_lock_frames=3, coast_frames=2, lock_drop_frames=8)
+    p = TransectPolicy(m)
+    _lock(p, _on_station(m))
+    p.evaluate(TransectObservation.no_target())     # coast 1
+    p.evaluate(_on_station(m))                       # real detection -> refresh budget
+    assert p.evaluate(TransectObservation.no_target()).error.valid is True  # coasts again
+
+
+def test_centroid_jump_is_rejected_and_does_not_fling_error():
+    m = TransectModel(centroid_jump_reject=0.2)
+    p = TransectPolicy(m)
+    _lock(p, _on_station(m), n=15)                   # settled at center (ex ~ 0)
+    # One frame the detector latches a blob far to the right (cx jump 0.45 >> 0.2).
+    spike = p.evaluate(_on_station(m, blue_cx=0.95))
+    assert "centroid_jump" in spike.reasons
+    assert spike.error.ex == pytest.approx(0.0, abs=0.1)     # held, not flung to +1
+    assert spike.error.valid is True                          # single outlier keeps lock
+
+
+def test_sustained_centroid_shift_is_eventually_accepted():
+    m = TransectModel(centroid_jump_reject=0.2)
+    p = TransectPolicy(m)
+    _lock(p, _on_station(m), n=15)
+    moved = _on_station(m, blue_cx=0.95)
+    exs = [p.evaluate(moved).error.ex for _ in range(6)]
+    # First frames hold (reject), then it gives up and follows the target out to +1.
+    assert exs[0] == pytest.approx(0.0, abs=0.1)
+    assert exs[-1] == pytest.approx(1.0, abs=0.1)
+
+
 def test_reset_clears_lock_and_smoothing():
     m = TransectModel()
     p = TransectPolicy(m)
