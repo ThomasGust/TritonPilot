@@ -441,12 +441,14 @@ class MainWindow(QMainWindow):
                             fn(True)
                         except Exception as exc:
                             logger.debug("%s failed: %s", setter, exc)
-                # Yaw is held ONLY by the ROV's station-keep yaw<-er axis (VISION:
-                # the blue square's rotation -- mag-independent). The autopilot yaw
-                # axis stays OFF: its "damp" mode used the estimator's yaw RATE, which
-                # is mag-corrupted (recordings/20260619-192426: it read -42deg/s while
-                # the raw gyro read -0.6) and was anti-damping = the spin. Keep yaw
-                # vision-only until a CLEAN raw-gyro rate damper is plumbed.
+                # Yaw is left FREE. Both yaw references are unusable: the autopilot
+                # "damp" mode uses the estimator's yaw RATE (mag-corrupted -- recording
+                # 20260619-192426 read -42deg/s while the raw gyro read -0.6, anti-damping
+                # = the spin), and the ROV station-keep yaw<-er axis is now KP=0 because
+                # a 90deg-symmetric square's rotation is unmeasurable (recording
+                # 20260619-193838: er noise std ~30deg rocked the vehicle back and forth
+                # while it was already squared up). Free yaw drifts slowly (~0.5deg/s).
+                # Re-enable a real hold only with a CLEAN raw-gyro (imu.gyro.z) rate damp.
                 if callable(yaw_mode):
                     try:
                         yaw_mode("yaw", "off")
@@ -468,7 +470,7 @@ class MainWindow(QMainWindow):
         self._refresh_drive_status()
         rec = " + recording" if (enabled and self._hold_owns_recording) else ""
         self.statusBar().showMessage(
-            f"Optical Hold ENGAGED (station-keep + depth + level + yaw[vision er]{rec})" if enabled else "Optical Hold OFF",
+            f"Optical Hold ENGAGED (station-keep + depth + level + yaw[free]{rec})" if enabled else "Optical Hold OFF",
             3000,
         )
         trace_event("station_keep_toggle", enabled=enabled, recording=bool(self._hold_owns_recording))
@@ -995,7 +997,10 @@ class MainWindow(QMainWindow):
         ex, ey, es, er, viol = getattr(self, "_transect_last_err", (0.0, 0.0, 0.0, 0.0, 0.0))
         txt = f"Optical Hold: {label} {self._transect_last_conf * 100:.0f}% · {fps:.0f}fps"
         if lock in ("lock", "acquiring"):
-            txt += f"  |  ex{ex:+.2f} ey{ey:+.2f} es{es:+.2f} er{er:+.2f}"
+            # Prominent "how square does the target look" cue (squaring up = max margin).
+            a = abs(er)
+            sq = "SQUARE ✓" if a < 0.15 else ("TILTED" if a < 0.5 else "DIAMOND ⚠")
+            txt += f"  |  {sq}  ex{ex:+.2f} ey{ey:+.2f} es{es:+.2f} er{er:+.2f}"
             if viol > 0.05:
                 txt += f"  RED {viol * 100:.0f}%"
         page.set_cv_status(txt, tone)

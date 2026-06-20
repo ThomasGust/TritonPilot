@@ -241,21 +241,60 @@ def test_sustained_centroid_shift_is_eventually_accepted():
     assert exs[-1] == pytest.approx(1.0, abs=0.1)
 
 
-def test_er_is_smoothed_but_snaps_across_the_wrap():
-    m = TransectModel(er_ema_alpha=0.5)
+def test_er_tracks_a_steady_low_variance_rotation():
+    # A consistent (low-variance) rotation is reliable -> drives a square-up error near
+    # its circular mean; the reliability gate stays open.
+    m = TransectModel()
     p = TransectPolicy(m)
-    # Noisy rotation around +20deg -> er ~ +0.44, low-passed (not chasing each spike).
-    p.reset()
-    seq = [18.0, 22.0, 16.0, 24.0, 20.0]
+    seq = [18.0, 22.0, 16.0, 24.0, 20.0, 19.0, 21.0, 20.0, 18.0, 22.0, 20.0, 19.0]
     est = None
     for r in seq:
         est = p.evaluate(_on_station(m, blue_rotation_deg=r))
     assert est.error.er == pytest.approx(20.0 / 45.0, abs=0.12)
-    # A +/-45 wrap (square symmetry: +44 -> -44) must SNAP, not average toward 0.
-    p2 = TransectPolicy(m)
-    _lock(p2, _on_station(m, blue_rotation_deg=44.0), n=8)
-    after = p2.evaluate(_on_station(m, blue_rotation_deg=-44.0))
-    assert after.error.er == pytest.approx(-44.0 / 45.0, abs=0.05)   # snapped to the wrapped value
+    assert "rot_unreliable" not in est.reasons
+
+
+def test_er_collapses_when_rotation_reads_as_noise():
+    # The pool failure mode: a 90deg-symmetric square's measured rotation wanders
+    # ~uniformly across +/-45deg even when the square is squared up. The reliability
+    # gate must SUPPRESS er (hold yaw) instead of chasing the noise -- chasing it is
+    # what rocked the vehicle back and forth.
+    m = TransectModel()
+    p = TransectPolicy(m)
+    noisy = [40.0, -38.0, 30.0, -44.0, 12.0, -25.0, 44.0, -33.0, 5.0, -41.0, 28.0, -36.0]
+    est = None
+    for r in noisy:
+        est = p.evaluate(_on_station(m, blue_rotation_deg=r))
+    assert abs(est.error.er) < 0.15
+    assert "rot_unreliable" in est.reasons
+
+
+def test_low_rotation_reliability_suppresses_er():
+    # The detector reports a per-frame rotation_reliability (e.g. its structure tensor
+    # could not concentrate on an orientation). A steady-but-untrusted rotation must
+    # NOT drive yaw: the reliability-weighted window collapses the concentration so the
+    # gate holds. Trusted, the same rotation drives a square-up error.
+    m = TransectModel()
+    untrusted = _lock(
+        TransectPolicy(m),
+        _on_station(m, blue_rotation_deg=30.0, rotation_reliability=0.0), n=15)
+    assert abs(untrusted.error.er) < 0.15
+    trusted = _lock(
+        TransectPolicy(m),
+        _on_station(m, blue_rotation_deg=30.0, rotation_reliability=1.0), n=15)
+    assert trusted.error.er > 0.4
+
+
+def test_er_does_not_flip_sign_across_the_symmetry_wrap():
+    # +44deg and -44deg are the SAME orientation (the square is 90deg-symmetric). A
+    # single -44 after a steady +44 must NOT snap er from +1 to -1 -- that sign-flip at
+    # the wrap was a source of the back-and-forth yaw command. The 90deg-periodic mean
+    # keeps er near +44/45.
+    m = TransectModel()
+    p = TransectPolicy(m)
+    _lock(p, _on_station(m, blue_rotation_deg=44.0), n=10)
+    after = p.evaluate(_on_station(m, blue_rotation_deg=-44.0))
+    assert after.error.er > 0.6   # stayed near +1, did not flip negative
 
 
 def test_reset_clears_lock_and_smoothing():

@@ -60,6 +60,7 @@ from __future__ import annotations
 from collections import deque
 from dataclasses import dataclass, field, replace
 from typing import Deque, Dict, List, Optional, Tuple
+import math
 import time
 
 from tracking.optical_tracker import StationKeepCommand, VisualTargetError
@@ -89,6 +90,7 @@ class TransectObservation:
     blue_cy: float = 0.5
     blue_fraction: float = 0.0
     blue_rotation_deg: float = 0.0
+    rotation_reliability: float = 1.0  # 0..1 per-frame trust in blue_rotation_deg (CV-supplied)
     fit_quality: float = 0.0          # 0..1 geometric detection quality (CV-supplied)
     occlusion: float = 0.0            # 0..1 fraction of blue obscured (e.g. gripper)
     red_left: float = 0.0
@@ -142,8 +144,22 @@ class TransectModel:
 
     # Temporal smoothing of the centroid/size before computing the error.
     ema_alpha: float = 0.4
-    # Separate (wrap-aware) smoothing for the rotation error er, used by vision yaw.
-    er_ema_alpha: float = 0.35
+
+    # Vision-yaw rotation error (er) robustness. A 90deg-symmetric square's apparent
+    # rotation from a SINGLE frame is an ill-conditioned measurement: minAreaRect (and
+    # even edge-direction) of a near-square is degenerate, so in the pool the detected
+    # rotation wanders ~uniformly across [-45, 45] (std ~30deg) even when the square is
+    # visibly squared up. A proportional yaw loop on that phantom error saturates and
+    # reverses -> the vehicle rocks back and forth. So er is NOT taken from one frame:
+    # it is the 90deg-PERIODIC circular mean over a short window, GATED by how
+    # consistent that window is (circular concentration R in [0, 1]). When the rotation
+    # reads as noise (R below er_reliable_R_lo) er collapses to ~0 and the yaw axis
+    # holds; only a genuinely steady rotation (R >= er_reliable_R_hi) gets full
+    # square-up authority. This gate also future-proofs the loop: if the detector ever
+    # measures rotation cleanly, it opens automatically.
+    er_window: int = 12
+    er_reliable_R_lo: float = 0.45
+    er_reliable_R_hi: float = 0.80
 
     # Robustness against the lock flapping seen in the pool (detection drops out
     # for a frame or two while the vehicle moves, which otherwise slams the ROV
@@ -256,7 +272,11 @@ class TransectPolicy:
         self._last_good: Optional[TransectEstimate] = None
         self._coast_count: int = 0
         self._reject_run: int = 0
-        self._er: Optional[float] = None   # wrap-aware EMA state for the rotation error
+        # Rotation-error robustness: a short window of recent (raw rotation, per-frame
+        # reliability) pairs + the last gated er / reliability (see TransectModel.er_window).
+        self._rot_window: Deque[Tuple[float, float]] = deque(maxlen=max(1, int(self.model.er_window)))
+        self._er: float = 0.0              # last rotation error emitted (diagnostic)
+        self._er_reliability: float = 0.0  # 0..1 concentration gate on the last er
 
     # -- internals -----------------------------------------------------------
     def _smooth(self, raw: Optional[float], state: Optional[float]) -> float:
@@ -402,18 +422,39 @@ class TransectPolicy:
         ex = _clamp((cx - tcx) / tol + bias_x, -1.0, 1.0)
         ey = _clamp((cy - tcy) / tol + bias_y, -1.0, 1.0)
 
-        # Rotation error: drive yaw to square the target up (er -> 0). Wrap-aware
-        # EMA: the square is 90deg-symmetric so er wraps at +/-1; a single big jump
-        # (|raw - state| > 1.0) is a wrap and is snapped (not averaged across), while
-        # ordinary frame-to-frame noise is low-passed. Smoothing matters now that er
-        # actually drives yaw (vision yaw hold) -- the raw rotation is noisy.
-        raw_er = _clamp(float(obs.blue_rotation_deg) / m.rot_norm_deg, -1.0, 1.0)
-        if self._er is None or abs(raw_er - self._er) > 1.0:
-            er = raw_er
-        else:
-            a = float(m.er_ema_alpha)
-            er = a * raw_er + (1.0 - a) * self._er
+        # Rotation error: drive yaw to square the target up (er -> 0), made robust to
+        # the symmetric-square measurement problem (see TransectModel.er_window). The
+        # square is 90deg-symmetric, so we treat rotation as a 90deg-PERIODIC quantity:
+        # map each recent raw rotation r to the angle 4r (period 90deg -> 2*pi), average
+        # the unit vectors, and recover the circular mean (folded back to [-45, 45]).
+        # The resultant length R in [0, 1] measures how CONSISTENT the recent rotations
+        # are -- it is ~1 for a steady rotation and ~0 for the uniform noise the detector
+        # produces for a near-square. We gate er by R so noise collapses to ~0 (yaw
+        # holds, no rock) while a genuinely steady rotation drives a full square-up.
+        # Working in the 4r domain also makes +/-45 the SAME orientation (no sign-flip
+        # snap across the wrap, which was the source of the back-and-forth command).
+        # Each sample is reliability-weighted, so a frame the detector flags as a poor
+        # rotation read (rotation_reliability ~ 0) barely moves the mean and shrinks the
+        # concentration -> the gate below holds yaw. With the default reliability 1.0
+        # this reduces to the plain circular mean.
+        self._rot_window.append(
+            (float(obs.blue_rotation_deg), _clamp(obs.rotation_reliability, 0.0, 1.0))
+        )
+        cos_sum = sum(w * math.cos(math.radians(4.0 * r)) for r, w in self._rot_window)
+        sin_sum = sum(w * math.sin(math.radians(4.0 * r)) for r, w in self._rot_window)
+        w_sum = sum(w for _, w in self._rot_window)
+        rot_concentration = math.hypot(cos_sum, sin_sum) / w_sum if w_sum > 1e-9 else 0.0
+        mean_rot_deg = math.degrees(math.atan2(sin_sum, cos_sum)) / 4.0  # folded [-45, 45]
+        lo, hi = m.er_reliable_R_lo, m.er_reliable_R_hi
+        er_reliability = (
+            _clamp((rot_concentration - lo) / (hi - lo), 0.0, 1.0)
+            if hi > lo else (1.0 if rot_concentration >= hi else 0.0)
+        )
+        er = _clamp(mean_rot_deg / m.rot_norm_deg, -1.0, 1.0) * er_reliability
         self._er = er
+        self._er_reliability = er_reliability
+        if er_reliability < 0.5:
+            reasons.append("rot_unreliable")
 
         # Size error: anchored to the on-station apparent size so es == 0 when
         # blue_fraction == nominal, for ANY calibration. We compare the metric-

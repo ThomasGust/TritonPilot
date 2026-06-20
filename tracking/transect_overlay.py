@@ -14,6 +14,7 @@ QImage, by the live transect-tab overlay. Kept separate from
 
 from __future__ import annotations
 
+import math
 from typing import Optional, Tuple
 
 import cv2
@@ -41,6 +42,21 @@ _LOCK_COLORS = {
 
 def _px(nx: float, ny: float, w: int, h: int) -> Tuple[int, int]:
     return int(round(float(nx) * w)), int(round(float(ny) * h))
+
+
+def square_state(er: float) -> Tuple[str, Tuple[int, int, int]]:
+    """Pilot-facing 'how square does the target look' read-out from the rotation error.
+
+    er is the blue square's apparent rotation normalized so 0 == head-on (squared up,
+    max margin) and |er| == 1 at the 45deg diamond. Shared by the overlay HUD and the
+    live transect status chip so both speak the same language.
+    """
+    a = abs(float(er))
+    if a < 0.15:
+        return "SQUARE", _GREEN        # head-on -- what we want
+    if a < 0.5:
+        return "TILTED", _AMBER
+    return "DIAMOND", _RED             # approaching 45deg -- corners clip
 
 
 def _draw_label(img: np.ndarray, lines, org, *, scale=0.5, fg=_WHITE, pad=6) -> None:
@@ -115,6 +131,14 @@ def draw_transect_overlay(
         det_color = state_color if lock_state in ("lock", "acquiring") else _GRAY
         cv2.polylines(img, [box.astype(np.int32)], True, det_color, 2, cv2.LINE_AA)
         cv2.drawMarker(img, (bcx, bcy), det_color, cv2.MARKER_TILTED_CROSS, 16, 2, cv2.LINE_AA)
+        # Rotation axis: the square's measured edge direction. Green when squared up
+        # (|er| small), amber when rotated toward a diamond -- the at-a-glance yaw read.
+        ang = math.radians(observation.blue_rotation_deg)
+        ax = bside * 0.7
+        dx, dy = math.cos(ang) * ax, math.sin(ang) * ax
+        sq_color = _GREEN if abs(estimate.error.er) < 0.15 else _AMBER
+        cv2.line(img, (int(bcx - dx), int(bcy - dy)), (int(bcx + dx), int(bcy + dy)),
+                 sq_color, 2, cv2.LINE_AA)
         # Error vector from the detected center to the target.
         cv2.arrowedLine(img, (bcx, bcy), (cx_px, cy_px), _WHITE, 1, cv2.LINE_AA, tipLength=0.2)
 
@@ -143,7 +167,13 @@ def draw_transect_overlay(
         elif estimate.violation > 0:
             lines.append((f"RED VISIBLE  {estimate.violation*100:3.0f}%", _RED))
         e = estimate.error
-        lines.append((f"ex {e.ex:+.2f}  ey {e.ey:+.2f}  es {e.es:+.2f}  er {e.er:+.2f}", _WHITE))
+        er_txt = f"er {e.er:+.2f}"
+        if observation is not None and observation.blue_found:
+            er_txt += f" (rel {observation.rotation_reliability:.2f})"
+        lines.append((f"ex {e.ex:+.2f}  ey {e.ey:+.2f}  es {e.es:+.2f}  {er_txt}", _WHITE))
+        if e.valid:
+            state, scol = square_state(e.er)
+            lines.append((f"TARGET: {state}", scol))
         if estimate.footprint_cm is not None:
             lines.append((f"footprint {estimate.footprint_cm:5.0f}cm  (W* {model.footprint_target_cm:.0f})", _WHITE))
         if estimate.margin_cm is not None:

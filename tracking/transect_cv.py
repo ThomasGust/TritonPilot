@@ -31,6 +31,7 @@ import time
 import cv2
 import numpy as np
 
+from tracking.rotation_tracker import RotationEstimate, RotationTracker
 from tracking.transect_policy import TransectObservation
 
 _HSV = Tuple[int, int, int]
@@ -88,9 +89,12 @@ class ClassicalTransectDetector:
 
     def __init__(self, config: Optional[ClassicalDetectorConfig] = None):
         self.cfg = config or ClassicalDetectorConfig()
+        self.rotation = RotationTracker()
+        self.last_rotation: Optional[RotationEstimate] = None  # for overlays/diagnostics
 
     def reset(self) -> None:
-        return None
+        self.rotation.reset()
+        self.last_rotation = None
 
     def _ring_score(self, fill: float) -> float:
         """High for a hollow outline; low for a solid blob (e.g. the photo board)."""
@@ -214,18 +218,21 @@ class ClassicalTransectDetector:
         side = max(rw, rh)
         fit_quality = float(np.clip(best_score, 0.0, 1.0))
 
-        # Normalize rotation to [-45, 45] (square is 90deg-symmetric).
-        rot = float(angle)
-        if rw < rh:
-            rot += 90.0
-        rot = ((rot + 45.0) % 90.0) - 45.0
+        # Rotation: the blue square's ``minAreaRect`` angle is degenerate (it flips
+        # +/-45 deg at rw~=rh on tiny contour noise), which produced a phantom ``er``
+        # that made the yaw loop rock. Measure orientation from long, well-conditioned
+        # lines instead -- a structure tensor over the blue edges plus the white pipe
+        # axis -- with a per-frame reliability the policy gates on.
+        rot_est = self.rotation.estimate(hsv, blue)
+        self.last_rotation = rot_est
 
         return TransectObservation(
             blue_found=True,
             blue_cx=float(cx) / w,
             blue_cy=float(cy) / h,
             blue_fraction=float(side) / w,
-            blue_rotation_deg=rot,
+            blue_rotation_deg=rot_est.angle_deg,
+            rotation_reliability=rot_est.reliability,
             fit_quality=fit_quality,
             occlusion=0.0,
             red_left=r_l, red_right=r_r, red_top=r_t, red_bottom=r_b,
