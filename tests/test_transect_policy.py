@@ -241,6 +241,23 @@ def test_sustained_centroid_shift_is_eventually_accepted():
     assert exs[-1] == pytest.approx(1.0, abs=0.1)
 
 
+def test_er_is_smoothed_but_snaps_across_the_wrap():
+    m = TransectModel(er_ema_alpha=0.5)
+    p = TransectPolicy(m)
+    # Noisy rotation around +20deg -> er ~ +0.44, low-passed (not chasing each spike).
+    p.reset()
+    seq = [18.0, 22.0, 16.0, 24.0, 20.0]
+    est = None
+    for r in seq:
+        est = p.evaluate(_on_station(m, blue_rotation_deg=r))
+    assert est.error.er == pytest.approx(20.0 / 45.0, abs=0.12)
+    # A +/-45 wrap (square symmetry: +44 -> -44) must SNAP, not average toward 0.
+    p2 = TransectPolicy(m)
+    _lock(p2, _on_station(m, blue_rotation_deg=44.0), n=8)
+    after = p2.evaluate(_on_station(m, blue_rotation_deg=-44.0))
+    assert after.error.er == pytest.approx(-44.0 / 45.0, abs=0.05)   # snapped to the wrapped value
+
+
 def test_reset_clears_lock_and_smoothing():
     m = TransectModel()
     p = TransectPolicy(m)

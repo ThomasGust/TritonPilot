@@ -428,16 +428,12 @@ class MainWindow(QMainWindow):
             return
         try:
             svc.set_station_keep_enabled(enabled)
+            yaw_mode = getattr(svc, "set_autopilot_axis_mode", None)
             if enabled:
                 # The transect hold relies on depth hold owning bulk altitude (the
                 # ROV then vision-servos the depth setpoint from es) and a level
                 # attitude for stable camera geometry; enable both with the hold
                 # (enable-only -- disengaging leaves the pilot's holds as-is).
-                # Heading hold deliberately NOT enabled: the magnetometer heading is
-                # unreliable (recordings/20260619-190455 showed the mag heading
-                # drifting ~9deg/s while the gyro read ~0), so mag heading hold
-                # chases a rotating reference and saturates yaw = the spin. Yaw stays
-                # free until the mag is fixed or we add vision (er) / gyro yaw hold.
                 for setter in ("set_depth_hold_enabled", "set_roll_pitch_level_enabled"):
                     fn = getattr(svc, setter, None)
                     if callable(fn):
@@ -445,8 +441,25 @@ class MainWindow(QMainWindow):
                             fn(True)
                         except Exception as exc:
                             logger.debug("%s failed: %s", setter, exc)
-            elif hasattr(self._optical_tracker, "reset"):
-                self._optical_tracker.reset()
+                # Yaw: the magnetometer heading is unreliable, so we DON'T use compass
+                # heading hold. Instead arm GYRO rate-damping ("damp" mode, mag-free)
+                # to kill the physical yaw drift, while the ROV's station-keep yaw<-er
+                # axis squares the vehicle up to the target using VISION (the blue
+                # square's rotation). Damp also opposes any rotation a wrong er-sign
+                # would cause, so this is safe to try.
+                if callable(yaw_mode):
+                    try:
+                        yaw_mode("yaw", "damp")
+                    except Exception as exc:
+                        logger.debug("yaw damp enable failed: %s", exc)
+            else:
+                if callable(yaw_mode):
+                    try:
+                        yaw_mode("yaw", "off")
+                    except Exception as exc:
+                        logger.debug("yaw damp disable failed: %s", exc)
+                if hasattr(self._optical_tracker, "reset"):
+                    self._optical_tracker.reset()
         except Exception as exc:
             logger.exception("Station-keep toggle failed: %s", exc)
         # Auto-record the hold so every attempt is captured for later review.
@@ -455,7 +468,7 @@ class MainWindow(QMainWindow):
         self._refresh_drive_status()
         rec = " + recording" if (enabled and self._hold_owns_recording) else ""
         self.statusBar().showMessage(
-            f"Optical Hold ENGAGED (station-keep + depth + level{rec})" if enabled else "Optical Hold OFF",
+            f"Optical Hold ENGAGED (station-keep + depth + level + yaw[vision]{rec})" if enabled else "Optical Hold OFF",
             3000,
         )
         trace_event("station_keep_toggle", enabled=enabled, recording=bool(self._hold_owns_recording))

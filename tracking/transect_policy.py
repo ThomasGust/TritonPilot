@@ -142,6 +142,8 @@ class TransectModel:
 
     # Temporal smoothing of the centroid/size before computing the error.
     ema_alpha: float = 0.4
+    # Separate (wrap-aware) smoothing for the rotation error er, used by vision yaw.
+    er_ema_alpha: float = 0.35
 
     # Robustness against the lock flapping seen in the pool (detection drops out
     # for a frame or two while the vehicle moves, which otherwise slams the ROV
@@ -254,6 +256,7 @@ class TransectPolicy:
         self._last_good: Optional[TransectEstimate] = None
         self._coast_count: int = 0
         self._reject_run: int = 0
+        self._er: Optional[float] = None   # wrap-aware EMA state for the rotation error
 
     # -- internals -----------------------------------------------------------
     def _smooth(self, raw: Optional[float], state: Optional[float]) -> float:
@@ -399,11 +402,18 @@ class TransectPolicy:
         ex = _clamp((cx - tcx) / tol + bias_x, -1.0, 1.0)
         ey = _clamp((cy - tcy) / tol + bias_y, -1.0, 1.0)
 
-        # Rotation error: drive yaw to square the target up (er -> 0). Uses the raw
-        # detector rotation (already in [-rot_norm, rot_norm]); not EMA-smoothed to
-        # avoid wrap artifacts near the +/-45deg symmetry boundary (the loop drives
-        # away from that boundary anyway).
-        er = _clamp(float(obs.blue_rotation_deg) / m.rot_norm_deg, -1.0, 1.0)
+        # Rotation error: drive yaw to square the target up (er -> 0). Wrap-aware
+        # EMA: the square is 90deg-symmetric so er wraps at +/-1; a single big jump
+        # (|raw - state| > 1.0) is a wrap and is snapped (not averaged across), while
+        # ordinary frame-to-frame noise is low-passed. Smoothing matters now that er
+        # actually drives yaw (vision yaw hold) -- the raw rotation is noisy.
+        raw_er = _clamp(float(obs.blue_rotation_deg) / m.rot_norm_deg, -1.0, 1.0)
+        if self._er is None or abs(raw_er - self._er) > 1.0:
+            er = raw_er
+        else:
+            a = float(m.er_ema_alpha)
+            er = a * raw_er + (1.0 - a) * self._er
+        self._er = er
 
         # Size error: anchored to the on-station apparent size so es == 0 when
         # blue_fraction == nominal, for ANY calibration. We compare the metric-
