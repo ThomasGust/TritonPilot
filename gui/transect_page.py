@@ -140,7 +140,7 @@ class TransectPage(QWidget):
         self.cv_status_label.setProperty("tone", "off")
 
         # Big, obvious engage control (also bound to the K key elsewhere).
-        self.engage_btn = QPushButton("Engage Optical Hold")
+        self.engage_btn = QPushButton("Engage Optical Hold  (K)")
         self.engage_btn.setObjectName("transectEngageButton")
         self.engage_btn.setCheckable(True)
         self.engage_btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
@@ -201,13 +201,13 @@ class TransectPage(QWidget):
         b.setChecked(bool(engaged))
         b.blockSignals(blocked)
         if engaged:
-            b.setText("● HOLDING — click to release")
+            b.setText("● HOLDING — click or press K to release")
             tone = "engaged"
         elif lock_ready:
-            b.setText("Engage Optical Hold  ✓ lock")
+            b.setText("Engage Optical Hold  ✓ lock  (K)")
             tone = "ready"
         else:
-            b.setText("Engage Optical Hold")
+            b.setText("Engage Optical Hold  (K)")
             tone = "idle"
         self._set_tone(b, tone)
 

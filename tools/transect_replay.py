@@ -67,7 +67,8 @@ _GAINS_CURRENT: List[_Axis] = [
 # stops lurching the lock loose. Keep in sync with the rov_config.py change.
 _GAINS_PROPOSED: List[_Axis] = [
     _Axis("sway", "ex", kp=0.30, ki=0.06, deadband=0.06, i_limit=0.18, out_limit=0.20, slew=0.6),
-    _Axis("surge", "ey", kp=0.30, ki=0.06, deadband=0.06, i_limit=0.18, out_limit=0.20, slew=0.6),
+    # surge sign verified flipped in water (recordings/20260619-171710): see rov_config.
+    _Axis("surge", "ey", kp=0.30, ki=0.06, deadband=0.06, i_limit=0.18, out_limit=0.20, slew=0.6, sign=-1.0),
     _Axis("heave", "es", kp=0.12, ki=0.0, deadband=0.08, i_limit=0.05, out_limit=0.15, slew=0.4),
     _Axis("yaw", "er", kp=0.0, ki=0.0, deadband=0.06, i_limit=0.05, out_limit=0.15, slew=0.5),
 ]
