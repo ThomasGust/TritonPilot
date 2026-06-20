@@ -441,23 +441,23 @@ class MainWindow(QMainWindow):
                             fn(True)
                         except Exception as exc:
                             logger.debug("%s failed: %s", setter, exc)
-                # Yaw: the magnetometer heading is unreliable, so we DON'T use compass
-                # heading hold. Instead arm GYRO rate-damping ("damp" mode, mag-free)
-                # to kill the physical yaw drift, while the ROV's station-keep yaw<-er
-                # axis squares the vehicle up to the target using VISION (the blue
-                # square's rotation). Damp also opposes any rotation a wrong er-sign
-                # would cause, so this is safe to try.
+                # Yaw is held ONLY by the ROV's station-keep yaw<-er axis (VISION:
+                # the blue square's rotation -- mag-independent). The autopilot yaw
+                # axis stays OFF: its "damp" mode used the estimator's yaw RATE, which
+                # is mag-corrupted (recordings/20260619-192426: it read -42deg/s while
+                # the raw gyro read -0.6) and was anti-damping = the spin. Keep yaw
+                # vision-only until a CLEAN raw-gyro rate damper is plumbed.
                 if callable(yaw_mode):
                     try:
-                        yaw_mode("yaw", "damp")
+                        yaw_mode("yaw", "off")
                     except Exception as exc:
-                        logger.debug("yaw damp enable failed: %s", exc)
+                        logger.debug("yaw off failed: %s", exc)
             else:
                 if callable(yaw_mode):
                     try:
                         yaw_mode("yaw", "off")
                     except Exception as exc:
-                        logger.debug("yaw damp disable failed: %s", exc)
+                        logger.debug("yaw off failed: %s", exc)
                 if hasattr(self._optical_tracker, "reset"):
                     self._optical_tracker.reset()
         except Exception as exc:
@@ -468,7 +468,7 @@ class MainWindow(QMainWindow):
         self._refresh_drive_status()
         rec = " + recording" if (enabled and self._hold_owns_recording) else ""
         self.statusBar().showMessage(
-            f"Optical Hold ENGAGED (station-keep + depth + level + yaw[vision]{rec})" if enabled else "Optical Hold OFF",
+            f"Optical Hold ENGAGED (station-keep + depth + level + yaw[vision er]{rec})" if enabled else "Optical Hold OFF",
             3000,
         )
         trace_event("station_keep_toggle", enabled=enabled, recording=bool(self._hold_owns_recording))
