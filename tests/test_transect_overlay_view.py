@@ -16,10 +16,16 @@ import pytest
 
 pytest.importorskip("PyQt6")
 
-from PyQt6.QtCore import Qt
+from PyQt6.QtCore import QRectF, Qt
 from PyQt6.QtWidgets import QApplication, QWidget
 
-from gui.transect_overlay_view import TransectHudOverlayView, TransectOverlayView
+from gui.transect_overlay_view import (
+    TransectHudOverlayView,
+    TransectOverlayView,
+    _display_mapping,
+    _point,
+    _x_fraction_to_px,
+)
 from tracking.transect_policy import TransectModel, TransectObservation, TransectPolicy
 
 
@@ -106,6 +112,18 @@ def test_hud_overlay_accepts_estimates_and_clears():
     finally:
         view.deleteLater()
         app.processEvents()
+
+
+def test_hud_square_crop_mapping_matches_pilot_tab():
+    rect = QRectF(0, 0, 320, 320)
+
+    assert _display_mapping((1080, 1920)) == (420.0, 0.0, 1080.0, 1080.0)
+    assert _display_mapping((1200, 800)) == (0.0, 200.0, 800.0, 800.0)
+
+    center = _point(rect, (1080, 1920), 0.5, 0.5)
+    assert center.x() == pytest.approx(160.0)
+    assert center.y() == pytest.approx(160.0)
+    assert _x_fraction_to_px(rect, (1080, 1920), 0.25) == pytest.approx(142.222, abs=0.001)
 
 
 def test_hud_overlay_hides_and_stays_hidden_when_app_inactive(monkeypatch):

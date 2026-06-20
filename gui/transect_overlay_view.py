@@ -21,6 +21,173 @@ from PyQt6.QtGui import QColor, QImage, QPainter, QPen, QPolygonF
 from PyQt6.QtWidgets import QApplication, QSizePolicy, QWidget
 
 
+def _coerce_source_shape(shape) -> tuple[int, int] | None:
+    try:
+        if len(shape) >= 2:
+            h, w = int(shape[0]), int(shape[1])
+            if h > 0 and w > 0:
+                return h, w
+    except Exception:
+        pass
+    return None
+
+
+def _display_mapping(source_shape: tuple[int, int] | None) -> tuple[float, float, float, float]:
+    """Return source crop x/y/w/h used by the square transect video."""
+    if source_shape is None:
+        return 0.0, 0.0, 1.0, 1.0
+    src_h, src_w = source_shape
+    if src_w > src_h:
+        side = float(src_h)
+        return (float(src_w - src_h) * 0.5, 0.0, side, side)
+    if src_h > src_w:
+        side = float(src_w)
+        return (0.0, float(src_h - src_w) * 0.5, side, side)
+    return 0.0, 0.0, float(src_w), float(src_h)
+
+
+def _point(rect, source_shape: tuple[int, int] | None, nx: float, ny: float) -> QPointF:
+    rect = QRectF(rect)
+    if source_shape is None:
+        return QPointF(
+            rect.left() + float(nx) * rect.width(),
+            rect.top() + float(ny) * rect.height(),
+        )
+    src_h, src_w = source_shape
+    crop_x, crop_y, crop_w, crop_h = _display_mapping(source_shape)
+    x = ((float(nx) * src_w) - crop_x) / max(1.0, crop_w)
+    y = ((float(ny) * src_h) - crop_y) / max(1.0, crop_h)
+    return QPointF(rect.left() + x * rect.width(), rect.top() + y * rect.height())
+
+
+def _x_fraction_to_px(rect, source_shape: tuple[int, int] | None, frac: float) -> float:
+    rect = QRectF(rect)
+    if source_shape is None:
+        return float(frac) * rect.width()
+    _src_h, src_w = source_shape
+    _crop_x, _crop_y, crop_w, _crop_h = _display_mapping(source_shape)
+    return float(frac) * float(src_w) / max(1.0, crop_w) * rect.width()
+
+
+def _state_color(lock_state: str) -> QColor:
+    return {
+        "lock": QColor(44, 210, 105),
+        "acquiring": QColor(255, 190, 52),
+        "lost": QColor(255, 72, 72),
+        "no_target": QColor(170, 176, 184),
+    }.get(str(lock_state), QColor(170, 176, 184))
+
+
+def _draw_rotated_square(painter: QPainter, center: QPointF, side: float, angle_deg: float) -> None:
+    import math
+
+    half = max(1.0, float(side) * 0.5)
+    theta = math.radians(float(angle_deg))
+    ct, st = math.cos(theta), math.sin(theta)
+    pts = []
+    for x, y in ((-half, -half), (half, -half), (half, half), (-half, half)):
+        pts.append(QPointF(center.x() + x * ct - y * st, center.y() + x * st + y * ct))
+    painter.drawPolygon(QPolygonF(pts))
+
+
+def paint_transect_hud_overlay(
+    painter: QPainter,
+    rect,
+    model,
+    estimate,
+    observation=None,
+    source_shape=None,
+) -> None:
+    """Paint the same transparent geometry HUD used by the live Transect tab.
+
+    ``source_shape`` is the uncropped frame shape. When present, the overlay maps
+    source-frame detections into the center square crop shown by the pilot tab.
+    """
+    if model is None or estimate is None:
+        return
+
+    rect = QRectF(rect)
+    source_shape = _coerce_source_shape(source_shape)
+
+    painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+
+    lock_state = str(getattr(estimate, "lock_state", "no_target"))
+    state_color = _state_color(lock_state)
+    cyan = QColor(74, 222, 255)
+    white = QColor(245, 248, 252)
+    red = QColor(255, 55, 55)
+    black_plate = QColor(8, 12, 18, 178)
+
+    target = _point(rect, source_shape, model.target_cx, model.target_cy)
+    side = _x_fraction_to_px(rect, source_shape, model.nominal_blue_fraction)
+    half = side * 0.5
+    target_rect = QRectF(target.x() - half, target.y() - half, side, side)
+
+    pen = QPen(cyan, 2)
+    pen.setStyle(Qt.PenStyle.DashLine)
+    painter.setPen(pen)
+    painter.setBrush(Qt.BrushStyle.NoBrush)
+    painter.drawRect(target_rect)
+
+    tol = _x_fraction_to_px(rect, source_shape, model.image_pos_tol)
+    painter.setPen(QPen(cyan, 1))
+    painter.drawEllipse(target, tol, tol)
+    painter.drawLine(QPointF(target.x() - 12, target.y()), QPointF(target.x() + 12, target.y()))
+    painter.drawLine(QPointF(target.x(), target.y() - 12), QPointF(target.x(), target.y() + 12))
+
+    obs = observation
+    if obs is not None and getattr(obs, "blue_found", False):
+        detected = _point(rect, source_shape, obs.blue_cx, obs.blue_cy)
+        det_side = _x_fraction_to_px(rect, source_shape, obs.blue_fraction)
+        painter.setPen(QPen(state_color, 3))
+        _draw_rotated_square(painter, detected, det_side, obs.blue_rotation_deg)
+        painter.drawLine(detected, target)
+        painter.drawLine(QPointF(detected.x() - 8, detected.y()), QPointF(detected.x() + 8, detected.y()))
+        painter.drawLine(QPointF(detected.x(), detected.y() - 8), QPointF(detected.x(), detected.y() + 8))
+
+    if obs is not None:
+        bar = max(6, int(rect.height()) // 45)
+        for mag, edge_rect in (
+            (obs.red_left, QRectF(rect.left(), rect.top(), bar, rect.height())),
+            (obs.red_right, QRectF(rect.right() - bar, rect.top(), bar, rect.height())),
+            (obs.red_top, QRectF(rect.left(), rect.top(), rect.width(), bar)),
+            (obs.red_bottom, QRectF(rect.left(), rect.bottom() - bar, rect.width(), bar)),
+        ):
+            if float(mag) > 0.02:
+                c = QColor(red)
+                c.setAlpha(max(45, min(190, int(220 * float(mag)))))
+                painter.fillRect(edge_rect, c)
+
+    painter.setPen(Qt.PenStyle.NoPen)
+    painter.setBrush(black_plate)
+    plate_w = min(rect.width() - 20, max(310, rect.width() * 0.48))
+    plate = QRectF(rect.left() + 10, rect.top() + 10, max(1.0, plate_w), 108)
+    painter.drawRoundedRect(plate, 6, 6)
+
+    painter.setBrush(state_color)
+    painter.drawEllipse(QPointF(plate.right() - 24, plate.top() + 24), 10, 10)
+    painter.setPen(QPen(white, 1))
+    metrics = painter.fontMetrics()
+    text_w = max(1, int(plate.width() - 24))
+
+    def _fit(text: str) -> str:
+        return metrics.elidedText(str(text), Qt.TextElideMode.ElideRight, text_w)
+
+    label = lock_state.upper().replace("_", " ")
+    painter.drawText(QRectF(plate.left() + 12, plate.top() + 8, plate.width() - 52, 22), _fit(label))
+
+    e = estimate.error
+    line = f"conf {estimate.confidence * 100:.0f}%  ex {e.ex:+.2f}  ey {e.ey:+.2f}"
+    painter.drawText(QRectF(plate.left() + 12, plate.top() + 34, plate.width() - 24, 20), _fit(line))
+    if estimate.margin_cm is not None:
+        detail = f"es {e.es:+.2f}  er {e.er:+.2f}  margin {estimate.margin_cm:+.1f}cm"
+    elif estimate.violation > 0:
+        detail = f"es {e.es:+.2f}  er {e.er:+.2f}  red {estimate.violation * 100:.0f}%"
+    else:
+        detail = f"es {e.es:+.2f}  er {e.er:+.2f}  searching"
+    painter.drawText(QRectF(plate.left() + 12, plate.top() + 58, plate.width() - 24, 20), _fit(detail))
+
+
 class TransectOverlayView(QWidget):
     """Show annotated CV frames; thread-safe via :meth:`submit_frame`."""
 
@@ -247,147 +414,31 @@ class TransectHudOverlayView(QWidget):
 
     @staticmethod
     def _coerce_source_shape(shape) -> tuple[int, int] | None:
-        try:
-            if len(shape) >= 2:
-                h, w = int(shape[0]), int(shape[1])
-                if h > 0 and w > 0:
-                    return h, w
-        except Exception:
-            pass
-        return None
+        return _coerce_source_shape(shape)
 
     def _display_mapping(self) -> tuple[float, float, float, float]:
-        """Return source crop x/y/w/h used by the square transect video."""
-        if self._source_shape is None:
-            return 0.0, 0.0, 1.0, 1.0
-        src_h, src_w = self._source_shape
-        if src_w > src_h:
-            side = float(src_h)
-            return (float(src_w - src_h) * 0.5, 0.0, side, side)
-        if src_h > src_w:
-            side = float(src_w)
-            return (0.0, float(src_h - src_w) * 0.5, side, side)
-        return 0.0, 0.0, float(src_w), float(src_h)
+        return _display_mapping(self._source_shape)
 
     def _point(self, nx: float, ny: float) -> QPointF:
-        rect = self.rect()
-        if self._source_shape is None:
-            return QPointF(float(nx) * rect.width(), float(ny) * rect.height())
-        src_h, src_w = self._source_shape
-        crop_x, crop_y, crop_w, crop_h = self._display_mapping()
-        x = ((float(nx) * src_w) - crop_x) / max(1.0, crop_w)
-        y = ((float(ny) * src_h) - crop_y) / max(1.0, crop_h)
-        return QPointF(x * rect.width(), y * rect.height())
+        return _point(self.rect(), self._source_shape, nx, ny)
 
     def _x_fraction_to_px(self, frac: float) -> float:
-        rect = self.rect()
-        if self._source_shape is None:
-            return float(frac) * rect.width()
-        _src_h, src_w = self._source_shape
-        _crop_x, _crop_y, crop_w, _crop_h = self._display_mapping()
-        return float(frac) * float(src_w) / max(1.0, crop_w) * rect.width()
+        return _x_fraction_to_px(self.rect(), self._source_shape, frac)
 
     @staticmethod
     def _state_color(lock_state: str) -> QColor:
-        return {
-            "lock": QColor(44, 210, 105),
-            "acquiring": QColor(255, 190, 52),
-            "lost": QColor(255, 72, 72),
-            "no_target": QColor(170, 176, 184),
-        }.get(str(lock_state), QColor(170, 176, 184))
+        return _state_color(lock_state)
 
     def _draw_rotated_square(self, painter: QPainter, center: QPointF, side: float, angle_deg: float) -> None:
-        import math
-
-        half = max(1.0, float(side) * 0.5)
-        theta = math.radians(float(angle_deg))
-        ct, st = math.cos(theta), math.sin(theta)
-        pts = []
-        for x, y in ((-half, -half), (half, -half), (half, half), (-half, half)):
-            pts.append(QPointF(center.x() + x * ct - y * st, center.y() + x * st + y * ct))
-        painter.drawPolygon(QPolygonF(pts))
+        _draw_rotated_square(painter, center, side, angle_deg)
 
     def paintEvent(self, _event) -> None:  # noqa: N802
-        model = self._model
-        estimate = self._estimate
-        if model is None or estimate is None:
-            return
-
         painter = QPainter(self)
-        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
-        rect = self.rect()
-
-        lock_state = str(getattr(estimate, "lock_state", "no_target"))
-        state_color = self._state_color(lock_state)
-        cyan = QColor(74, 222, 255)
-        white = QColor(245, 248, 252)
-        red = QColor(255, 55, 55)
-        black_plate = QColor(8, 12, 18, 178)
-
-        target = self._point(model.target_cx, model.target_cy)
-        side = self._x_fraction_to_px(model.nominal_blue_fraction)
-        half = side * 0.5
-        target_rect = QRectF(target.x() - half, target.y() - half, side, side)
-
-        pen = QPen(cyan, 2)
-        pen.setStyle(Qt.PenStyle.DashLine)
-        painter.setPen(pen)
-        painter.setBrush(Qt.BrushStyle.NoBrush)
-        painter.drawRect(target_rect)
-
-        tol = self._x_fraction_to_px(model.image_pos_tol)
-        painter.setPen(QPen(cyan, 1))
-        painter.drawEllipse(target, tol, tol)
-        painter.drawLine(QPointF(target.x() - 12, target.y()), QPointF(target.x() + 12, target.y()))
-        painter.drawLine(QPointF(target.x(), target.y() - 12), QPointF(target.x(), target.y() + 12))
-
-        obs = self._observation
-        if obs is not None and getattr(obs, "blue_found", False):
-            detected = self._point(obs.blue_cx, obs.blue_cy)
-            det_side = self._x_fraction_to_px(obs.blue_fraction)
-            painter.setPen(QPen(state_color, 3))
-            self._draw_rotated_square(painter, detected, det_side, obs.blue_rotation_deg)
-            painter.drawLine(detected, target)
-            painter.drawLine(QPointF(detected.x() - 8, detected.y()), QPointF(detected.x() + 8, detected.y()))
-            painter.drawLine(QPointF(detected.x(), detected.y() - 8), QPointF(detected.x(), detected.y() + 8))
-
-        if obs is not None:
-            bar = max(6, rect.height() // 45)
-            for mag, edge_rect in (
-                (obs.red_left, QRectF(0, 0, bar, rect.height())),
-                (obs.red_right, QRectF(rect.width() - bar, 0, bar, rect.height())),
-                (obs.red_top, QRectF(0, 0, rect.width(), bar)),
-                (obs.red_bottom, QRectF(0, rect.height() - bar, rect.width(), bar)),
-            ):
-                if float(mag) > 0.02:
-                    c = QColor(red)
-                    c.setAlpha(max(45, min(190, int(220 * float(mag)))))
-                    painter.fillRect(edge_rect, c)
-
-        painter.setPen(Qt.PenStyle.NoPen)
-        painter.setBrush(black_plate)
-        plate = QRectF(10, 10, min(rect.width() - 20, max(310, rect.width() * 0.48)), 108)
-        painter.drawRoundedRect(plate, 6, 6)
-
-        painter.setBrush(state_color)
-        painter.drawEllipse(QPointF(plate.right() - 24, plate.top() + 24), 10, 10)
-        painter.setPen(QPen(white, 1))
-        metrics = painter.fontMetrics()
-        text_w = max(1, int(plate.width() - 24))
-
-        def _fit(text: str) -> str:
-            return metrics.elidedText(str(text), Qt.TextElideMode.ElideRight, text_w)
-
-        label = lock_state.upper().replace("_", " ")
-        painter.drawText(QRectF(plate.left() + 12, plate.top() + 8, plate.width() - 52, 22), _fit(label))
-
-        e = estimate.error
-        line = f"conf {estimate.confidence * 100:.0f}%  ex {e.ex:+.2f}  ey {e.ey:+.2f}"
-        painter.drawText(QRectF(plate.left() + 12, plate.top() + 34, plate.width() - 24, 20), _fit(line))
-        if estimate.margin_cm is not None:
-            detail = f"es {e.es:+.2f}  er {e.er:+.2f}  margin {estimate.margin_cm:+.1f}cm"
-        elif estimate.violation > 0:
-            detail = f"es {e.es:+.2f}  er {e.er:+.2f}  red {estimate.violation * 100:.0f}%"
-        else:
-            detail = f"es {e.es:+.2f}  er {e.er:+.2f}  searching"
-        painter.drawText(QRectF(plate.left() + 12, plate.top() + 58, plate.width() - 24, 20), _fit(detail))
+        paint_transect_hud_overlay(
+            painter,
+            self.rect(),
+            self._model,
+            self._estimate,
+            self._observation,
+            self._source_shape,
+        )

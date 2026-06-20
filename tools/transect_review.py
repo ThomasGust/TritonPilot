@@ -43,7 +43,7 @@ import cv2
 import numpy as np
 
 from PyQt6.QtCore import Qt, QTimer, pyqtSignal
-from PyQt6.QtGui import QImage, QPixmap
+from PyQt6.QtGui import QImage, QPainter, QPixmap
 from PyQt6.QtWidgets import (
     QApplication, QComboBox, QFileDialog, QHBoxLayout, QLabel, QMainWindow,
     QPushButton, QSizePolicy, QSlider, QVBoxLayout, QWidget,
@@ -66,6 +66,7 @@ from tracking.transect_overlay import draw_transect_overlay
 from tracking.transect_policy import (
     TransectEstimate, TransectModel, TransectObservation, TransectPolicy,
 )
+from gui.transect_overlay_view import paint_transect_hud_overlay
 
 
 # ===========================================================================
@@ -419,6 +420,7 @@ class ReviewWindow(QMainWindow):
         self.playing = False
         self.speed = 1.0
         self.overlay_mode = "recorded"     # recorded | rerun
+        self.view_mode = "review"          # review | pilot
         self.rerun: Optional[RerunPass] = None
 
         self._build_ui()
@@ -495,12 +497,17 @@ class ReviewWindow(QMainWindow):
         self.speed_box.currentTextChanged.connect(self._on_speed)
         self.overlay_box = QComboBox()
         self.overlay_box.addItems(["Overlay: recorded", "Overlay: re-run detector"])
+        self.overlay_box.setToolTip("Recorded uses logged model errors; re-run detector adds detected blue/red geometry.")
         self.overlay_box.currentIndexChanged.connect(self._on_overlay_mode)
+        self.view_box = QComboBox()
+        self.view_box.addItems(["View: full review frame", "View: pilot tab crop + HUD"])
+        self.view_box.setToolTip("Matches the live Transect tab square crop and transparent HUD.")
+        self.view_box.currentIndexChanged.connect(self._on_view_mode)
         self.btn_export = QPushButton("Save frame")
         self.btn_export.clicked.connect(self._export_frame)
         for w in (self.btn_prev, self.btn_play, self.btn_next,
                   QLabel("  clip:"), self.clip_box, QLabel("  speed:"), self.speed_box,
-                  self.overlay_box, self.btn_export):
+                  self.overlay_box, self.view_box, self.btn_export):
             bar.addWidget(w)
         bar.addStretch(1)
         left.addLayout(bar)
@@ -706,6 +713,10 @@ class ReviewWindow(QMainWindow):
             self._start_rerun()
         self._render()
 
+    def _on_view_mode(self, idx: int) -> None:
+        self.view_mode = "pilot" if idx == 1 else "review"
+        self._render()
+
     def _start_rerun(self) -> None:
         self._cancel_rerun()
         from tracking.transect_cv import ClassicalTransectDetector
@@ -733,18 +744,14 @@ class ReviewWindow(QMainWindow):
     def _render(self) -> None:
         if self.cur_bgr is None:
             return
-        frame = self.cur_bgr.copy()
-        if self.overlay_mode == "rerun" and self.rerun is not None and self.rerun.done \
-                and self.cur_frame < len(self.rerun.est):
-            est = self.rerun.est[self.cur_frame]
-            obs = self.rerun.obs[self.cur_frame]
-            draw_transect_overlay(frame, self.model, est, obs)
+        est, obs = self._current_overlay_state()
+        if self.view_mode == "pilot":
+            self._show_qimage(self._pilot_tab_qimage(self.cur_bgr, est, obs))
         else:
-            vis = self._recorded_visual_at(self._frame_time(self.cur_frame))
-            est = estimate_from_visual(vis, self.model)
-            draw_transect_overlay(frame, self.model, est, None)
+            frame = self.cur_bgr.copy()
+            draw_transect_overlay(frame, self.model, est, obs)
+            self._show_frame(frame)
 
-        self._show_frame(frame)
         self.scrub.blockSignals(True)
         self.scrub.setValue(self.cur_frame)
         self.scrub.blockSignals(False)
@@ -752,7 +759,14 @@ class ReviewWindow(QMainWindow):
         t = self._frame_time(self.cur_frame)
         self.status.setText(
             f"frame {self.cur_frame}/{self.frame_count}   t={t:6.2f}s   "
-            f"{os.path.basename(self.clip or '')}   overlay={self.overlay_mode}")
+            f"{os.path.basename(self.clip or '')}   overlay={self.overlay_mode}   view={self.view_mode}")
+
+    def _current_overlay_state(self) -> tuple[TransectEstimate, Optional[TransectObservation]]:
+        if self.overlay_mode == "rerun" and self.rerun is not None and self.rerun.done \
+                and self.cur_frame < len(self.rerun.est):
+            return self.rerun.est[self.cur_frame], self.rerun.obs[self.cur_frame]
+        vis = self._recorded_visual_at(self._frame_time(self.cur_frame))
+        return estimate_from_visual(vis, self.model), None
 
     def _recorded_visual_at(self, t: float) -> dict:
         payloads = self.session.visual_payloads if self.session else []
@@ -763,27 +777,64 @@ class ReviewWindow(QMainWindow):
         return payloads[i][1] if i >= 0 else {"valid": False}
 
     def _show_frame(self, bgr: np.ndarray) -> None:
-        rgb = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
-        h, w, _ = rgb.shape
-        img = QImage(rgb.data, w, h, 3 * w, QImage.Format.Format_RGB888)
+        self._show_qimage(self._qimage_from_bgr(bgr))
+
+    def _show_qimage(self, img: QImage) -> None:
         pix = QPixmap.fromImage(img).scaled(
             self.video.size(), Qt.AspectRatioMode.KeepAspectRatio,
             Qt.TransformationMode.SmoothTransformation)
         self.video.setPixmap(pix)
 
+    @staticmethod
+    def _qimage_from_bgr(bgr: np.ndarray) -> QImage:
+        rgb = cv2.cvtColor(np.ascontiguousarray(bgr), cv2.COLOR_BGR2RGB)
+        h, w, _ = rgb.shape
+        return QImage(rgb.data, w, h, 3 * w, QImage.Format.Format_RGB888).copy()
+
+    @staticmethod
+    def _square_crop_bgr(frame: np.ndarray) -> np.ndarray:
+        h, w = frame.shape[:2]
+        if h <= 0 or w <= 0 or h == w:
+            return np.ascontiguousarray(frame)
+        if w > h:
+            left = max(0, (w - h) // 2)
+            return np.ascontiguousarray(frame[:, left:left + h, :])
+        top = max(0, (h - w) // 2)
+        return np.ascontiguousarray(frame[top:top + w, :, :])
+
+    def _pilot_tab_qimage(
+        self,
+        source_bgr: np.ndarray,
+        estimate: TransectEstimate,
+        observation: Optional[TransectObservation],
+    ) -> QImage:
+        display_bgr = self._square_crop_bgr(source_bgr)
+        img = self._qimage_from_bgr(display_bgr)
+        painter = QPainter(img)
+        try:
+            paint_transect_hud_overlay(
+                painter,
+                img.rect(),
+                self.model,
+                estimate,
+                observation,
+                source_bgr.shape,
+            )
+        finally:
+            painter.end()
+        return img
+
     def _export_frame(self) -> None:
         if self.cur_bgr is None:
             return
         out = f"transect_review_frame_{self.cur_frame:05d}.png"
-        frame = self.cur_bgr.copy()
-        vis = self._recorded_visual_at(self._frame_time(self.cur_frame))
-        if self.overlay_mode == "rerun" and self.rerun is not None and self.rerun.done \
-                and self.cur_frame < len(self.rerun.est):
-            draw_transect_overlay(frame, self.model, self.rerun.est[self.cur_frame],
-                                  self.rerun.obs[self.cur_frame])
+        est, obs = self._current_overlay_state()
+        if self.view_mode == "pilot":
+            self._pilot_tab_qimage(self.cur_bgr, est, obs).save(out)
         else:
-            draw_transect_overlay(frame, self.model, estimate_from_visual(vis, self.model), None)
-        cv2.imwrite(out, frame)
+            frame = self.cur_bgr.copy()
+            draw_transect_overlay(frame, self.model, est, obs)
+            cv2.imwrite(out, frame)
         self.status.setText(f"saved {out}")
 
     def resizeEvent(self, e):
