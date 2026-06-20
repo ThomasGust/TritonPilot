@@ -4,7 +4,16 @@ from __future__ import annotations
 
 from PyQt6.QtCore import QRect, Qt, pyqtSignal
 from PyQt6.QtWidgets import (
-    QComboBox, QFrame, QHBoxLayout, QLabel, QPushButton, QSizePolicy, QVBoxLayout, QWidget,
+    QCheckBox,
+    QComboBox,
+    QDoubleSpinBox,
+    QFrame,
+    QHBoxLayout,
+    QLabel,
+    QPushButton,
+    QSizePolicy,
+    QVBoxLayout,
+    QWidget,
 )
 
 
@@ -112,8 +121,19 @@ class TransectPage(QWidget):
 
     cameraSelectionChanged = pyqtSignal(str)
     engageToggled = pyqtSignal(bool)   # operator pressed the Engage Optical Hold button
+    rotationServoToggled = pyqtSignal(bool)
+    targetBlueWidthChanged = pyqtSignal(float)
 
-    def __init__(self, stream_names: list[str], parent=None):
+    def __init__(
+        self,
+        stream_names: list[str],
+        parent=None,
+        *,
+        rotation_servo_enabled: bool = False,
+        target_blue_width_percent: float = 55.6,
+        target_blue_width_min_percent: float = 25.0,
+        target_blue_width_max_percent: float = 95.0,
+    ):
         super().__init__(parent)
         self.stream_names = list(stream_names)
         self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
@@ -139,6 +159,34 @@ class TransectPage(QWidget):
         self.cv_status_label.setObjectName("transectCvStatus")
         self.cv_status_label.setProperty("tone", "off")
 
+        target_label = QLabel("Blue width")
+        target_label.setObjectName("transectTargetLabel")
+        self.target_blue_width_spin = QDoubleSpinBox()
+        self.target_blue_width_spin.setObjectName("transectTargetBlueWidthSpin")
+        self.target_blue_width_spin.setFocusPolicy(Qt.FocusPolicy.ClickFocus)
+        self.target_blue_width_spin.setKeyboardTracking(False)
+        lo = float(target_blue_width_min_percent)
+        hi = max(lo, float(target_blue_width_max_percent))
+        self.target_blue_width_spin.setRange(lo, hi)
+        self.target_blue_width_spin.setDecimals(1)
+        self.target_blue_width_spin.setSingleStep(1.0)
+        self.target_blue_width_spin.setSuffix(" %")
+        self.target_blue_width_spin.setValue(max(lo, min(hi, float(target_blue_width_percent))))
+        self.target_blue_width_spin.setMinimumWidth(92)
+        self.target_blue_width_spin.setToolTip(
+            "Target apparent blue-square width as a percent of frame width."
+        )
+        self.target_blue_width_spin.valueChanged.connect(
+            lambda value: self.targetBlueWidthChanged.emit(float(value))
+        )
+
+        self.rotation_servo_check = QCheckBox("Yaw/er")
+        self.rotation_servo_check.setObjectName("transectRotationServoToggle")
+        self.rotation_servo_check.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self.rotation_servo_check.setChecked(bool(rotation_servo_enabled))
+        self.rotation_servo_check.setToolTip("Allow transect rotation error to drive yaw.")
+        self.rotation_servo_check.toggled.connect(self.rotationServoToggled.emit)
+
         # Big, obvious engage control (also bound to the K key elsewhere).
         self.engage_btn = QPushButton("Engage Optical Hold  (K)")
         self.engage_btn.setObjectName("transectEngageButton")
@@ -150,6 +198,9 @@ class TransectPage(QWidget):
 
         controls_lay.addWidget(label, 0)
         controls_lay.addWidget(self.camera_combo, 0)
+        controls_lay.addWidget(target_label, 0)
+        controls_lay.addWidget(self.target_blue_width_spin, 0)
+        controls_lay.addWidget(self.rotation_servo_check, 0)
         controls_lay.addStretch(1)
         controls_lay.addWidget(self.cv_status_label, 0)
         controls_lay.addWidget(self.engage_btn, 0)
@@ -189,6 +240,20 @@ class TransectPage(QWidget):
         """Update the small non-covering autopilot CV status chip."""
         self.cv_status_label.setText(str(text))
         self._set_tone(self.cv_status_label, tone)
+
+    def set_rotation_servo_enabled(self, enabled: bool, *, emit: bool = False) -> None:
+        prev = self.rotation_servo_check.blockSignals(not emit)
+        try:
+            self.rotation_servo_check.setChecked(bool(enabled))
+        finally:
+            self.rotation_servo_check.blockSignals(prev)
+
+    def set_target_blue_width_percent(self, value: float, *, emit: bool = False) -> None:
+        prev = self.target_blue_width_spin.blockSignals(not emit)
+        try:
+            self.target_blue_width_spin.setValue(float(value))
+        finally:
+            self.target_blue_width_spin.blockSignals(prev)
 
     def update_engage_state(self, *, engaged: bool, lock_ready: bool) -> None:
         """Reflect the hold state on the engage button (also driven by the K key).

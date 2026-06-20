@@ -32,6 +32,52 @@ def test_engage_button_emits_toggled_both_ways():
         app.processEvents()
 
 
+def test_runtime_servo_controls_emit_operator_changes():
+    app = _app()
+    page = TransectPage(
+        stream_names=["Arm Camera"],
+        rotation_servo_enabled=False,
+        target_blue_width_percent=55.6,
+    )
+    try:
+        rotation_events = []
+        blue_width_events = []
+        page.rotationServoToggled.connect(rotation_events.append)
+        page.targetBlueWidthChanged.connect(blue_width_events.append)
+
+        page.rotation_servo_check.click()
+        page.target_blue_width_spin.setValue(44.6)
+        app.processEvents()
+
+        assert rotation_events == [True]
+        assert blue_width_events[-1] == pytest.approx(44.6)
+    finally:
+        page.deleteLater()
+        app.processEvents()
+
+
+def test_runtime_servo_controls_sync_without_emitting():
+    app = _app()
+    page = TransectPage(stream_names=["Arm Camera"])
+    try:
+        rotation_events = []
+        blue_width_events = []
+        page.rotationServoToggled.connect(rotation_events.append)
+        page.targetBlueWidthChanged.connect(blue_width_events.append)
+
+        page.set_rotation_servo_enabled(True)
+        page.set_target_blue_width_percent(45.0)
+        app.processEvents()
+
+        assert page.rotation_servo_check.isChecked() is True
+        assert page.target_blue_width_spin.value() == pytest.approx(45.0)
+        assert rotation_events == []
+        assert blue_width_events == []
+    finally:
+        page.deleteLater()
+        app.processEvents()
+
+
 def test_update_engage_state_reflects_without_emitting():
     app = _app()
     page = TransectPage(stream_names=["Arm Camera"])

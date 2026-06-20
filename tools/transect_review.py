@@ -281,6 +281,47 @@ def estimate_from_visual(vis: dict, model: TransectModel) -> TransectEstimate:
     )
 
 
+def _blue_width_percent_sample(
+    model: TransectModel,
+    estimate: TransectEstimate,
+    observation: Optional[TransectObservation],
+) -> Optional[Tuple[float, str]]:
+    """Return blue-square width as percent of frame width, plus source label."""
+    if observation is not None and observation.blue_found and observation.blue_fraction > 1e-6:
+        return 100.0 * float(observation.blue_fraction), "detected"
+
+    if estimate.footprint_cm is not None and estimate.footprint_cm > 1e-6:
+        return 100.0 * float(model.blue_cm) / float(estimate.footprint_cm), "footprint"
+
+    err = estimate.error
+    if not err.valid:
+        return None
+    try:
+        w0 = float(model.blue_cm) / max(1e-6, float(model.nominal_blue_fraction))
+        footprint_cm = w0 - float(err.es) * float(model.size_tol_cm)
+    except Exception:
+        return None
+    if not math.isfinite(footprint_cm) or footprint_cm <= 1e-6:
+        return None
+    return 100.0 * float(model.blue_cm) / footprint_cm, "estimated"
+
+
+def _format_blue_width_percent(
+    model: TransectModel,
+    estimate: TransectEstimate,
+    observation: Optional[TransectObservation],
+) -> str:
+    sample = _blue_width_percent_sample(model, estimate, observation)
+    if sample is None:
+        return ""
+    pct, source = sample
+    if not math.isfinite(pct):
+        return ""
+    prefix = "~" if source == "estimated" else ""
+    suffix = " from es" if source == "estimated" else ""
+    return f"blue width {prefix}{pct:4.1f}% frame{suffix}"
+
+
 class RerunPass:
     """A cached run of a detector+policy over every frame of a clip (for A/B).
 
@@ -757,9 +798,12 @@ class ReviewWindow(QMainWindow):
         self.scrub.blockSignals(False)
         self.plots.set_cursor(self._frame_time(self.cur_frame))
         t = self._frame_time(self.cur_frame)
+        blue_width = _format_blue_width_percent(self.model, est, obs)
+        blue_width_text = f"   {blue_width}" if blue_width else ""
         self.status.setText(
             f"frame {self.cur_frame}/{self.frame_count}   t={t:6.2f}s   "
-            f"{os.path.basename(self.clip or '')}   overlay={self.overlay_mode}   view={self.view_mode}")
+            f"{os.path.basename(self.clip or '')}   overlay={self.overlay_mode}   view={self.view_mode}"
+            f"{blue_width_text}")
 
     def _current_overlay_state(self) -> tuple[TransectEstimate, Optional[TransectObservation]]:
         if self.overlay_mode == "rerun" and self.rerun is not None and self.rerun.done \

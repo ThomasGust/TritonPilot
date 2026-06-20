@@ -135,6 +135,12 @@ class TransectVisionSource:
                 "age_since_start_s": (now - self._started_mono) if self._started_mono else None,
             }
 
+    def set_policy(self, policy: TransectPolicy) -> None:
+        """Swap the live policy after a runtime model/target change."""
+        with self._lock:
+            self.policy = policy
+            self.policy.reset()
+
     def start(self) -> None:
         with self._lock:
             if self.is_running():

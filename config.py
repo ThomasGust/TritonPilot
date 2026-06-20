@@ -246,6 +246,30 @@ ROLL_PITCH_LEVEL_DEFAULT = os.environ.get("TRITON_RP_LEVEL_DEFAULT", "0").strip(
 YAW_HOLD_TOGGLE_BUTTON = os.environ.get("TRITON_YAW_HOLD_TOGGLE", "lstick").strip().lower()
 YAW_HOLD_DEFAULT = os.environ.get("TRITON_YAW_HOLD_DEFAULT", "0").strip().lower() in ("1", "true", "yes")
 
+# Transect optical-hold experimental defaults. The size/altitude loop regulates
+# apparent target size, not a pressure-sensor depth. Larger blue width percent
+# means lower/closer to the square; smaller means higher/farther.
+TRANSECT_ROTATION_SERVO_DEFAULT = (
+    os.environ.get("TRITON_TRANSECT_ROTATION_SERVO_DEFAULT", "0").strip().lower()
+    in ("1", "true", "yes", "on")
+)
+
+
+def _transect_target_blue_width_percent_default() -> float:
+    s = os.environ.get("TRITON_TRANSECT_TARGET_BLUE_WIDTH_PERCENT", "").strip()
+    if s:
+        return float(s)
+    # Backwards-compatible bridge for the previous footprint-cm knob.
+    footprint_s = os.environ.get("TRITON_TRANSECT_TARGET_FOOTPRINT_CM", "").strip()
+    if footprint_s:
+        return 100.0 * 50.0 / max(1e-6, float(footprint_s))
+    return 100.0 * 50.0 / 90.0
+
+
+TRANSECT_TARGET_BLUE_WIDTH_PERCENT_DEFAULT = _transect_target_blue_width_percent_default()
+TRANSECT_TARGET_BLUE_WIDTH_PERCENT_MIN = float(os.environ.get("TRITON_TRANSECT_TARGET_BLUE_WIDTH_PERCENT_MIN", "25.0"))
+TRANSECT_TARGET_BLUE_WIDTH_PERCENT_MAX = float(os.environ.get("TRITON_TRANSECT_TARGET_BLUE_WIDTH_PERCENT_MAX", "95.0"))
+
 # Topside-only fallback attitude estimator convention. The onboard estimator is
 # authoritative when available; these settings keep the raw-sensor page aligned
 # during local fallback/replay.

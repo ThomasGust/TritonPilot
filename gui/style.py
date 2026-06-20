@@ -179,6 +179,18 @@ def apply_modern_style(app: QApplication) -> None:
     QWidget#transectControls {
         background: transparent;
     }
+    QLabel#transectTargetLabel,
+    QCheckBox#transectRotationServoToggle {
+        color: #c8c8d0;
+        font-weight: 600;
+    }
+    QDoubleSpinBox#transectTargetBlueWidthSpin {
+        color: #eef1f7;
+        background: #1c1c22;
+        border: 1px solid #44444f;
+        border-radius: 6px;
+        padding: 2px 6px;
+    }
     QLabel#transectCvStatus {
         padding: 1px 8px;
         border-radius: 8px;

@@ -17,6 +17,7 @@ import socket
 import threading
 import time
 from collections import deque
+from dataclasses import replace
 from pathlib import Path
 
 import numpy as np
@@ -64,6 +65,10 @@ from config import (
     PILOT_PUBLISH_RATE_HZ,
     TETHER_ROV_HOST,
     TETHER_WINDOWS_HOST,
+    TRANSECT_ROTATION_SERVO_DEFAULT,
+    TRANSECT_TARGET_BLUE_WIDTH_PERCENT_DEFAULT,
+    TRANSECT_TARGET_BLUE_WIDTH_PERCENT_MIN,
+    TRANSECT_TARGET_BLUE_WIDTH_PERCENT_MAX,
 )
 
 from input.pilot_service import PilotPublisherService
@@ -406,6 +411,87 @@ class MainWindow(QMainWindow):
         checked = bool(checked)
         self._set_reverse_mode(checked)
 
+    @staticmethod
+    def _clamp_transect_target_blue_width_percent(value: float) -> float:
+        try:
+            v = float(value)
+        except Exception:
+            v = float(TRANSECT_TARGET_BLUE_WIDTH_PERCENT_DEFAULT)
+        lo = max(1.0, float(TRANSECT_TARGET_BLUE_WIDTH_PERCENT_MIN))
+        hi = min(100.0, max(lo, float(TRANSECT_TARGET_BLUE_WIDTH_PERCENT_MAX)))
+        if not math.isfinite(v):
+            v = float(TRANSECT_TARGET_BLUE_WIDTH_PERCENT_DEFAULT)
+        return min(max(v, lo), hi)
+
+    @staticmethod
+    def _transect_model_with_blue_width_percent(model: TransectModel, percent: float) -> TransectModel:
+        return replace(model, target_blue_fraction=max(1e-6, float(percent)) / 100.0)
+
+    def _replace_transect_model(self, model: TransectModel) -> None:
+        self._transect_model = model
+        self._transect_policy = TransectPolicy(model)
+        self._transect_last_lock = "no_target"
+        self._transect_last_conf = 0.0
+        self._transect_last_err = (0.0, 0.0, 0.0, 0.0, 0.0)
+        source = getattr(self, "_transect_cv_source", None)
+        if source is not None:
+            setter = getattr(source, "set_policy", None)
+            if callable(setter):
+                setter(self._transect_policy)
+            else:
+                source.policy = self._transect_policy
+                try:
+                    source.policy.reset()
+                except Exception:
+                    pass
+        try:
+            self._transect_overlay_view.clear()
+        except Exception:
+            pass
+
+    def _set_transect_rotation_servo_enabled(self, enabled: bool) -> None:
+        enabled = bool(enabled)
+        self._transect_rotation_servo_enabled = enabled
+        page = getattr(self, "_transect_page", None)
+        if page is not None:
+            try:
+                page.set_rotation_servo_enabled(enabled, emit=False)
+            except Exception:
+                pass
+        act = getattr(self, "_transect_rotation_servo_act", None)
+        if act is not None:
+            prev = act.blockSignals(True)
+            try:
+                act.setChecked(enabled)
+            finally:
+                try:
+                    act.blockSignals(prev)
+                except Exception:
+                    pass
+        state = "ON" if enabled else "OFF"
+        self.statusBar().showMessage(f"Transect yaw/er authority {state}", 2500)
+        self._update_transect_cv_status()
+
+    def _set_transect_target_blue_width_percent(self, value: float) -> None:
+        percent = self._clamp_transect_target_blue_width_percent(value)
+        self._transect_target_blue_width_percent = percent
+        self._replace_transect_model(
+            self._transect_model_with_blue_width_percent(self._transect_model, percent)
+        )
+        page = getattr(self, "_transect_page", None)
+        if page is not None:
+            try:
+                page.set_target_blue_width_percent(percent, emit=False)
+            except Exception:
+                pass
+        self.statusBar().showMessage(f"Transect blue width target {percent:.1f}%", 2500)
+        self._update_transect_cv_status()
+
+    def _transect_error_for_publish(self, error: VisualTargetError) -> VisualTargetError:
+        if self._transect_rotation_servo_enabled:
+            return error
+        return replace(error, er=0.0)
+
     # --- optical-tracking station-keep (CV-era) -------------------------------
     def _sync_station_keep_action(self) -> None:
         act = getattr(self, "_station_keep_act", None)
@@ -469,8 +555,12 @@ class MainWindow(QMainWindow):
         self._sync_station_keep_action()
         self._refresh_drive_status()
         rec = " + recording" if (enabled and self._hold_owns_recording) else ""
+        yaw_er = "ON" if getattr(self, "_transect_rotation_servo_enabled", False) else "OFF"
         self.statusBar().showMessage(
-            f"Optical Hold ENGAGED (station-keep + depth + level + yaw[free]{rec})" if enabled else "Optical Hold OFF",
+            (
+                f"Optical Hold ENGAGED (station-keep + depth + level + yaw/er {yaw_er}{rec})"
+                if enabled else "Optical Hold OFF"
+            ),
             3000,
         )
         trace_event("station_keep_toggle", enabled=enabled, recording=bool(self._hold_owns_recording))
@@ -1001,6 +1091,8 @@ class MainWindow(QMainWindow):
             a = abs(er)
             sq = "SQUARE ✓" if a < 0.15 else ("TILTED" if a < 0.5 else "DIAMOND ⚠")
             txt += f"  |  {sq}  ex{ex:+.2f} ey{ey:+.2f} es{es:+.2f} er{er:+.2f}"
+            if not getattr(self, "_transect_rotation_servo_enabled", False):
+                txt += " yaw/er OFF"
             if viol > 0.05:
                 txt += f"  RED {viol * 100:.0f}%"
         page.set_cv_status(txt, tone)
@@ -1017,7 +1109,14 @@ class MainWindow(QMainWindow):
         self._transect_last_lock = estimate.lock_state
         self._transect_last_conf = float(estimate.confidence)
         e = estimate.error
-        self._transect_last_err = (e.ex, e.ey, e.es, e.er, estimate.violation)
+        command_error = self._transect_error_for_publish(e)
+        self._transect_last_err = (
+            e.ex,
+            e.ey,
+            e.es,
+            e.er,
+            estimate.violation,
+        )
         try:
             self._transect_overlay_view.submit_estimate(
                 self._transect_model,
@@ -1032,7 +1131,7 @@ class MainWindow(QMainWindow):
         try:
             svc = getattr(self, "pilot_svc", None)
             if svc is not None and bool(svc.is_station_keep_enabled()):
-                self.publish_visual_target(estimate.error)
+                self.publish_visual_target(command_error)
         except Exception as exc:
             logger.debug("transect publish failed: %s", exc)
 
@@ -1079,6 +1178,7 @@ class MainWindow(QMainWindow):
         self._analysis_transfer_start_act: QAction | None = None
         self._analysis_transfer_stop_act: QAction | None = None
         self._analysis_transfer_restart_act: QAction | None = None
+        self._transect_rotation_servo_act: QAction | None = None
         self._analysis_transfer_server = None
         self._analysis_transfer_thread = None
         self._analysis_transfer_root: Path | None = None
@@ -1123,11 +1223,19 @@ class MainWindow(QMainWindow):
         # surface in the transparent lock/error HUD so a CV decode stall can
         # never replace/flicker the picture.
         # Nadir arm camera (post 90-deg mount fix): the geometric defaults are
-        # correct -- target_cx/cy=0.5 and on-station blue_fraction = blue_cm/W* (90cm
-        # footprint). Do NOT set target_blue_fraction from a recording's median: that
-        # only reflects how high the ROV happened to fly (usually too high). Use
-        # tools/transect_replay.py --calibrate to re-check centering if the mount moves.
-        self._transect_model = TransectModel()
+        # correct -- target_cx/cy=0.5 and on-station blue width is 50/90 = 55.6%
+        # of frame width. Be careful when changing target_blue_fraction from a
+        # recording's median: that may just reflect how high the ROV happened to
+        # fly. Use tools/transect_replay.py --calibrate to re-check centering if
+        # the mount moves.
+        self._transect_rotation_servo_enabled = bool(TRANSECT_ROTATION_SERVO_DEFAULT)
+        self._transect_target_blue_width_percent = self._clamp_transect_target_blue_width_percent(
+            TRANSECT_TARGET_BLUE_WIDTH_PERCENT_DEFAULT
+        )
+        self._transect_model = self._transect_model_with_blue_width_percent(
+            TransectModel(),
+            self._transect_target_blue_width_percent,
+        )
         self._transect_policy = TransectPolicy(self._transect_model)
         self._transect_detector = None  # lazily created ClassicalTransectDetector
         self._transect_overlay_view = TransectHudOverlayView()
@@ -1543,13 +1651,21 @@ class MainWindow(QMainWindow):
             pilot_outer.addWidget(right_col, 1)
         self._page_stack.addWidget(self._pilot_page)
 
-        self._transect_page = TransectPage(stream_names=stream_names)
+        self._transect_page = TransectPage(
+            stream_names=stream_names,
+            rotation_servo_enabled=self._transect_rotation_servo_enabled,
+            target_blue_width_percent=self._transect_target_blue_width_percent,
+            target_blue_width_min_percent=TRANSECT_TARGET_BLUE_WIDTH_PERCENT_MIN,
+            target_blue_width_max_percent=TRANSECT_TARGET_BLUE_WIDTH_PERCENT_MAX,
+        )
         # Default the transect view to the arm camera (the square-aspect task feed).
         transect_default = self._select_transect_stream_name(stream_names)
         if transect_default:
             self._transect_page.set_current_stream(transect_default, emit=False)
         self._transect_page.cameraSelectionChanged.connect(self._on_transect_camera_changed)
         self._transect_page.engageToggled.connect(self._on_transect_engage_toggled)
+        self._transect_page.rotationServoToggled.connect(self._set_transect_rotation_servo_enabled)
+        self._transect_page.targetBlueWidthChanged.connect(self._set_transect_target_blue_width_percent)
         self._transect_page.set_overlay_widget(self._transect_overlay_view)
         if self.video_panel is None:
             self._transect_page.attach_video_placeholder("Video unavailable.")
@@ -4162,6 +4278,15 @@ class MainWindow(QMainWindow):
         )
         self._station_keep_act.toggled.connect(self._toggle_station_keep_from_ui)
         autopilot_menu.addAction(self._station_keep_act)
+
+        self._transect_rotation_servo_act = QAction("Transect yaw/er authority", self)
+        self._transect_rotation_servo_act.setCheckable(True)
+        self._transect_rotation_servo_act.setChecked(bool(self._transect_rotation_servo_enabled))
+        self._transect_rotation_servo_act.setToolTip(
+            "Allow the transect rotation error channel (er) to command yaw through station-keep."
+        )
+        self._transect_rotation_servo_act.toggled.connect(self._set_transect_rotation_servo_enabled)
+        autopilot_menu.addAction(self._transect_rotation_servo_act)
 
         self._fullscreen_act = QAction("Full Screen", self)
         self._fullscreen_act.setCheckable(True)
