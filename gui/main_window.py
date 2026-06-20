@@ -428,15 +428,12 @@ class MainWindow(QMainWindow):
             return
         try:
             svc.set_station_keep_enabled(enabled)
+            yaw_mode = getattr(svc, "set_autopilot_axis_mode", None)
             if enabled:
                 # The transect hold relies on depth hold owning bulk altitude (the
                 # ROV then vision-servos the depth setpoint from es) and a level
                 # attitude for stable camera geometry; enable both with the hold
                 # (enable-only -- disengaging leaves the pilot's holds as-is).
-                # NOTE: auto heading-hold was tried 2026-06-19 and REVERTED -- the
-                # yaw axis re-latches its target on any stick input (manual_latch),
-                # so it never held and the vehicle spun (~700deg). Yaw stays free
-                # until heading-hold is fixed (manual_latch off + sign/mag check).
                 for setter in ("set_depth_hold_enabled", "set_roll_pitch_level_enabled"):
                     fn = getattr(svc, setter, None)
                     if callable(fn):
@@ -444,8 +441,24 @@ class MainWindow(QMainWindow):
                             fn(True)
                         except Exception as exc:
                             logger.debug("%s failed: %s", setter, exc)
-            elif hasattr(self._optical_tracker, "reset"):
-                self._optical_tracker.reset()
+                # Hold heading: the vehicle drifts in yaw under current (~11deg/s in
+                # pool data with free yaw), which spins the target view. Re-enabled
+                # 2026-06-19 after the mag recalibration + AUTOPILOT_YAW_MANUAL_LATCH
+                # off (the earlier 700deg-spin cause); yaw sign verified correct.
+                if callable(yaw_mode):
+                    try:
+                        yaw_mode("yaw", "hold")
+                    except Exception as exc:
+                        logger.debug("yaw hold enable failed: %s", exc)
+            else:
+                # Restore free yaw so the pilot can turn again after disengaging.
+                if callable(yaw_mode):
+                    try:
+                        yaw_mode("yaw", "off")
+                    except Exception as exc:
+                        logger.debug("yaw hold disable failed: %s", exc)
+                if hasattr(self._optical_tracker, "reset"):
+                    self._optical_tracker.reset()
         except Exception as exc:
             logger.exception("Station-keep toggle failed: %s", exc)
         # Auto-record the hold so every attempt is captured for later review.
@@ -454,7 +467,7 @@ class MainWindow(QMainWindow):
         self._refresh_drive_status()
         rec = " + recording" if (enabled and self._hold_owns_recording) else ""
         self.statusBar().showMessage(
-            f"Optical Hold ENGAGED (station-keep + depth + level{rec})" if enabled else "Optical Hold OFF",
+            f"Optical Hold ENGAGED (station-keep + depth + level + heading{rec})" if enabled else "Optical Hold OFF",
             3000,
         )
         trace_event("station_keep_toggle", enabled=enabled, recording=bool(self._hold_owns_recording))
