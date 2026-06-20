@@ -443,13 +443,71 @@ class MainWindow(QMainWindow):
                 self._optical_tracker.reset()
         except Exception as exc:
             logger.exception("Station-keep toggle failed: %s", exc)
+        # Auto-record the hold so every attempt is captured for later review.
+        self._auto_record_hold(enabled)
         self._sync_station_keep_action()
         self._refresh_drive_status()
+        rec = " + recording" if (enabled and self._hold_owns_recording) else ""
         self.statusBar().showMessage(
-            "Optical Hold ENGAGED (station-keep + depth + level)" if enabled else "Optical Hold OFF",
+            f"Optical Hold ENGAGED (station-keep + depth + level{rec})" if enabled else "Optical Hold OFF",
             3000,
         )
-        trace_event("station_keep_toggle", enabled=enabled)
+        trace_event("station_keep_toggle", enabled=enabled, recording=bool(self._hold_owns_recording))
+
+    def _resolve_hold_recording_stream(self) -> str | None:
+        """Which camera to record for an Optical Hold: the one the transect CV/hold
+        actually uses (the arm camera), falling back to the configured transect
+        camera or the currently selected stream."""
+        s = getattr(self, "_transect_cv_stream", None)
+        if s:
+            return s
+        try:
+            names = list(self.cam_mgr.list_available()) if self.cam_mgr is not None else []
+        except Exception:
+            names = []
+        s = self._select_transect_stream_name(names) if names else None
+        if s:
+            return s
+        try:
+            return self.video_panel.current_stream_name() if self.video_panel is not None else None
+        except Exception:
+            return None
+
+    def _auto_record_hold(self, engaged: bool) -> None:
+        """Start/stop a recording tied to the Optical Hold so every hold attempt is
+        captured (arm-cam mp4 + the synchronized pilot/sensors/autopilot/tracking
+        log) for offline review. Only touches a recording the hold itself started;
+        a recording the pilot started manually is left running."""
+        if not getattr(self, "_auto_record_holds", True):
+            return
+        try:
+            if engaged:
+                if self._video_recording or self._video_recording_busy:
+                    # A recording (manual or a not-yet-finalized prior hold) is
+                    # already running -- don't start a second or claim ownership.
+                    self._hold_owns_recording = False
+                    return
+                stream = self._resolve_hold_recording_stream()
+                if not stream:
+                    trace_event("hold_recording_skipped", reason="no_stream")
+                    return
+                self._hold_owns_recording = True
+                self._hold_recording_stop_pending = False
+                self._start_video_recording(stream)
+            else:
+                if not self._hold_owns_recording:
+                    return
+                if self._video_recording:
+                    self._stop_video_recording()
+                    self._hold_owns_recording = False
+                elif self._video_recording_busy:
+                    # Disengaged before the start worker finished; stop as soon as
+                    # the recorder reports ready (handled in _on_video_recording_state).
+                    self._hold_recording_stop_pending = True
+                else:
+                    self._hold_owns_recording = False
+        except Exception as exc:
+            logger.debug("auto hold recording (engaged=%s) failed: %s", engaged, exc)
 
     def _toggle_station_keep_from_ui(self, checked: bool | None = None) -> None:
         if checked is None:
@@ -1313,6 +1371,11 @@ class MainWindow(QMainWindow):
         self._video_capture_session_dir: str | None = None
         self._video_capture_owns_log = False
         self._stream_log_path: str | None = None
+        # Auto-record every Optical Hold attempt (arm-cam video + the synchronized
+        # streams/tracking log) so each hold is reviewable with tools/transect_replay.
+        self._auto_record_holds = True
+        self._hold_owns_recording = False        # this recording was started by a hold
+        self._hold_recording_stop_pending = False  # disengaged before the start finished
         # 2) sensor subscriber (ROV -> topside)
         self.sensor_panel = SensorPanel()
         self.instrument_panel = InstrumentPanel()
@@ -2996,11 +3059,14 @@ class MainWindow(QMainWindow):
         else:
             self._start_video_recording()
 
-    def _start_video_recording(self) -> None:
+    def _start_video_recording(self, stream_name: str | None = None) -> None:
         if self.cam_mgr is None or self.video_panel is None:
             self.statusBar().showMessage("Video recording unavailable: no video panel", 3000)
             return
-        stream_name = self.video_panel.current_stream_name()
+        # Caller may pin a specific stream (e.g. the auto-hold recorder forcing the
+        # arm/transect camera); otherwise record whatever camera is selected.
+        if not stream_name:
+            stream_name = self.video_panel.current_stream_name()
         if not stream_name:
             self.statusBar().showMessage("Select a camera (click its pane) before recording", 3500)
             trace_event("video_recording_start_failed", reason="no_selected_camera")
@@ -3278,11 +3344,18 @@ class MainWindow(QMainWindow):
                 self._video_rec_timer = timer
             timer.start()
             self.statusBar().showMessage(f"Recording {stream} -> {path_or_error}", 4000)
+            # The hold was disengaged before this recording finished starting --
+            # stop it now that the recorder is live.
+            if self._hold_recording_stop_pending:
+                self._hold_recording_stop_pending = False
+                self._hold_owns_recording = False
+                self._stop_video_recording()
         else:
             self._video_recording = False
             self._video_recording_busy = False
             self._video_recording_stream = None
             self._video_recording_mirror_port = None
+            self._hold_owns_recording = False
             timer = getattr(self, "_video_rec_timer", None)
             if timer is not None:
                 timer.stop()

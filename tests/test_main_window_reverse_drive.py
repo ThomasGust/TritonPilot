@@ -831,6 +831,95 @@ def test_non_down_x_edge_does_not_snapshot(monkeypatch, tmp_path):
         app.processEvents()
 
 
+def test_engaging_optical_hold_auto_records_the_arm_camera(monkeypatch, tmp_path):
+    app = _app()
+    streams_path = tmp_path / "streams.json"
+    streams_path.write_text("{}", encoding="utf-8")
+    save_root = tmp_path / "recordings"
+
+    monkeypatch.setattr(main_window, "QSettings", lambda *args, **kwargs: _FakeSettings())
+    monkeypatch.setattr(main_window, "PilotPublisherService", _FakePilotService)
+    monkeypatch.setattr(main_window, "SensorSubscriberService", _FakeSensorService)
+    monkeypatch.setattr(main_window, "RemoteCameraManager", _FakeRemoteCameraManager)
+    monkeypatch.setattr(main_window, "VideoTabs", _FakeVideoPanel)
+    monkeypatch.setattr(main_window, "HoldTestPanel", _SimplePage)
+    monkeypatch.setattr(main_window, "ManagementPage", _SimplePage)
+    monkeypatch.setattr(main_window.threading, "Thread", _NoopThread)
+    monkeypatch.setattr(main_window, "resolve_recordings_dir", lambda _preferred: main_window.SaveLocation(save_root))
+
+    win = main_window.MainWindow(str(streams_path))
+    try:
+        app.processEvents()
+        # Skip the synchronized-log machinery for this unit test.
+        win._stream_recorder = object()
+
+        # Records the arm/transect camera regardless of which pane is selected.
+        win.video_panel._active_pane_index = 0  # Primary Camera selected
+        assert win._resolve_hold_recording_stream() == "Arm Camera"
+
+        # Engage -> auto-start a recording, owned by the hold.
+        win._auto_record_hold(True)
+        assert win._hold_owns_recording is True
+        assert win._video_recording_stream == "Arm Camera"
+        assert win._video_recording_busy is True
+
+        # Engaging again while already recording does not start a second / take over.
+        win._video_recording = True
+        win._video_recording_busy = False
+        win._hold_owns_recording = False
+        win._video_recording_stream = "Arm Camera"
+        win._auto_record_hold(True)
+        assert win._hold_owns_recording is False
+    finally:
+        win.close()
+        app.processEvents()
+
+
+def test_disengaging_optical_hold_stops_the_hold_owned_recording(monkeypatch, tmp_path):
+    app = _app()
+    streams_path = tmp_path / "streams.json"
+    streams_path.write_text("{}", encoding="utf-8")
+
+    monkeypatch.setattr(main_window, "QSettings", lambda *args, **kwargs: _FakeSettings())
+    monkeypatch.setattr(main_window, "PilotPublisherService", _FakePilotService)
+    monkeypatch.setattr(main_window, "SensorSubscriberService", _FakeSensorService)
+    monkeypatch.setattr(main_window, "RemoteCameraManager", _FakeRemoteCameraManager)
+    monkeypatch.setattr(main_window, "VideoTabs", _FakeVideoPanel)
+    monkeypatch.setattr(main_window, "HoldTestPanel", _SimplePage)
+    monkeypatch.setattr(main_window, "ManagementPage", _SimplePage)
+    monkeypatch.setattr(main_window.threading, "Thread", _NoopThread)
+
+    win = main_window.MainWindow(str(streams_path))
+    try:
+        app.processEvents()
+        stops = []
+        monkeypatch.setattr(win, "_stop_video_recording", lambda: stops.append(True))
+
+        # A hold-owned recording that is live -> disengage stops it.
+        win._hold_owns_recording = True
+        win._video_recording = True
+        win._auto_record_hold(False)
+        assert stops == [True]
+        assert win._hold_owns_recording is False
+
+        # A manually-started recording (not hold-owned) is left running.
+        stops.clear()
+        win._hold_owns_recording = False
+        win._video_recording = True
+        win._auto_record_hold(False)
+        assert stops == []
+
+        # Disengage before the start worker finished -> defer the stop.
+        win._hold_owns_recording = True
+        win._video_recording = False
+        win._video_recording_busy = True
+        win._auto_record_hold(False)
+        assert win._hold_recording_stop_pending is True
+    finally:
+        win.close()
+        app.processEvents()
+
+
 def test_snapshot_path_uses_stream_name_timestamp_and_collision_suffix(tmp_path):
     session = tmp_path / "20260617-120000"
     session.mkdir()
