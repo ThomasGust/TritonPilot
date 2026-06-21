@@ -37,7 +37,7 @@
       "rotation_deg": 0,
       "video_format": "h264",
       "render_mode": "direct3d",
-      "h264_bitrate": 5000000,
+      "h264_bitrate": 8000000,
       "h264_gop": 10,
       "rtp_mtu": 1200,
       "latency_ms": 50,
