@@ -10,6 +10,7 @@ pytest.importorskip("PyQt6")
 
 from PyQt6.QtWidgets import QApplication
 
+import gui.transect_page as transect_page
 from gui.transect_page import TransectPage
 
 
@@ -113,6 +114,55 @@ def test_cv_status_chip_updates_text_and_tone():
         page.set_cv_status("Autopilot CV: LOCK · 15 fps", "ok")
         assert page.cv_status_label.property("tone") == "ok"
         assert "LOCK" in page.cv_status_label.text()
+    finally:
+        page.deleteLater()
+        app.processEvents()
+
+
+def test_stopwatch_toggle_pause_and_reset(monkeypatch):
+    app = _app()
+    now = [100.0]
+    monkeypatch.setattr(transect_page, "monotonic", lambda: now[0])
+
+    page = TransectPage(stream_names=["Arm Camera"])
+    try:
+        assert page.stopwatch_running() is False
+        assert page.stopwatch_elapsed_seconds() == pytest.approx(0.0)
+        assert "00:00.0" in page.stopwatch_label.text()
+
+        page.toggle_stopwatch()
+        assert page.stopwatch_running() is True
+        assert page.stopwatch_label.property("tone") == "running"
+
+        now[0] = 112.34
+        page._refresh_stopwatch_label()
+        assert page.stopwatch_elapsed_seconds() == pytest.approx(12.34)
+        assert "00:12.3" in page.stopwatch_label.text()
+
+        page.toggle_stopwatch()
+        assert page.stopwatch_running() is False
+        assert page.stopwatch_label.property("tone") == "paused"
+        frozen = page.stopwatch_elapsed_seconds()
+
+        now[0] = 150.0
+        page._refresh_stopwatch_label()
+        assert page.stopwatch_elapsed_seconds() == pytest.approx(frozen)
+        assert "00:12.3" in page.stopwatch_label.text()
+
+        page.reset_stopwatch()
+        assert page.stopwatch_running() is False
+        assert "00:00.0" in page.stopwatch_label.text()
+
+        now[0] = 181.0
+        page._refresh_stopwatch_label()
+        assert "00:00.0" in page.stopwatch_label.text()
+        assert page.stopwatch_label.property("tone") == "idle"
+
+        page.toggle_stopwatch()
+        now[0] = 212.0
+        page._refresh_stopwatch_label()
+        assert "00:31.0" in page.stopwatch_label.text()
+        assert page.stopwatch_label.property("tone") == "complete"
     finally:
         page.deleteLater()
         app.processEvents()

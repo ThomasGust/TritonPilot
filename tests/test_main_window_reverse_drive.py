@@ -15,6 +15,7 @@ from PyQt6.QtGui import QImage, QKeyEvent
 from PyQt6.QtWidgets import QApplication, QComboBox, QWidget
 
 import gui.main_window as main_window
+import gui.transect_page as transect_page
 from video.cam import SnapshotImagePacket, StereoImagePairPacket
 
 
@@ -490,6 +491,54 @@ def test_r_shortcut_toggles_reverse_without_leaving_pilot_page(monkeypatch, tmp_
         assert win.eventFilter(win, key_event) is True
         assert win._reverse_enabled is False
         assert win._active_page_name == "pilot"
+    finally:
+        win.close()
+        app.processEvents()
+
+
+def test_transect_stopwatch_hotkeys_override_reverse_shortcut(monkeypatch, tmp_path):
+    app = _app()
+    streams_path = tmp_path / "streams.json"
+    streams_path.write_text("{}", encoding="utf-8")
+    now = [500.0]
+
+    monkeypatch.setattr(transect_page, "monotonic", lambda: now[0])
+    monkeypatch.setattr(main_window, "QSettings", lambda *args, **kwargs: _FakeSettings())
+    monkeypatch.setattr(main_window, "PilotPublisherService", _FakePilotService)
+    monkeypatch.setattr(main_window, "SensorSubscriberService", _FakeSensorService)
+    monkeypatch.setattr(main_window, "RemoteCameraManager", _FakeRemoteCameraManager)
+    monkeypatch.setattr(main_window, "VideoTabs", _FakeVideoPanel)
+    monkeypatch.setattr(main_window, "HoldTestPanel", _SimplePage)
+    monkeypatch.setattr(main_window, "ManagementPage", _SimplePage)
+    monkeypatch.setattr(main_window.threading, "Thread", _NoopThread)
+
+    win = main_window.MainWindow(str(streams_path))
+    try:
+        app.processEvents()
+        win._set_center_page("transect", announce=False)
+        app.processEvents()
+        assert win._active_page_name == "transect"
+        assert win._reverse_enabled is False
+
+        assert win.eventFilter(win, QKeyEvent(QEvent.Type.KeyPress, Qt.Key.Key_T, Qt.KeyboardModifier.NoModifier, "t")) is True
+        assert win._transect_page.stopwatch_running() is True
+
+        now[0] = 510.0
+        assert win.eventFilter(win, QKeyEvent(QEvent.Type.KeyPress, Qt.Key.Key_T, Qt.KeyboardModifier.NoModifier, "t")) is True
+        assert win._transect_page.stopwatch_running() is False
+        assert win._transect_page.stopwatch_elapsed_seconds() == pytest.approx(10.0)
+
+        assert win.eventFilter(win, QKeyEvent(QEvent.Type.KeyPress, Qt.Key.Key_R, Qt.KeyboardModifier.NoModifier, "r")) is True
+        assert win._transect_page.stopwatch_running() is False
+        assert win._transect_page.stopwatch_elapsed_seconds() == pytest.approx(0.0)
+        assert "00:00.0" in win._transect_page.stopwatch_label.text()
+        assert win._reverse_enabled is False
+        assert win.pilot_svc.is_reverse_enabled() is False
+
+        now[0] = 520.0
+        assert win.eventFilter(win, QKeyEvent(QEvent.Type.KeyPress, Qt.Key.Key_T, Qt.KeyboardModifier.NoModifier, "t")) is True
+        assert win._transect_page.stopwatch_running() is True
+        assert win._transect_page.stopwatch_elapsed_seconds() == pytest.approx(0.0)
     finally:
         win.close()
         app.processEvents()
@@ -998,6 +1047,10 @@ def test_analysis_transfer_status_bar_shows_served_root(monkeypatch, tmp_path):
         app.processEvents()
         assert servers
         assert servers[0][1]["root"] == save_root.resolve()
+        deadline = main_window.time.time() + 2.0
+        while "3 files/5.0 MB" not in win._analysis_transfer_lbl.text() and main_window.time.time() < deadline:
+            app.processEvents()
+            main_window.time.sleep(0.01)
         text = win._analysis_transfer_lbl.text()
         assert "Analysis Share: ON http://127.0.0.1:49123" in text
         assert "recordings" in text
@@ -1475,6 +1528,16 @@ def test_transect_cv_inert_without_rov(monkeypatch, tmp_path):
         win._set_center_page("transect", announce=False)
         app.processEvents()
         assert win._transect_cv_source is None
+        assert win._start_transect_cv() is False
+        win._update_transect_cv_status()
+        assert "waiting for tether" in win._transect_page.cv_status_label.text().lower()
+
+        win._tether_ui_ready_last = True
+        assert win._start_transect_cv() is False
+        win._update_transect_cv_status()
+        assert "waiting for rov link" in win._transect_page.cv_status_label.text().lower()
+
+        win._link_state_last = "OK"
         assert win._start_transect_cv() is False
         win._update_transect_cv_status()
         assert "unavailable" in win._transect_page.cv_status_label.text().lower()

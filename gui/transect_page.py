@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
-from PyQt6.QtCore import QRect, Qt, pyqtSignal
+from time import monotonic
+
+from PyQt6.QtCore import QRect, Qt, QTimer, pyqtSignal
 from PyQt6.QtWidgets import (
     QCheckBox,
     QComboBox,
@@ -137,6 +139,12 @@ class TransectPage(QWidget):
         super().__init__(parent)
         self.stream_names = list(stream_names)
         self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
+        self._stopwatch_elapsed_before_run = 0.0
+        self._stopwatch_started_at: float | None = None
+        self._stopwatch_timer = QTimer(self)
+        self._stopwatch_timer.setTimerType(Qt.TimerType.PreciseTimer)
+        self._stopwatch_timer.setInterval(100)
+        self._stopwatch_timer.timeout.connect(self._refresh_stopwatch_label)
 
         outer = QVBoxLayout(self)
         outer.setContentsMargins(0, 0, 0, 0)
@@ -187,6 +195,14 @@ class TransectPage(QWidget):
         self.rotation_servo_check.setToolTip("Allow transect rotation error to drive yaw.")
         self.rotation_servo_check.toggled.connect(self.rotationServoToggled.emit)
 
+        self.stopwatch_label = QLabel("Hold 00:00.0 / 30s")
+        self.stopwatch_label.setObjectName("transectStopwatch")
+        self.stopwatch_label.setProperty("tone", "idle")
+        self.stopwatch_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.stopwatch_label.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self.stopwatch_label.setMinimumWidth(138)
+        self.stopwatch_label.setToolTip("T starts or pauses the transect hold timer. R resets it.")
+
         # Big, obvious engage control (also bound to the K key elsewhere).
         self.engage_btn = QPushButton("Engage Optical Hold  (K)")
         self.engage_btn.setObjectName("transectEngageButton")
@@ -201,6 +217,7 @@ class TransectPage(QWidget):
         controls_lay.addWidget(target_label, 0)
         controls_lay.addWidget(self.target_blue_width_spin, 0)
         controls_lay.addWidget(self.rotation_servo_check, 0)
+        controls_lay.addWidget(self.stopwatch_label, 0)
         controls_lay.addStretch(1)
         controls_lay.addWidget(self.cv_status_label, 0)
         controls_lay.addWidget(self.engage_btn, 0)
@@ -254,6 +271,48 @@ class TransectPage(QWidget):
             self.target_blue_width_spin.setValue(float(value))
         finally:
             self.target_blue_width_spin.blockSignals(prev)
+
+    def stopwatch_running(self) -> bool:
+        return self._stopwatch_started_at is not None
+
+    def stopwatch_elapsed_seconds(self) -> float:
+        elapsed = float(self._stopwatch_elapsed_before_run)
+        started = self._stopwatch_started_at
+        if started is not None:
+            elapsed += max(0.0, monotonic() - started)
+        return elapsed
+
+    def toggle_stopwatch(self) -> None:
+        if self.stopwatch_running():
+            self._stopwatch_elapsed_before_run = self.stopwatch_elapsed_seconds()
+            self._stopwatch_started_at = None
+            self._stopwatch_timer.stop()
+        else:
+            self._stopwatch_started_at = monotonic()
+            self._stopwatch_timer.start()
+        self._refresh_stopwatch_label()
+
+    def reset_stopwatch(self) -> None:
+        self._stopwatch_elapsed_before_run = 0.0
+        self._stopwatch_started_at = None
+        self._stopwatch_timer.stop()
+        self._refresh_stopwatch_label()
+
+    def _refresh_stopwatch_label(self) -> None:
+        elapsed = self.stopwatch_elapsed_seconds()
+        total_tenths = max(0, int(elapsed * 10.0))
+        minutes, tenths_remainder = divmod(total_tenths, 600)
+        seconds, tenths = divmod(tenths_remainder, 10)
+        self.stopwatch_label.setText(f"Hold {minutes:02d}:{seconds:02d}.{tenths:d} / 30s")
+        if elapsed >= 30.0:
+            tone = "complete"
+        elif self.stopwatch_running():
+            tone = "running"
+        elif elapsed > 0.0:
+            tone = "paused"
+        else:
+            tone = "idle"
+        self._set_tone(self.stopwatch_label, tone)
 
     def update_engage_state(self, *, engaged: bool, lock_ready: bool) -> None:
         """Reflect the hold state on the engage button (also driven by the K key).

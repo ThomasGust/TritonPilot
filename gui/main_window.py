@@ -19,6 +19,7 @@ import time
 from collections import deque
 from dataclasses import replace
 from pathlib import Path
+from threading import Thread as BackgroundThread
 
 import numpy as np
 from PyQt6.QtCore import pyqtSignal, Qt, QTimer, QEvent, QSettings
@@ -123,6 +124,7 @@ class MainWindow(QMainWindow):
     stereo_recording_state_sig = pyqtSignal(bool, str)  # recording, session_dir
     stereo_recording_progress_sig = pyqtSignal(int, float)  # count, last_delta_ms
     video_recording_state_sig = pyqtSignal(bool, str, str)  # recording, stream, path_or_error
+    analysis_transfer_index_sig = pyqtSignal(dict)
 
     @staticmethod
     def _env_truthy(name: str, default: bool = False) -> bool:
@@ -930,6 +932,27 @@ class MainWindow(QMainWindow):
             # re-reveals itself when frames arrive on the new stream).
             self._start_transect_cv()
 
+    def _transect_cv_startup_allowed(self) -> bool:
+        """Return True when connection state is fresh enough to start CV plumbing."""
+        if str(getattr(self, "_link_state_last", "NO DATA") or "").upper() != "OK":
+            return False
+        tether_state = getattr(self, "_tether_ui_ready_last", None)
+        if tether_state is False:
+            return False
+        return True
+
+    def _maybe_retry_transect_cv_start(self) -> bool:
+        if getattr(self, "_active_page_name", "") != "transect":
+            return False
+        if not self._transect_cv_startup_allowed():
+            return False
+        now_mono = time.monotonic()
+        last = float(getattr(self, "_transect_cv_last_start_attempt_mono", 0.0) or 0.0)
+        if now_mono - last < 2.0:
+            return False
+        self._transect_cv_last_start_attempt_mono = now_mono
+        return self._start_transect_cv()
+
     def _start_transect_cv(self) -> bool:
         """Start the live transect CV source on the selected camera. Returns started.
 
@@ -937,6 +960,9 @@ class MainWindow(QMainWindow):
         Direct3D transect view is shown instead. The annotated overlay is layered
         on top only while this is running.
         """
+        if not self._transect_cv_startup_allowed():
+            return False
+        self._transect_cv_last_start_attempt_mono = time.monotonic()
         cam_mgr = getattr(self, "cam_mgr", None)
         if cam_mgr is None or getattr(cam_mgr, "rov", None) is None:
             return False
@@ -1050,6 +1076,27 @@ class MainWindow(QMainWindow):
         """The transect-page Engage button (mirrors the K-key Optical Hold toggle)."""
         self._set_station_keep_enabled(bool(checked))
 
+    def _toggle_transect_stopwatch_from_keyboard(self) -> None:
+        page = getattr(self, "_transect_page", None)
+        if page is None:
+            return
+        page.toggle_stopwatch()
+        state = "running" if page.stopwatch_running() else "paused"
+        try:
+            self.statusBar().showMessage(f"Transect stopwatch {state}: {page.stopwatch_label.text()}", 2500)
+        except Exception:
+            pass
+
+    def _reset_transect_stopwatch_from_keyboard(self) -> None:
+        page = getattr(self, "_transect_page", None)
+        if page is None:
+            return
+        page.reset_stopwatch()
+        try:
+            self.statusBar().showMessage(f"Transect stopwatch reset: {page.stopwatch_label.text()}", 2500)
+        except Exception:
+            pass
+
     def _update_transect_cv_status(self) -> None:
         """Poll the CV source health + last lock and refresh the status chip."""
         page = getattr(self, "_transect_page", None)
@@ -1065,8 +1112,17 @@ class MainWindow(QMainWindow):
             pass
         source = self._transect_cv_source
         if source is None:
-            page.set_cv_status("Autopilot CV: unavailable (no ROV)", "off")
-            return
+            if getattr(self, "_tether_ui_ready_last", None) is False:
+                page.set_cv_status("Autopilot CV: waiting for tether", "warn")
+                return
+            if str(getattr(self, "_link_state_last", "NO DATA") or "").upper() != "OK":
+                page.set_cv_status("Autopilot CV: waiting for ROV link", "warn")
+                return
+            if self._maybe_retry_transect_cv_start():
+                source = self._transect_cv_source
+            if source is None:
+                page.set_cv_status("Autopilot CV: unavailable (no ROV)", "off")
+                return
         st = source.stats()
         frames = int(st.get("frames", 0) or 0)
         age = st.get("last_frame_age_s")
@@ -1198,6 +1254,16 @@ class MainWindow(QMainWindow):
             os.environ.get("TRITON_PILOT_TRANSFER_AUTOSTART", "1").strip().lower()
             not in {"0", "false", "no", "off"}
         )
+        self._analysis_transfer_index_lock = threading.Lock()
+        self._analysis_transfer_index_cache: dict = {}
+        self._analysis_transfer_index_refreshing = False
+        self._analysis_transfer_index_last_start_s = 0.0
+        self._analysis_transfer_index_refresh_interval_s = self._env_float(
+            "TRITON_PILOT_TRANSFER_INDEX_REFRESH_S",
+            10.0,
+            min_value=1.0,
+            max_value=120.0,
+        )
 
         # link status
         self._last_sensor_ts = 0.0
@@ -1241,6 +1307,7 @@ class MainWindow(QMainWindow):
         self._transect_overlay_view = TransectHudOverlayView()
         self._transect_cv_source = None
         self._transect_cv_stream: str | None = None
+        self._transect_cv_last_start_attempt_mono = 0.0
         self._transect_last_lock: str = "no_target"
         self._transect_last_conf: float = 0.0
         self._transect_last_err = (0.0, 0.0, 0.0, 0.0, 0.0)  # ex, ey, es, er, violation
@@ -1413,6 +1480,7 @@ class MainWindow(QMainWindow):
         self.stereo_recording_state_sig.connect(self._handle_stereo_recording_state_on_ui)
         self.stereo_recording_progress_sig.connect(self._handle_stereo_recording_progress_on_ui)
         self.video_recording_state_sig.connect(self._on_video_recording_state)
+        self.analysis_transfer_index_sig.connect(self._handle_analysis_transfer_index_result)
 
         self._last_ctrl_status: dict = {'controller': 'unknown'}
         self._last_pilot_msg_ts: float = 0.0
@@ -1940,6 +2008,13 @@ class MainWindow(QMainWindow):
                 if self._keyboard_vehicle_shortcuts_suppressed(obj):
                     self._release_keyboard_vehicle_controls()
                     return False
+                if et == QEvent.Type.KeyPress and getattr(self, "_active_page_name", "") == "transect":
+                    if event.key() == Qt.Key.Key_T:
+                        self._toggle_transect_stopwatch_from_keyboard()
+                        return True
+                    if event.key() == Qt.Key.Key_R:
+                        self._reset_transect_stopwatch_from_keyboard()
+                        return True
                 entry = self._servo_wrist_keymap.get(event.key())
                 if entry is not None:
                     _axis_name, _axis_value, label = entry
@@ -4050,6 +4125,71 @@ class MainWindow(QMainWindow):
             pass
         self.statusBar().showMessage(f"Analysis transfer URL copied: {url}", 3000)
 
+    def _analysis_transfer_cached_index(self, root: Path) -> dict:
+        root_key = str(Path(root).expanduser().resolve())
+        with self._analysis_transfer_index_lock:
+            cache = dict(self._analysis_transfer_index_cache)
+        if str(cache.get("root") or "") != root_key:
+            return {}
+        return cache
+
+    def _queue_analysis_transfer_index_refresh(self, root: Path) -> None:
+        root = Path(root).expanduser().resolve()
+        root_key = str(root)
+        now_s = time.monotonic()
+        with self._analysis_transfer_index_lock:
+            cache = dict(self._analysis_transfer_index_cache)
+            cache_matches = str(cache.get("root") or "") == root_key
+            if bool(self._analysis_transfer_index_refreshing):
+                return
+            last_start = float(self._analysis_transfer_index_last_start_s or 0.0)
+            interval = float(self._analysis_transfer_index_refresh_interval_s)
+            if cache_matches and now_s - last_start < interval:
+                return
+            self._analysis_transfer_index_refreshing = True
+            self._analysis_transfer_index_last_start_s = now_s
+
+        BackgroundThread(
+            target=self._analysis_transfer_index_worker,
+            args=(root, float(self._analysis_transfer_stable_seconds), bool(self._analysis_transfer_include_hidden)),
+            name="analysis-transfer-index",
+            daemon=True,
+        ).start()
+
+    def _analysis_transfer_index_worker(self, root: Path, stable_seconds: float, include_hidden: bool) -> None:
+        payload = {
+            "root": str(Path(root).expanduser().resolve()),
+            "generated_at_mono": time.monotonic(),
+        }
+        try:
+            index = build_index(root, stable_seconds=stable_seconds, include_hidden=include_hidden)
+            payload.update(
+                {
+                    "ok": True,
+                    "file_count": int(index.get("file_count", 0)),
+                    "total_bytes": int(index.get("total_bytes", 0)),
+                    "error": "",
+                }
+            )
+        except Exception as exc:
+            payload.update({"ok": False, "file_count": 0, "total_bytes": 0, "error": str(exc)})
+        try:
+            self.analysis_transfer_index_sig.emit(payload)
+        except RuntimeError:
+            with self._analysis_transfer_index_lock:
+                self._analysis_transfer_index_refreshing = False
+
+    def _handle_analysis_transfer_index_result(self, payload: dict) -> None:
+        with self._analysis_transfer_index_lock:
+            self._analysis_transfer_index_cache = dict(payload or {})
+            self._analysis_transfer_index_refreshing = False
+        try:
+            root = self._analysis_transfer_root
+            if root is not None and str(Path(root).expanduser().resolve()) == str((payload or {}).get("root") or ""):
+                self._refresh_analysis_transfer_status()
+        except Exception:
+            pass
+
     def _refresh_analysis_transfer_status(self) -> None:
         server = self._analysis_transfer_server
         if server is None:
@@ -4060,18 +4200,15 @@ class MainWindow(QMainWindow):
             return
 
         root = self._analysis_transfer_root or Path(getattr(server, "root", ""))
-        try:
-            index = build_index(
-                root,
-                stable_seconds=self._analysis_transfer_stable_seconds,
-                include_hidden=self._analysis_transfer_include_hidden,
-            )
-            file_count = int(index.get("file_count", 0))
-            total_mb = float(index.get("total_bytes", 0)) / (1024 * 1024)
-        except Exception as exc:
-            self._analysis_transfer_error = str(exc)
-            self._set_analysis_transfer_label(f"Analysis Share: ERR | {exc}", "alert")
+        self._queue_analysis_transfer_index_refresh(root)
+        index_cache = self._analysis_transfer_cached_index(root)
+        if index_cache.get("error"):
+            self._analysis_transfer_error = str(index_cache.get("error") or "")
+            self._set_analysis_transfer_label(f"Analysis Share: ERR | {self._analysis_transfer_error}", "alert")
             return
+        index_ready = bool(index_cache.get("ok"))
+        file_count = int(index_cache.get("file_count", 0) or 0)
+        total_mb = float(index_cache.get("total_bytes", 0) or 0) / (1024 * 1024)
 
         try:
             snapshot = server.request_snapshot()
@@ -4121,9 +4258,10 @@ class MainWindow(QMainWindow):
             tone = ""
 
         root_name = root.name or str(root)
+        index_text = f"{file_count} files/{total_mb:.1f} MB" if index_ready else "indexing..."
         text = (
             f"Analysis Share: ON {self._analysis_transfer_display_url()} "
-            f"| {root_name} | {file_count} files/{total_mb:.1f} MB | {pull_text}"
+            f"| {root_name} | {index_text} | {pull_text}"
         )
         self._set_analysis_transfer_label(text, tone)
 

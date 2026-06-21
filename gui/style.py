@@ -191,6 +191,30 @@ def apply_modern_style(app: QApplication) -> None:
         border-radius: 6px;
         padding: 2px 6px;
     }
+    QLabel#transectStopwatch {
+        padding: 2px 10px;
+        border-radius: 8px;
+        color: #eef1f7;
+        background: #20232c;
+        border: 1px solid #3a4354;
+        font-family: Consolas, Menlo, monospace;
+        font-weight: 800;
+    }
+    QLabel#transectStopwatch[tone="running"] {
+        color: #f7fbff;
+        background: #214d82;
+        border: 1px solid #5d9cec;
+    }
+    QLabel#transectStopwatch[tone="paused"] {
+        color: #f2e1ff;
+        background: #413246;
+        border: 1px solid #725182;
+    }
+    QLabel#transectStopwatch[tone="complete"] {
+        color: #0c140c;
+        background: #46c84b;
+        border: 1px solid #5fe065;
+    }
     QLabel#transectCvStatus {
         padding: 1px 8px;
         border-radius: 8px;
