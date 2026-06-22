@@ -15,6 +15,7 @@ from PyQt6.QtGui import QImage, QKeyEvent
 from PyQt6.QtWidgets import QApplication, QComboBox, QWidget
 
 import gui.main_window as main_window
+import gui.competition_clock as competition_clock
 import gui.transect_page as transect_page
 from video.cam import SnapshotImagePacket, StereoImagePairPacket
 
@@ -491,6 +492,58 @@ def test_r_shortcut_toggles_reverse_without_leaving_pilot_page(monkeypatch, tmp_
         assert win.eventFilter(win, key_event) is True
         assert win._reverse_enabled is False
         assert win._active_page_name == "pilot"
+    finally:
+        win.close()
+        app.processEvents()
+
+
+def test_m_shortcut_starts_global_competition_clock_without_toggling_pause(monkeypatch, tmp_path):
+    app = _app()
+    streams_path = tmp_path / "streams.json"
+    streams_path.write_text("{}", encoding="utf-8")
+    now = [1000.0]
+
+    monkeypatch.setattr(competition_clock, "monotonic", lambda: now[0])
+    monkeypatch.setattr(main_window, "QSettings", lambda *args, **kwargs: _FakeSettings())
+    monkeypatch.setattr(main_window, "PilotPublisherService", _FakePilotService)
+    monkeypatch.setattr(main_window, "SensorSubscriberService", _FakeSensorService)
+    monkeypatch.setattr(main_window, "RemoteCameraManager", _FakeRemoteCameraManager)
+    monkeypatch.setattr(main_window, "VideoTabs", _FakeVideoPanel)
+    monkeypatch.setattr(main_window, "HoldTestPanel", _SimplePage)
+    monkeypatch.setattr(main_window, "ManagementPage", _SimplePage)
+    monkeypatch.setattr(main_window.threading, "Thread", _NoopThread)
+
+    win = main_window.MainWindow(str(streams_path))
+    try:
+        app.processEvents()
+        clock = win._competition_clock
+        assert clock.clock_label.text() == "15:00"
+        assert clock.is_running() is False
+
+        key_event = QKeyEvent(QEvent.Type.KeyPress, Qt.Key.Key_M, Qt.KeyboardModifier.NoModifier, "m")
+        assert win.eventFilter(win, key_event) is True
+        assert clock.is_running() is True
+
+        now[0] = 1060.0
+        clock._refresh_display()
+        assert clock.clock_label.text() == "14:00"
+
+        key_event = QKeyEvent(QEvent.Type.KeyPress, Qt.Key.Key_M, Qt.KeyboardModifier.NoModifier, "m")
+        assert win.eventFilter(win, key_event) is True
+        assert clock.is_running() is True
+        assert clock.remaining_seconds() == pytest.approx(14 * 60)
+
+        clock.toggle_btn.click()
+        app.processEvents()
+        assert clock.is_running() is False
+        assert clock.clock_label.text() == "PAUSED 14:00"
+
+        win._set_center_page("raw_sensors", announce=False)
+        now[0] = 1080.0
+        key_event = QKeyEvent(QEvent.Type.KeyPress, Qt.Key.Key_M, Qt.KeyboardModifier.NoModifier, "m")
+        assert win.eventFilter(win, key_event) is True
+        assert clock.is_running() is True
+        assert win._active_page_name == "raw_sensors"
     finally:
         win.close()
         app.processEvents()

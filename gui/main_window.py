@@ -101,6 +101,7 @@ from gui.management_page import ManagementPage
 from gui.transect_page import TransectPage
 from gui.transect_overlay_view import TransectHudOverlayView
 from gui.ssh_page import SshConsolePage, default_pilot_ssh_presets
+from gui.competition_clock import CompetitionClock
 from gui.responsive import resize_to_available_screen, vertical_scroll_area
 from network.net_select import LocalAddr, list_local_ipv4_addrs, parse_zmq_endpoint
 from tools.analysis_transfer_server import DEFAULT_STABLE_SECONDS, build_index, create_server, start_server_in_thread
@@ -1684,6 +1685,8 @@ class MainWindow(QMainWindow):
         top_bar_lay.setSpacing(6)
         top_bar_lay.addWidget(self._page_tabs, 0)
         top_bar_lay.addStretch(1)
+        self._competition_clock = CompetitionClock()
+        top_bar_lay.addWidget(self._competition_clock, 0)
         top_bar_lay.addWidget(self._tether_top_lbl, 0)
         self._arm_disarm_btn = QPushButton()
         self._arm_disarm_btn.setObjectName("armDisarmButton")
@@ -1992,6 +1995,35 @@ class MainWindow(QMainWindow):
             pass
         return False
 
+    def _keyboard_competition_clock_suppressed(self, obj=None) -> bool:
+        try:
+            if self._widget_or_parent_is_text_entry(obj):
+                return True
+        except Exception:
+            pass
+        try:
+            if self._widget_or_parent_is_text_entry(QApplication.focusWidget()):
+                return True
+        except Exception:
+            pass
+        return False
+
+    def _start_competition_clock_from_keyboard(self) -> None:
+        clock = getattr(self, "_competition_clock", None)
+        if clock is None:
+            return
+        outcome = clock.start_from_keyboard()
+        messages = {
+            "started": "Competition clock started",
+            "running": "Competition clock already running",
+            "disabled": "Competition clock disabled; enable it with the mouse",
+            "complete": "Competition clock finished; reset it with the mouse",
+        }
+        try:
+            self.statusBar().showMessage(messages.get(outcome, "Competition clock"), 2500)
+        except Exception:
+            pass
+
     def eventFilter(self, obj, event):
         try:
             et = event.type()
@@ -2004,6 +2036,9 @@ class MainWindow(QMainWindow):
                         return True
                     if event.key() == Qt.Key.Key_Escape and self.isFullScreen():
                         self.set_fullscreen_mode(False)
+                        return True
+                    if event.key() == Qt.Key.Key_M and not self._keyboard_competition_clock_suppressed(obj):
+                        self._start_competition_clock_from_keyboard()
                         return True
                 if self._keyboard_vehicle_shortcuts_suppressed(obj):
                     self._release_keyboard_vehicle_controls()
