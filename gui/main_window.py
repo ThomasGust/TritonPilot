@@ -139,6 +139,30 @@ class MainWindow(QMainWindow):
         return text in {"1", "true", "yes", "on", "debug"}
 
     @staticmethod
+    def _tether_audio_enabled() -> bool:
+        raw = os.environ.get("TRITON_TETHER_AUDIO", "1").strip().lower()
+        return raw not in {"0", "false", "no", "off"}
+
+    def _play_tether_audio_cue(self, ready: bool) -> None:
+        if not self._tether_audio_enabled():
+            return
+        try:
+            if os.name == "nt":
+                import winsound
+
+                alias = "SystemAsterisk" if ready else "SystemHand"
+                winsound.PlaySound(alias, winsound.SND_ALIAS | winsound.SND_ASYNC)
+                return
+        except Exception:
+            pass
+        try:
+            QApplication.beep()
+            if not ready:
+                QTimer.singleShot(180, QApplication.beep)
+        except Exception:
+            pass
+
+    @staticmethod
     def _env_float(name: str, default: float, *, min_value: float, max_value: float) -> float:
         raw = os.environ.get(name, "").strip()
         if not raw:
@@ -3025,8 +3049,10 @@ class MainWindow(QMainWindow):
         if previous is None:
             return
         if ready and previous is False:
+            self._play_tether_audio_cue(True)
             self.statusBar().showMessage("Tether network ready; reconnecting video on the tether", 4500)
         elif (not ready) and previous is True:
+            self._play_tether_audio_cue(False)
             self.statusBar().showMessage("TETHER NETWORK UNREACHABLE - video waits for the tether", 7000)
 
     def _iface_is_wifi_linux(self, iface: str) -> bool:

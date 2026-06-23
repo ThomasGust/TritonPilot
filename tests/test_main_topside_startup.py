@@ -44,14 +44,22 @@ def test_startup_custom_args_are_not_passed_to_qt():
 def test_smoke_test_requires_packaged_resources(monkeypatch, tmp_path):
     streams_path = tmp_path / "streams.json"
     icon_path = tmp_path / "tritonpilot_icon.ico"
+    icon_png_path = tmp_path / "tritonpilot_icon.png"
     streams_path.write_text("{}", encoding="utf-8")
     icon_path.write_bytes(b"icon")
+    icon_png_path.write_bytes(b"png")
 
     monkeypatch.setattr(main_topside, "streams_file_path", lambda: streams_path)
     monkeypatch.setattr(main_topside, "app_icon_path", lambda: icon_path)
+    monkeypatch.setattr(main_topside, "app_icon_png_path", lambda: icon_png_path)
 
     assert main_topside._smoke_test() == 0
 
     icon_path.unlink()
+
+    assert main_topside._smoke_test() == 1
+
+    icon_path.write_bytes(b"icon")
+    icon_png_path.unlink()
 
     assert main_topside._smoke_test() == 1

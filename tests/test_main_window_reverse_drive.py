@@ -1263,6 +1263,12 @@ def test_tether_banner_blocks_video_until_tether_recovers(monkeypatch, tmp_path)
     monkeypatch.setattr(main_window, "HoldTestPanel", _SimplePage)
     monkeypatch.setattr(main_window, "ManagementPage", _SimplePage)
     monkeypatch.setattr(main_window.threading, "Thread", _NoopThread)
+    audio_cues = []
+    monkeypatch.setattr(
+        main_window.MainWindow,
+        "_play_tether_audio_cue",
+        lambda _self, ready: audio_cues.append(bool(ready)),
+    )
 
     win = main_window.MainWindow(str(streams_path))
     try:
@@ -1305,6 +1311,25 @@ def test_tether_banner_blocks_video_until_tether_recovers(monkeypatch, tmp_path)
         assert win._tether_banner.isHidden() is True
         assert win._tether_top_lbl.property("tone") == "ok"
         assert panel.tether_statuses[-1][0] is True
+        assert audio_cues == [True]
+
+        win._set_tether_status_snapshot(
+            {
+                "ts": 3.0,
+                "ready": False,
+                "host": "192.168.1.4",
+                "local_ip": None,
+                "iface": None,
+                "port": None,
+                "reason": "192.168.1.4 not reachable on ports 5555",
+            }
+        )
+        win._refresh_tether_status_ui()
+
+        assert "TETHER NETWORK UNREACHABLE" in win._tether_banner.text()
+        assert win._tether_banner.isHidden() is False
+        assert panel.tether_statuses[-1][0] is False
+        assert audio_cues == [True, False]
     finally:
         win.close()
         app.processEvents()

@@ -27,25 +27,23 @@ def _draw_trident(draw: ImageDraw.ImageDraw, scale: int) -> None:
         draw.polygon(_scale_points(points, scale), fill=fill)
 
     # Shadow/outline pass.
-    line([(128, 70), (128, 190)], 20, GOLD_DARK)
-    line([(86, 92), (86, 128), (112, 142), (128, 142), (144, 142), (170, 128), (170, 92)], 20, GOLD_DARK)
-    line([(78, 150), (178, 150)], 18, GOLD_DARK)
-    polygon([(128, 46), (111, 76), (145, 76)], GOLD_DARK)
-    polygon([(86, 58), (71, 91), (101, 91)], GOLD_DARK)
-    polygon([(170, 58), (155, 91), (185, 91)], GOLD_DARK)
-    polygon([(128, 198), (104, 222), (152, 222)], GOLD_DARK)
+    line([(128, 62), (128, 212)], 22, GOLD_DARK)
+    line([(80, 88), (80, 132), (108, 146), (128, 146), (148, 146), (176, 132), (176, 88)], 20, GOLD_DARK)
+    line([(70, 158), (186, 158)], 18, GOLD_DARK)
+    polygon([(128, 38), (109, 73), (147, 73)], GOLD_DARK)
+    polygon([(82, 52), (67, 89), (100, 89)], GOLD_DARK)
+    polygon([(174, 52), (156, 89), (189, 89)], GOLD_DARK)
 
     # Gold pass.
-    line([(128, 70), (128, 190)], 12, GOLD)
-    line([(86, 92), (86, 125), (112, 134), (128, 134), (144, 134), (170, 125), (170, 92)], 12, GOLD)
-    line([(78, 148), (178, 148)], 10, GOLD)
-    polygon([(128, 45), (116, 73), (140, 73)], GOLD_LIGHT)
-    polygon([(86, 60), (76, 88), (96, 88)], GOLD_LIGHT)
-    polygon([(170, 60), (160, 88), (180, 88)], GOLD_LIGHT)
-    polygon([(128, 190), (110, 216), (146, 216)], GOLD)
+    line([(128, 62), (128, 212)], 13, GOLD)
+    line([(80, 88), (80, 128), (108, 138), (128, 138), (148, 138), (176, 128), (176, 88)], 12, GOLD)
+    line([(70, 156), (186, 156)], 10, GOLD)
+    polygon([(128, 37), (115, 70), (141, 70)], GOLD_LIGHT)
+    polygon([(82, 54), (72, 86), (97, 86)], GOLD_LIGHT)
+    polygon([(174, 54), (159, 86), (184, 86)], GOLD_LIGHT)
 
     # A small highlight keeps the icon legible at taskbar size.
-    line([(123, 77), (123, 184)], 3, GOLD_LIGHT)
+    line([(123, 70), (123, 205)], 3, GOLD_LIGHT)
 
 
 def render_icon(size: int = 256) -> Image.Image:

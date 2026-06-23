@@ -13,7 +13,7 @@ from PyQt6.QtCore import Qt
 from PyQt6.QtGui import QColor, QFont, QIcon, QLinearGradient, QPainter, QPen, QPixmap
 from PyQt6.QtWidgets import QApplication, QSplashScreen
 
-from app_paths import APP_DISPLAY_NAME, APP_ORGANIZATION, app_icon_path, streams_file_path
+from app_paths import APP_DISPLAY_NAME, APP_ORGANIZATION, app_icon_path, app_icon_png_path, streams_file_path
 
 
 SPLASH_W = 520
@@ -23,7 +23,7 @@ CUSTOM_ARG_FLAGS = {"--no-splash", "--windowed", "--maximized", "--fullscreen"}
 
 def _smoke_test() -> int:
     """Verify packaged resources without opening the operator window."""
-    missing = [path for path in (streams_file_path(), app_icon_path()) if not path.exists()]
+    missing = [path for path in (streams_file_path(), app_icon_path(), app_icon_png_path()) if not path.exists()]
     return 1 if missing else 0
 
 
@@ -58,6 +58,7 @@ def _make_splash_pixmap() -> QPixmap:
 
     painter = QPainter(pixmap)
     painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+    painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform, True)
 
     gradient = QLinearGradient(0, 0, SPLASH_W, SPLASH_H)
     gradient.setColorAt(0.0, QColor("#111827"))
@@ -67,10 +68,13 @@ def _make_splash_pixmap() -> QPixmap:
     painter.setPen(QPen(QColor("#26324d"), 1))
     painter.drawRoundedRect(0, 0, SPLASH_W - 1, SPLASH_H - 1, 22, 22)
 
-    logo = QPixmap(str(app_icon_path()))
+    logo_path = app_icon_png_path()
+    if not logo_path.exists():
+        logo_path = app_icon_path()
+    logo = QPixmap(str(logo_path))
     if not logo.isNull():
-        logo = logo.scaled(88, 88, Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation)
-        painter.drawPixmap((SPLASH_W - logo.width()) // 2, 42, logo)
+        logo = logo.scaled(96, 96, Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation)
+        painter.drawPixmap((SPLASH_W - logo.width()) // 2, 36, logo)
 
     painter.setPen(QColor("#f7fbff"))
     title_font = QFont()

@@ -7,6 +7,7 @@ icon_path = repo_root / "assets" / "tritonpilot_icon.ico"
 
 datas = [
     (str(repo_root / "assets" / "tritonpilot_icon.ico"), "assets"),
+    (str(repo_root / "assets" / "tritonpilot_icon.png"), "assets"),
     (str(repo_root / "data" / "streams.json"), "data"),
 ]
 

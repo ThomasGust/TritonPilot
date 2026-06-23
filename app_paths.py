@@ -33,6 +33,11 @@ def app_icon_path() -> Path:
     return bundled_resource_path("assets", "tritonpilot_icon.ico")
 
 
+def app_icon_png_path() -> Path:
+    """Return the high-resolution TritonPilot icon PNG path."""
+    return bundled_resource_path("assets", "tritonpilot_icon.png")
+
+
 def streams_file_path() -> Path:
     """Return the camera stream configuration path.
 
