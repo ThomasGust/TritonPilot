@@ -298,6 +298,21 @@ REVERSE_MODE_DEFAULT = os.environ.get("TRITON_REVERSE_MODE_DEFAULT", "0").strip(
 REVERSE_TOGGLE_BUTTON = os.environ.get("TRITON_REVERSE_TOGGLE", "lb").strip().lower()
 REVERSE_TOGGLE_SHORTCUT = os.environ.get("TRITON_REVERSE_SHORTCUT", "R").strip() or "R"
 
+# Intelligent current (fuse) limiter -- the live pilot-side enable for the ROV's
+# feed-forward thruster current budget. This only has an effect when the ROV
+# config master switch (rov_config.CURRENT_BUDGET_ENABLE) is on; when that is
+# off the ROV never loads the model and this toggle is a harmless no-op. Default
+# ON so that whenever the feature is enabled on the ROV it starts protecting,
+# with the top-bar checkbox as an instant live kill switch.
+CURRENT_BUDGET_DEFAULT = os.environ.get("TRITON_CURRENT_BUDGET_DEFAULT", "1").strip().lower() in ("1", "true", "yes")
+# Live total-thruster-current cap (amps, before the ROV's reserve) that the pilot
+# can dial from the top bar. Streamed in modes["current_budget_max_a"] and used by
+# the ROV to override rov_config.CURRENT_BUDGET_MAX_A when the limiter is loaded.
+# Keep it under the fuse rating with margin (25 A fuse -> ~22 A is a sane start).
+CURRENT_BUDGET_MAX_A_DEFAULT = float(os.environ.get("TRITON_CURRENT_BUDGET_MAX_A", "22"))
+CURRENT_BUDGET_MAX_A_MIN = float(os.environ.get("TRITON_CURRENT_BUDGET_MAX_A_MIN", "5"))
+CURRENT_BUDGET_MAX_A_MAX = float(os.environ.get("TRITON_CURRENT_BUDGET_MAX_A_MAX", "40"))
+
 
 def _parse_str_list_env(var: str, default: list[str]) -> list[str]:
     s = os.environ.get(var, "").strip()
@@ -325,9 +340,9 @@ FORWARD_CAMERA_KEYWORDS = _parse_str_list_env(
 # Y = +5%, A = -5% by default (handled in input/pilot_service.py).
 # Values are normalized fractions (0.0..1.0) and interpreted on the ROV side as
 # a multiplier of the configured POWER_SCALE baseline.
-PILOT_MAX_GAIN_DEFAULT = float(os.environ.get("TRITON_PILOT_MAX_GAIN_DEFAULT", "1.0"))
+PILOT_MAX_GAIN_DEFAULT = float(os.environ.get("TRITON_PILOT_MAX_GAIN_DEFAULT", "0.8"))
 PILOT_MAX_GAIN_MIN = float(os.environ.get("TRITON_PILOT_MAX_GAIN_MIN", "0.05"))
-PILOT_MAX_GAIN_MAX = float(os.environ.get("TRITON_PILOT_MAX_GAIN_MAX", "1.0"))
+PILOT_MAX_GAIN_MAX = float(os.environ.get("TRITON_PILOT_MAX_GAIN_MAX", "0.8"))
 PILOT_MAX_GAIN_STEP = float(os.environ.get("TRITON_PILOT_MAX_GAIN_STEP", "0.05"))
 
 # Pilot-adjustable gain for the back rotating gripper / T200 wrist motor. This

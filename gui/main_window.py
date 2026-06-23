@@ -102,6 +102,7 @@ from gui.transect_page import TransectPage
 from gui.transect_overlay_view import TransectHudOverlayView
 from gui.ssh_page import SshConsolePage, default_pilot_ssh_presets
 from gui.competition_clock import CompetitionClock
+from gui.current_budget_panel import CurrentBudgetPanel
 from gui.responsive import resize_to_available_screen, vertical_scroll_area
 from network.net_select import LocalAddr, list_local_ipv4_addrs, parse_zmq_endpoint
 from tools.analysis_transfer_server import DEFAULT_STABLE_SECONDS, build_index, create_server, start_server_in_thread
@@ -1687,6 +1688,16 @@ class MainWindow(QMainWindow):
         top_bar_lay.addStretch(1)
         self._competition_clock = CompetitionClock()
         top_bar_lay.addWidget(self._competition_clock, 0)
+        cb_cap, cb_cap_min, cb_cap_max = self._initial_current_budget_cap()
+        self._current_budget_panel = CurrentBudgetPanel(
+            enabled=self._initial_current_budget_enabled(),
+            budget_a=cb_cap,
+            budget_min=cb_cap_min,
+            budget_max=cb_cap_max,
+        )
+        self._current_budget_panel.toggled.connect(self._on_current_budget_toggled)
+        self._current_budget_panel.budget_changed.connect(self._on_current_budget_cap_changed)
+        top_bar_lay.addWidget(self._current_budget_panel, 0)
         top_bar_lay.addWidget(self._tether_top_lbl, 0)
         self._arm_disarm_btn = QPushButton()
         self._arm_disarm_btn.setObjectName("armDisarmButton")
@@ -2345,6 +2356,94 @@ class MainWindow(QMainWindow):
             self._set_status(self._ctrl_lbl, f"Controller: {state}")
         self._refresh_drive_status()
 
+    def _initial_current_budget_enabled(self) -> bool:
+        """Initial checkbox state: the pilot service's current mode, else config."""
+        svc = getattr(self, "pilot_svc", None)
+        if svc is not None:
+            try:
+                return bool(svc.is_current_budget_enabled())
+            except Exception:
+                pass
+        try:
+            from config import CURRENT_BUDGET_DEFAULT
+            return bool(CURRENT_BUDGET_DEFAULT)
+        except Exception:
+            return True
+
+    def _on_current_budget_toggled(self, enabled: bool) -> None:
+        """Pilot toggled the intelligent current limiter from the top bar."""
+        svc = getattr(self, "pilot_svc", None)
+        if svc is not None:
+            try:
+                svc.set_current_budget_enabled(bool(enabled))
+            except Exception:
+                pass
+        try:
+            self.statusBar().showMessage(
+                f"Intelligent current limiter {'ON' if enabled else 'OFF'}", 2500
+            )
+        except Exception:
+            pass
+
+    def _initial_current_budget_cap(self) -> tuple:
+        """Initial (value, min, max) amps for the cap box: pilot service, else config."""
+        svc = getattr(self, "pilot_svc", None)
+        value = None
+        lo, hi = 5.0, 40.0
+        if svc is not None:
+            try:
+                value = float(svc.current_budget_max_a())
+                lo, hi = (float(x) for x in svc.current_budget_max_a_bounds())
+            except Exception:
+                value = None
+        if value is None:
+            try:
+                from config import (
+                    CURRENT_BUDGET_MAX_A_DEFAULT,
+                    CURRENT_BUDGET_MAX_A_MIN,
+                    CURRENT_BUDGET_MAX_A_MAX,
+                )
+                value = float(CURRENT_BUDGET_MAX_A_DEFAULT)
+                lo, hi = float(CURRENT_BUDGET_MAX_A_MIN), float(CURRENT_BUDGET_MAX_A_MAX)
+            except Exception:
+                value = 22.0
+        return float(value), float(lo), float(hi)
+
+    def _on_current_budget_cap_changed(self, amps: float) -> None:
+        """Pilot changed the live current cap from the top bar."""
+        svc = getattr(self, "pilot_svc", None)
+        if svc is not None:
+            try:
+                svc.set_current_budget_max_a(float(amps))
+            except Exception:
+                pass
+        try:
+            self.statusBar().showMessage(f"Current cap set to {float(amps):.0f} A", 2000)
+        except Exception:
+            pass
+
+    def _update_current_budget_readout(self, msg: dict) -> None:
+        """Refresh the live estimated-draw readout from autopilot_status telemetry."""
+        panel = getattr(self, "_current_budget_panel", None)
+        if panel is None:
+            return
+        try:
+            status = ((msg or {}).get("control") or {}).get("status") or {}
+            cb = status.get("current_budget") or {}
+            if not cb or not cb.get("enabled"):
+                # ROV not running the limiter (disarmed, or config master off).
+                panel.clear_estimate()
+                return
+            predicted = cb.get("predicted_before_a")
+            panel.update_estimate(
+                None if predicted is None else float(predicted),
+                active=cb.get("active"),
+                applied=bool(cb.get("applied")),
+                budget_a=cb.get("budget_a"),
+            )
+        except Exception:
+            pass
+
     def _handle_sensor_msg_on_ui(self, msg: dict):
         import time
         typ = msg.get("type")
@@ -2370,6 +2469,7 @@ class MainWindow(QMainWindow):
             if typ == "autopilot_status":
                 self._last_autopilot_status_ts = time.time()
                 self._last_autopilot_status = dict(msg or {})
+                self._update_current_budget_readout(msg)
                 runtime_depth = self._runtime_depth_hold_status()
                 target = self._finite_float(runtime_depth.get("target_m"))
                 if target is not None:

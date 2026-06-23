@@ -108,6 +108,10 @@ class PilotPublisherService:
             BACK_GRIPPER_GAIN_MAX,
             BACK_GRIPPER_GAIN_MIN,
             BACK_GRIPPER_GAIN_STEP,
+            CURRENT_BUDGET_DEFAULT,
+            CURRENT_BUDGET_MAX_A_DEFAULT,
+            CURRENT_BUDGET_MAX_A_MIN,
+            CURRENT_BUDGET_MAX_A_MAX,
             DEPTH_HOLD_TOGGLE_BUTTON,
             DEPTH_HOLD_DEFAULT,
             LIGHTS_TOGGLE_BUTTON,
@@ -162,9 +166,23 @@ class PilotPublisherService:
             min(self._arm_gain_max, float(ARM_GAIN_DEFAULT)),
         )
 
+        self._current_budget_max_a_min = float(CURRENT_BUDGET_MAX_A_MIN)
+        self._current_budget_max_a_max = float(CURRENT_BUDGET_MAX_A_MAX)
+        if self._current_budget_max_a_max < self._current_budget_max_a_min:
+            self._current_budget_max_a_min, self._current_budget_max_a_max = (
+                self._current_budget_max_a_max,
+                self._current_budget_max_a_min,
+            )
+        self._current_budget_max_a = max(
+            self._current_budget_max_a_min,
+            min(self._current_budget_max_a_max, float(CURRENT_BUDGET_MAX_A_DEFAULT)),
+        )
+
         self._modes = {
             "depth_hold": bool(DEPTH_HOLD_DEFAULT),
             "max_gain": float(self._max_gain),
+            "current_budget": bool(CURRENT_BUDGET_DEFAULT),
+            "current_budget_max_a": float(self._current_budget_max_a),
             "reverse": bool(REVERSE_MODE_DEFAULT),
             "roll_pitch_level": bool(ROLL_PITCH_LEVEL_DEFAULT),
             "yaw_hold": bool(YAW_HOLD_DEFAULT),
@@ -556,6 +574,47 @@ class PilotPublisherService:
         new_state = not self.is_reverse_enabled()
         self.set_reverse_enabled(new_state)
         return new_state
+
+    def is_current_budget_enabled(self) -> bool:
+        return bool(self.current_modes().get("current_budget", False))
+
+    def set_current_budget_enabled(self, enabled: bool) -> bool:
+        """Enable/disable the ROV's intelligent current limiter live."""
+        enabled = bool(enabled)
+        with self._mode_lock:
+            prev = bool(self._modes.get("current_budget", False))
+            self._modes["current_budget"] = enabled
+        changed = prev != enabled
+        if changed:
+            self._emit_status(self._status_payload())
+        return changed
+
+    def toggle_current_budget_enabled(self) -> bool:
+        new_state = not self.is_current_budget_enabled()
+        self.set_current_budget_enabled(new_state)
+        return new_state
+
+    def current_budget_max_a(self) -> float:
+        return float(self.current_modes().get("current_budget_max_a", self._current_budget_max_a))
+
+    def current_budget_max_a_bounds(self) -> tuple:
+        return (float(self._current_budget_max_a_min), float(self._current_budget_max_a_max))
+
+    def set_current_budget_max_a(self, amps: float) -> bool:
+        """Set the live total-thruster-current cap (amps) sent to the ROV."""
+        try:
+            value = float(amps)
+        except Exception:
+            return False
+        value = max(self._current_budget_max_a_min, min(self._current_budget_max_a_max, value))
+        with self._mode_lock:
+            prev = float(self._modes.get("current_budget_max_a", self._current_budget_max_a))
+            self._current_budget_max_a = value
+            self._modes["current_budget_max_a"] = value
+        changed = abs(prev - value) > 1e-9
+        if changed:
+            self._emit_status(self._status_payload())
+        return changed
 
     def _autopilot_modes_locked(self) -> dict:
         current = self._modes.get("autopilot")
