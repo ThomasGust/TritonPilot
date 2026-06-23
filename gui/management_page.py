@@ -138,9 +138,9 @@ class ManagementPage(QWidget):
             "right_invert": -1.0,
             "pitch_invert": 1.0,
             "yaw_invert": 1.0,
-            "servo_range_deg": 70.0,
+            "servo_range_deg": 100.0,
             "pitch_span_deg": 90.0,
-            "pitch_neutral_deg": 70.0,
+            "pitch_neutral_deg": 45.0,
         }
 
         self._build_ui()
@@ -353,9 +353,9 @@ class ManagementPage(QWidget):
         form.setContentsMargins(0, 6, 0, 0)
         form.setSpacing(8)
         spin_specs = [
-            ("servo_range_deg", "Servo range", 30.0, 120.0, 70.0),
+            ("servo_range_deg", "Servo range", 30.0, 120.0, 100.0),
             ("pitch_span_deg", "Pitch span", 30.0, 140.0, 90.0),
-            ("pitch_neutral_deg", "Pitch neutral", 0.0, 140.0, 70.0),
+            ("pitch_neutral_deg", "Pitch neutral", 0.0, 140.0, 45.0),
         ]
         for key, label, minimum, maximum, default in spin_specs:
             spin = self._make_spinbox(minimum, maximum, 1.0, 1, suffix=" deg")
