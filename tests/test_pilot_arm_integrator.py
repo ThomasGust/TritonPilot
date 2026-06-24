@@ -4,7 +4,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from config import ARM_INIT_PITCH, ARM_RATE
+from config import ARM_INIT_PITCH, ARM_INIT_WRIST, ARM_RATE
 from input.pilot_service import PilotPublisherService
 
 
@@ -16,6 +16,7 @@ def test_keyboard_intent_integrates_pitch_position():
     svc = _svc("arm_kb")
     p0, w0 = svc.arm_position()
     assert p0 == pytest.approx(ARM_INIT_PITCH)
+    assert w0 == pytest.approx(ARM_INIT_WRIST)
 
     svc.set_arm_keyboard_intent(1.0, 0.0)
     p, w = svc._integrate_arm(SimpleNamespace(rx=0.0, ry=0.0), modifier_held=False, dt=0.1)

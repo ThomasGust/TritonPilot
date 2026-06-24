@@ -35,13 +35,30 @@ logger = logging.getLogger(__name__)
 # the pilot machine and adds ZERO tether load (the old path asked the ROV to send
 # a second full H.264 stream over the tether, which saturated the link and
 # corrupted both the live display and the recorded file).
+#
+# Loopback fan-out port registry: each local consumer of a display stream gets a
+# distinct offset from the display port so they never collide. Add new consumers
+# here (not with ad-hoc offsets) to keep them unique.
+#   +200  recording   (recording/video_recorder.py)
+#   +210  transect CV  (tracking/transect_source.py)
 RECORD_FANOUT_HOST = "127.0.0.1"
 RECORD_FANOUT_PORT_OFFSET = 200
+CV_FANOUT_PORT_OFFSET = 210
 
 
 def record_fanout_port(display_port: int) -> int:
     """Loopback UDP port a display receiver fans live RTP to for local recording."""
     return int(display_port) + RECORD_FANOUT_PORT_OFFSET
+
+
+def cv_fanout_port(display_port: int) -> int:
+    """Loopback UDP port a display receiver fans live RTP to for the transect CV.
+
+    Like recording, the transect tracker reads the H.264 the laptop already
+    receives instead of asking the ROV to duplicate the stream over the tether
+    (which lost packets -> corrupt frames + lag straight into the autopilot).
+    """
+    return int(display_port) + CV_FANOUT_PORT_OFFSET
 
 
 def _find_gst_launch() -> str:

@@ -28,8 +28,12 @@ import numpy as np
 
 from tracking.transect_detector import StubTransectDetector, TransectDetector
 from tracking.transect_policy import TransectEstimate, TransectModel, TransectObservation, TransectPolicy
+from video.frame_quality import live_frame_rejection_reason
 
 logger = logging.getLogger(__name__)
+
+# (frame_bgr) -> reason str if the frame is unusable, else None
+FrameQualityCheck = Callable[["np.ndarray"], Optional[str]]
 
 
 class _Receiver(Protocol):
@@ -86,6 +90,7 @@ class TransectVisionSource:
         policy: Optional[TransectPolicy] = None,
         model: Optional[TransectModel] = None,
         mirror_setter: Optional[Callable[[bool], None]] = None,
+        frame_quality_check: Optional[FrameQualityCheck] = live_frame_rejection_reason,
         target_fps: float = 15.0,
         mirror_retry_interval_s: float = 1.0,
         receiver_restart_interval_s: float = 4.0,
@@ -99,6 +104,10 @@ class TransectVisionSource:
         self.detector: TransectDetector = detector or StubTransectDetector()
         self.policy = policy or TransectPolicy(model or TransectModel())
         self._mirror_setter = mirror_setter
+        # Gross corruption guard: a packet-loss / decode artifact frame must never
+        # reach the detector, or a phantom blob becomes a real autopilot command.
+        # None disables the gate (used by tests feeding synthetic frames).
+        self._frame_quality_check = frame_quality_check
         self._period = 1.0 / max(1e-3, float(target_fps))
         self._mirror_retry_interval_s = max(0.0, float(mirror_retry_interval_s))
         self._last_mirror_attempt_mono = 0.0
@@ -115,6 +124,7 @@ class TransectVisionSource:
         # Health stats (read from the GUI thread for the status line).
         self._stats_lock = threading.Lock()
         self._frames = 0
+        self._rejected = 0
         self._fps = 0.0
         self._last_frame_mono: Optional[float] = None
         self._started_mono: Optional[float] = None
@@ -130,6 +140,7 @@ class TransectVisionSource:
             return {
                 "running": self.is_running(),
                 "frames": self._frames,
+                "rejected": self._rejected,
                 "fps": self._fps,
                 "last_frame_age_s": (now - last) if last is not None else None,
                 "age_since_start_s": (now - self._started_mono) if self._started_mono else None,
@@ -149,6 +160,7 @@ class TransectVisionSource:
             self._last_seq = None
             with self._stats_lock:
                 self._frames = 0
+                self._rejected = 0
                 self._fps = 0.0
                 self._last_frame_mono = None
                 self._started_mono = time.monotonic()
@@ -278,6 +290,33 @@ class TransectVisionSource:
             self._last_frame_mono = now
         try:
             frame = np.frombuffer(data, np.uint8).reshape((self.height, self.width, 3)).copy()
+        except Exception as exc:
+            logger.debug("[%s] frame reshape failed: %s", self._name, exc)
+            return
+
+        # Reject gross corruption (H.264 loss / startup artifacts) BEFORE the
+        # detector. A smeared/green frame can yield a confident-looking phantom
+        # blob, and -- once Optical Hold is engaged -- that becomes a real thrust
+        # command. Feeding the policy an explicit no-target instead makes it coast
+        # a few frames and then drop the lock on sustained corruption, exactly like
+        # a real detection dropout (the ROV also falls back to manual on stale lock).
+        if self._frame_quality_check is not None:
+            try:
+                reason = self._frame_quality_check(frame)
+            except Exception:
+                reason = None
+            if reason is not None:
+                with self._stats_lock:
+                    self._rejected += 1
+                try:
+                    obs = TransectObservation.no_target(ts=now)
+                    est = self.policy.evaluate(obs)
+                    self._on_estimate(est, obs, frame)
+                except Exception as exc:
+                    logger.debug("[%s] rejected-frame process failed: %s", self._name, exc)
+                return
+
+        try:
             obs = self.detector.detect(frame)
             est = self.policy.evaluate(obs)
             self._on_estimate(est, obs, frame)

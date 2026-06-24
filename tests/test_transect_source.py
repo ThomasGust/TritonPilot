@@ -76,6 +76,9 @@ def _make(detector, on_estimate, **kw):
         width=W, height=H, on_estimate=on_estimate,
         receiver_factory=lambda: _FakeReceiver(frame_bytes=W * H * 3, **kw),
         detector=detector, policy=TransectPolicy(model), target_fps=200.0,
+        # These tests feed all-zero synthetic frames to exercise the loop; disable
+        # the corruption gate (which would reject all-zero frames as "blank").
+        frame_quality_check=None,
     )
 
 
@@ -121,6 +124,28 @@ def test_source_skips_wrong_sized_frames_without_crashing():
     src.stop()
     assert fired is False  # mismatched frames are dropped, never delivered
     assert got == []
+
+
+def test_source_rejects_corrupt_frames_before_detector():
+    # Gate ON (default). All-zero frames trip the blank-artifact check, so the
+    # detector must never run and the policy must get an explicit no-target -- a
+    # corrupt frame can't become an autopilot command.
+    model = TransectModel()
+    det = _OnStationDetector(model)  # would report blue_found=True if ever called
+    got, done, cb = _collect(2)
+    src = TransectVisionSource(
+        width=W, height=H, on_estimate=cb,
+        receiver_factory=lambda: _FakeReceiver(frame_bytes=W * H * 3),
+        detector=det, policy=TransectPolicy(model), target_fps=200.0,
+    )  # frame_quality_check defaults to the real gate
+    src.start()
+    assert done.wait(2.0), "no estimates emitted for rejected frames"
+    src.stop()
+
+    # Detector never produced a target; every emitted estimate is an invalid no-lock.
+    assert all(obs.blue_found is False for _, obs, _ in got)
+    assert all(est.error.valid is False for est, _, _ in got)
+    assert src.stats()["rejected"] >= 1
 
 
 def test_source_retries_mirror_while_waiting_for_frames():

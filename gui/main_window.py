@@ -84,6 +84,7 @@ from recording.video_recorder import (
     RECORD_FANOUT_HOST,
     VideoRecorder,
     VideoRecorderConfig,
+    cv_fanout_port,
     record_fanout_port,
 )
 from tracking import (
@@ -1021,15 +1022,14 @@ class MainWindow(QMainWindow):
             )
             codec = "h264" if tx_is_h264 else "jpeg"
             channel_order = str(opts.get("channel_order", "BGR") or "BGR")
-            # Bigger jitter buffer than the display feed: the CV view is a
-            # hold-assist overlay, so absorbing motion-burst jitter (fewer decode
-            # stalls when the arm swings) is worth ~150ms of extra latency.
-            latency_ms = int(opts.get("transect_cv_latency_ms", 150) or 150)
-            # Mirror to a freshly-allocated local port (same proven approach as the
-            # snapshot taps) rather than a fixed offset, so it never collides with
-            # the display/recorder receivers.
-            alloc = getattr(cam_mgr, "_allocate_udp_port", None)
-            mirror_port = int(alloc(bind)) if callable(alloc) else int(opts.get("port", 5000)) + 300
+            # Read the H.264 the laptop already receives via the display pipeline's
+            # always-on loopback fan-out -- NO ROV tether mirror, so the CV feed no
+            # longer competes for tether bandwidth (which lost packets -> corrupt
+            # frames + lag straight into the autopilot). Because the source is a
+            # lossless loopback, the big jitter buffer the old tether feed needed is
+            # just latency now: default down to 60ms (override: transect_cv_latency_ms).
+            latency_ms = int(opts.get("transect_cv_latency_ms", 60) or 60)
+            cv_port = cv_fanout_port(int(opts.get("port", 5000)))
         except Exception as exc:
             logger.debug("transect CV: could not resolve stream '%s': %s", stream, exc)
             return False
@@ -1040,23 +1040,17 @@ class MainWindow(QMainWindow):
             from tracking.transect_cv import ClassicalTransectDetector
             self._transect_detector = ClassicalTransectDetector()
 
-        def _mirror(add: bool) -> None:
-            try:
-                self._set_stream_mirror(stream, mirror_port, add=add)
-            except Exception as exc:
-                logger.debug("transect CV mirror %s failed: %s", "add" if add else "remove", exc)
-
         try:
             source = TransectVisionSource(
                 width=width, height=height,
                 on_estimate=self._on_transect_estimate,
                 receiver_factory=default_receiver_factory(
-                    port=mirror_port, codec=codec, width=width, height=height,
-                    bind_address=bind, channel_order=channel_order, latency_ms=latency_ms,
+                    port=cv_port, codec=codec, width=width, height=height,
+                    bind_address=RECORD_FANOUT_HOST, channel_order=channel_order, latency_ms=latency_ms,
                 ),
                 detector=self._transect_detector,
                 policy=self._transect_policy,
-                mirror_setter=_mirror,
+                mirror_setter=None,  # loopback fan-out is part of the display pipeline; no ROV mirror
                 name=f"transect-cv:{stream}",
             )
             source.start()
@@ -1065,7 +1059,7 @@ class MainWindow(QMainWindow):
             return False
         self._transect_cv_source = source
         self._transect_cv_stream = stream
-        trace_event("transect_cv_started", stream=stream, mirror_port=mirror_port, codec=codec,
+        trace_event("transect_cv_started", stream=stream, cv_fanout_port=cv_port, codec=codec,
                     width=width, height=height)
         return True
 

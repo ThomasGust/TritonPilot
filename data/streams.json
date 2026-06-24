@@ -30,7 +30,7 @@
   "streams": [
     {
       "name": "Arm Camera",
-      "device": "/dev/v4l/by-path/*1.2.7*video-index2",
+      "device": "/dev/v4l/by-path/*1.2.1*video-index2",
       "width": 1920,
       "height": 1080,
       "fps": 30,
@@ -58,7 +58,7 @@
     },
     {
       "name": "Back Gripper Camera",
-      "device": "/dev/v4l/by-path/*1.2.5*video-index2",
+      "device": "/dev/v4l/by-path/*1.2.2*video-index2",
       "width": 1920,
       "height": 1080,
       "fps": 30,
@@ -86,7 +86,7 @@
     },
     {
       "name": "Primary Camera",
-      "device": "/dev/v4l/by-path/*1.2.6*video-index2",
+      "device": "/dev/v4l/by-path/*1.2.4*video-index2",
       "width": 1920,
       "height": 1080,
       "fps": 30,
@@ -119,7 +119,7 @@
     },
     {
       "name": "Aux Camera",
-      "device": "/dev/v4l/by-path/*1.2.4*video-index2",
+      "device": "/dev/v4l/by-path/*1.2.5*video-index2",
       "width": 1920,
       "height": 1080,
       "fps": 30,

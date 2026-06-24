@@ -414,9 +414,9 @@ ARM_STICK_WRIST_INVERT = float(os.environ.get("TRITON_ARM_STICK_WRIST_INVERT", "
 # feed this. 2.5 crosses the full -1..+1 range in ~0.8 s at 100% gain.
 ARM_RATE = float(os.environ.get("TRITON_ARM_RATE", "2.5"))
 
-# Startup arm position (normalized): pitch -1 = flat/folded, wrist 0 = centered.
+# Startup arm position (normalized): pitch -1 = flat/folded, wrist +1 = 90 deg.
 ARM_INIT_PITCH = float(os.environ.get("TRITON_ARM_INIT_PITCH", "-1.0"))
-ARM_INIT_WRIST = float(os.environ.get("TRITON_ARM_INIT_WRIST", "0.0"))
+ARM_INIT_WRIST = float(os.environ.get("TRITON_ARM_INIT_WRIST", "1.0"))
 
 
 # Legacy topside walk-target display settings. Current depth-hold manual

@@ -117,6 +117,8 @@ ROV-side configuration. Treat it as a live vehicle tool:
   Center` is the existing neutral mount pose; `Flat / Wrist 90` and `Flat /
   Wrist 0` command easier flat-pitch physical references through the normal
   pilot stream.
+- The pilot starts the differential arm at flat pitch with 90-degree wrist roll,
+  matching the TritonOS arm/disarm park pose.
 
 ## Raw Sensor Logging
 

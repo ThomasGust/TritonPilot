@@ -18,7 +18,7 @@ from PyQt6.QtWidgets import QApplication, QLabel, QSizePolicy, QVBoxLayout, QWid
 from config import VIDEO_RPC_ENDPOINT
 from network.net_select import choose_video_receive_ip, parse_zmq_endpoint
 from recording.capture_trace import trace_event
-from recording.video_recorder import RECORD_FANOUT_HOST, record_fanout_port
+from recording.video_recorder import RECORD_FANOUT_HOST, cv_fanout_port, record_fanout_port
 from video.gst_receiver import _suppress_gst_stderr_line, _win_kill_udp_port_users
 from video.gst_runtime import bootstrap_gstreamer_env
 from video.cam import RemoteCameraManager
@@ -43,12 +43,14 @@ class DirectReceiverConfig:
     sink: str = "d3d11videosink"
     square_crop: bool = False
     # When > 0, also fan the raw received RTP out to 127.0.0.1:<port> via a tee so
-    # a local recorder can capture the exact stream the laptop already gets --
-    # full quality, no extra tether load. The fan-out branch is leaky so it can
-    # never back-pressure or stall the live display, and sending to a loopback
-    # port with no recorder listening is harmless on Windows (verified: no
-    # WSAECONNRESET pipeline death).
+    # local consumers can read the exact stream the laptop already gets -- full
+    # quality, no extra tether load. record_fanout_port feeds the mp4 recorder;
+    # cv_fanout_port feeds the transect tracker's own decode. Each fan-out branch
+    # is leaky so it can never back-pressure or stall the live display, and
+    # sending to a loopback port with no listener is harmless on Windows
+    # (verified: no WSAECONNRESET pipeline death).
     record_fanout_port: int = 0
+    cv_fanout_port: int = 0
 
 
 def _find_gst_launch() -> str:
@@ -182,26 +184,35 @@ def build_direct_receiver_cmd(gst_launch: str, cfg: DirectReceiverConfig) -> lis
         f"buffer-size={udp_buffer_size}", f"caps={caps}",
     ]
 
-    fanout_port = int(getattr(cfg, "record_fanout_port", 0) or 0)
-    if fanout_port > 0:
+    fanout_ports = [
+        p for p in (
+            int(getattr(cfg, "record_fanout_port", 0) or 0),
+            int(getattr(cfg, "cv_fanout_port", 0) or 0),
+        ) if p > 0
+    ]
+    if fanout_ports:
         # Tee the raw RTP: one branch feeds the live display exactly as before, the
-        # other forwards the same UDP packets to a loopback port for the recorder.
-        # Each tee branch needs its own queue (separate threads). The display queue
-        # is non-leaky so it never drops packets before the jitter buffer (matching
-        # the old udpsrc->jitterbuffer back-pressure). The fan-out queue is leaky so
-        # a stalled/absent recorder can never back up the tee and freeze the display.
+        # rest forward the same UDP packets to loopback ports for local consumers
+        # (recorder, transect CV). Each tee branch needs its own queue (separate
+        # threads). The display queue is non-leaky so it never drops packets before
+        # the jitter buffer (matching the old udpsrc->jitterbuffer back-pressure).
+        # Each fan-out queue is leaky so a stalled/absent consumer can never back up
+        # the tee and freeze the display.
         pipeline = [
             *src,
             "!", "tee", "name=rtptee",
             "rtptee.",
             "!", "queue", "max-size-buffers=512", "max-size-bytes=0", "max-size-time=0",
             "!", *display_tail,
-            "rtptee.",
-            "!", "queue", "max-size-buffers=512", "max-size-bytes=0", "max-size-time=0",
-            "leaky=downstream",
-            "!", "udpsink", f"host={RECORD_FANOUT_HOST}", f"port={fanout_port}",
-            "sync=false", "async=false",
         ]
+        for fp in fanout_ports:
+            pipeline += [
+                "rtptee.",
+                "!", "queue", "max-size-buffers=512", "max-size-bytes=0", "max-size-time=0",
+                "leaky=downstream",
+                "!", "udpsink", f"host={RECORD_FANOUT_HOST}", f"port={fp}",
+                "sync=false", "async=false",
+            ]
     else:
         pipeline = [*src, "!", *display_tail]
     return base + pipeline
@@ -326,9 +337,10 @@ class _DirectConnectWorker(QThread):
             sink = str(stream_opts.get("receiver_direct_sink", stream_opts.get("direct_sink", "d3d11videosink")))
             width = int(stream_opts.get("width", start_kwargs.get("width", 0)) or 0)
             height = int(stream_opts.get("height", start_kwargs.get("height", 0)) or 0)
-            # Always provide the loopback recording fan-out so a recording can start
-            # (and survive display reconnects) with zero tether cost. Idle fan-out to
-            # a port with no listener is harmless. Opt out per stream if ever needed.
+            # Always provide the loopback fan-outs so a recording or the transect CV
+            # can start (and survive display reconnects) with zero tether cost. Idle
+            # fan-out to a port with no listener is harmless. Opt out per stream if
+            # ever needed.
             enable_fanout = _truthy(stream_opts.get("enable_local_record", True), default=True)
             cfg = DirectReceiverConfig(
                 name=self.stream_name,
@@ -344,6 +356,7 @@ class _DirectConnectWorker(QThread):
                 sink=sink,
                 square_crop=bool(self.square_crop),
                 record_fanout_port=record_fanout_port(port) if enable_fanout else 0,
+                cv_fanout_port=cv_fanout_port(port) if enable_fanout else 0,
             )
             cmd = build_direct_receiver_cmd(_find_gst_launch(), cfg)
             env = dict(os.environ)
