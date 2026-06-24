@@ -29,12 +29,17 @@ class _FakePilotService:
     def __init__(self):
         self.tune_calls = []
         self.clear_calls = 0
+        self.positions = []
 
     def set_arm_tune(self, key, value):
         self.tune_calls.append((key, value))
 
     def clear_arm_tune(self):
         self.clear_calls += 1
+
+    def set_arm_position(self, pitch, wrist):
+        self.positions.append((float(pitch), float(wrist)))
+        return float(pitch), float(wrist)
 
 
 def _app():
@@ -80,6 +85,80 @@ def test_arm_tuning_controls_load_and_save_rov_config(monkeypatch):
         assert args["updates"]["GRIPPER_RIGHT_INVERT"] == -1.0
         assert args["updates"]["GRIPPER_PITCH_SPAN_DEG"] == 90.0
         assert args["updates"]["GRIPPER_PITCH_NEUTRAL_DEG"] == 45.0
+    finally:
+        page.shutdown()
+        page.close()
+        app.processEvents()
+
+
+def test_arm_alignment_pose_sets_pilot_target_and_previews_servo_pulses(monkeypatch):
+    app = _app()
+    monkeypatch.setattr(management_page, "ManagementRpcService", _FakeManagementRpcService)
+
+    pilot = _FakePilotService()
+    page = management_page.ManagementPage(endpoint="inproc://arm-align-test", pilot_svc=pilot)
+    try:
+        page._apply_state(
+            {
+                "commands": ["get_state", "set_config"],
+                "config_path": "rov_config.py",
+                "references": {},
+                "runtime": {"armed": True},
+                "config": {
+                    "GRIPPER_LEFT_INVERT": 1.0,
+                    "GRIPPER_RIGHT_INVERT": -1.0,
+                    "GRIPPER_PITCH_INVERT": 1.0,
+                    "GRIPPER_YAW_INVERT": 1.0,
+                    "GRIPPER_SERVO_RANGE_DEG": 100.0,
+                    "GRIPPER_PITCH_SPAN_DEG": 90.0,
+                    "GRIPPER_WRIST_SPAN_DEG": 90.0,
+                    "GRIPPER_PITCH_NEUTRAL_DEG": 45.0,
+                    "GRIPPER_WRIST_NEUTRAL_DEG": 45.0,
+                    "GRIPPER_SERVO_CENTER_US": 1500,
+                    "GRIPPER_SERVO_PULSE_HALFSPAN_US": 800.0,
+                },
+            }
+        )
+
+        assert page._send_arm_alignment_pose("flat_wrist_90") is True
+
+        assert pilot.positions[-1] == (-1.0, 1.0)
+        status = page.arm_alignment_status_label.text()
+        assert "Flat / Wrist 90" in status
+        assert "left +0.000 (1500 us)" in status
+        assert "right +0.900 (2220 us)" in status
+    finally:
+        page.shutdown()
+        page.close()
+        app.processEvents()
+
+
+def test_arm_alignment_pose_compensates_axis_inverts(monkeypatch):
+    app = _app()
+    monkeypatch.setattr(management_page, "ManagementRpcService", _FakeManagementRpcService)
+
+    pilot = _FakePilotService()
+    page = management_page.ManagementPage(endpoint="inproc://arm-align-invert-test", pilot_svc=pilot)
+    try:
+        page._apply_state(
+            {
+                "commands": ["get_state", "set_config"],
+                "config_path": "rov_config.py",
+                "references": {},
+                "config": {
+                    "GRIPPER_PITCH_INVERT": -1.0,
+                    "GRIPPER_YAW_INVERT": -1.0,
+                    "GRIPPER_PITCH_SPAN_DEG": 90.0,
+                    "GRIPPER_WRIST_SPAN_DEG": 90.0,
+                    "GRIPPER_PITCH_NEUTRAL_DEG": 45.0,
+                    "GRIPPER_WRIST_NEUTRAL_DEG": 45.0,
+                },
+            }
+        )
+
+        assert page._send_arm_alignment_pose("flat_wrist_0") is True
+
+        assert pilot.positions[-1] == (1.0, 1.0)
     finally:
         page.shutdown()
         page.close()

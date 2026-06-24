@@ -454,6 +454,19 @@ class PilotPublisherService:
         with self._arm_lock:
             return float(self._arm_pitch), float(self._arm_wrist)
 
+    def set_arm_position(self, pitch: float, wrist: float) -> tuple[float, float]:
+        """Set the absolute differential-arm target in [-1, 1].
+
+        Used by setup/alignment actions that need to command a known pose directly
+        instead of walking there through keyboard or stick intent.
+        """
+        with self._arm_lock:
+            self._arm_pitch = self._clamp_unit(pitch)
+            self._arm_wrist = self._clamp_unit(wrist)
+            self._arm_kb_pitch_dir = 0.0
+            self._arm_kb_wrist_dir = 0.0
+            return float(self._arm_pitch), float(self._arm_wrist)
+
     @staticmethod
     def _stick_axis(value: float, deadzone: float) -> float:
         """Deadzone + rescale a stick axis into a proportional [-1, 1] intent."""
