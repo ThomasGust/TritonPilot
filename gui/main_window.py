@@ -80,7 +80,12 @@ from recording.stream_recorder import StreamRecorder
 from recording.save_location import DEFAULT_RECORDINGS_DIR, SaveLocation, is_available_directory, resolve_recordings_dir
 from stereo.capture import StereoCaptureSession, default_stereo_session_name, safe_filename_component
 from stereo.pairs import load_stereo_pairs
-from recording.video_recorder import VideoRecorder, VideoRecorderConfig
+from recording.video_recorder import (
+    RECORD_FANOUT_HOST,
+    VideoRecorder,
+    VideoRecorderConfig,
+    record_fanout_port,
+)
 from tracking import (
     NullOpticalTracker,
     StationKeepCommand,
@@ -3476,14 +3481,14 @@ class MainWindow(QMainWindow):
             return
         rec = self._video_recorder
         stream_name = self._video_recording_stream or ""
-        mirror_port = int(self._video_recording_mirror_port or 0)
+        fanout_port = int(self._video_recording_mirror_port or 0)
         self._video_recorder = None
         self._video_recording_busy = True
         self.statusBar().showMessage("Finalizing video recording…", 2500)
         self._update_capture_status_label()
         threading.Thread(
             target=self._video_recording_stop_worker,
-            args=(rec, stream_name, mirror_port),
+            args=(rec, stream_name, fanout_port),
             name="video-recording-stop",
             daemon=True,
         ).start()
@@ -3597,48 +3602,41 @@ class MainWindow(QMainWindow):
             pass
 
     def _video_recording_start_worker(self, stream_name: str, session_dir: str) -> None:
-        mirror_applied: int | None = None
         try:
             opts = video_stream_options(self.cam_mgr, stream_name)
             host = resolve_video_host(self.cam_mgr, opts)
             kwargs = video_start_kwargs(opts, host=host)
             port = int(kwargs.get("port", 5000))
-            mirror_port = port + 200
+            # Record the H.264 the laptop already receives: the live display
+            # receiver fans the exact RTP out to this loopback port (zero extra
+            # tether load -- the old ROV-side mirror doubled the stream over the
+            # tether and corrupted both the live picture and the file). The fan-out
+            # is part of the display pipeline, so it also survives display
+            # reconnects without any ROV round-trip.
+            fanout_port = record_fanout_port(port)
             tx_is_h264 = (
                 str(kwargs.get("video_format", "")).lower() == "h264"
                 or str(kwargs.get("encode", "")).lower() == "h264"
             )
             codec = "h264" if tx_is_h264 else "jpeg"
-            bind = host if bool(opts.get("bind_receiver_to_host", True)) else "0.0.0.0"
 
             video_dir = Path(session_dir) / "video"
             stamp = time.strftime("%Y%m%d-%H%M%S")
             fname = f"{safe_filename_component(stream_name)}-{stamp}.mp4"
             out_path = self._unused_snapshot_path(video_dir / fname)
 
-            # Register the mirror so a later display reconnect keeps it, then
-            # apply it live to the already-running stream.
-            mirrors = getattr(self.cam_mgr, "recording_mirror_ports", None)
-            if mirrors is None:
-                mirrors = {}
-                self.cam_mgr.recording_mirror_ports = mirrors
-            mirrors[stream_name] = [mirror_port]
-
-            self._set_stream_mirror(stream_name, mirror_port, add=True)
-            mirror_applied = mirror_port
-
             recorder = VideoRecorder(
                 VideoRecorderConfig(
                     name=stream_name,
                     out_path=str(out_path),
                     codec=codec,
-                    port=mirror_port,
-                    bind_address=bind,
+                    port=fanout_port,
+                    bind_address=RECORD_FANOUT_HOST,
                 )
             )
             recorder.start()
             self._video_recorder = recorder
-            self._video_recording_mirror_port = mirror_port
+            self._video_recording_mirror_port = fanout_port
             try:
                 self._write_capture_manifest(
                     Path(session_dir),
@@ -3652,7 +3650,7 @@ class MainWindow(QMainWindow):
             trace_event(
                 "video_recording_started",
                 stream=stream_name,
-                mirror_port=mirror_port,
+                fanout_port=fanout_port,
                 codec=codec,
                 path=str(out_path),
                 session_dir=str(session_dir),
@@ -3660,21 +3658,10 @@ class MainWindow(QMainWindow):
             )
             self.video_recording_state_sig.emit(True, stream_name, str(out_path))
         except Exception as exc:
-            try:
-                getattr(self.cam_mgr, "recording_mirror_ports", {}).pop(stream_name, None)
-            except Exception:
-                pass
-            # If the mirror was already applied live but the recorder then failed
-            # to start, remove it so the ROV doesn't keep duplicating RTP to nobody.
-            if mirror_applied is not None:
-                try:
-                    self._set_stream_mirror(stream_name, mirror_applied, add=False)
-                except Exception:
-                    pass
             trace_event("video_recording_start_failed", reason="exception", error=str(exc))
             self.video_recording_state_sig.emit(False, stream_name, f"ERROR: {exc}")
 
-    def _video_recording_stop_worker(self, recorder, stream_name: str, mirror_port: int) -> None:
+    def _video_recording_stop_worker(self, recorder, stream_name: str, fanout_port: int) -> None:
         path = ""
         try:
             if recorder is not None:
@@ -3682,6 +3669,8 @@ class MainWindow(QMainWindow):
         except Exception as exc:
             trace_event("video_recording_stop_error", stream=stream_name, error=str(exc))
         finally:
+            # Nothing to tear down on the ROV: the loopback fan-out lives in the
+            # display pipeline and stays harmlessly idle once the recorder exits.
             session_dir = self._video_capture_session_dir
             if session_dir:
                 try:
@@ -3695,14 +3684,6 @@ class MainWindow(QMainWindow):
                     )
                 except Exception:
                     pass
-            try:
-                getattr(self.cam_mgr, "recording_mirror_ports", {}).pop(stream_name, None)
-            except Exception:
-                pass
-            try:
-                self._set_stream_mirror(stream_name, mirror_port, add=False)
-            except Exception as exc:
-                trace_event("video_recording_mirror_remove_failed", stream=stream_name, error=str(exc))
             trace_event("video_recording_stopped", stream=stream_name, path=str(path))
             self.video_recording_state_sig.emit(False, stream_name, str(path))
 

@@ -30,6 +30,20 @@ from video.gst_runtime import bootstrap_gstreamer_env
 logger = logging.getLogger(__name__)
 
 
+# Local recording fans the live RTP the laptop already receives out to a
+# loopback port; the recorder reads that copy. This keeps recording entirely on
+# the pilot machine and adds ZERO tether load (the old path asked the ROV to send
+# a second full H.264 stream over the tether, which saturated the link and
+# corrupted both the live display and the recorded file).
+RECORD_FANOUT_HOST = "127.0.0.1"
+RECORD_FANOUT_PORT_OFFSET = 200
+
+
+def record_fanout_port(display_port: int) -> int:
+    """Loopback UDP port a display receiver fans live RTP to for local recording."""
+    return int(display_port) + RECORD_FANOUT_PORT_OFFSET
+
+
 def _find_gst_launch() -> str:
     runtime = bootstrap_gstreamer_env()
     if runtime is None:
