@@ -587,6 +587,7 @@ class MainWindow(QMainWindow):
         # Auto-record the hold so every attempt is captured for later review.
         self._auto_record_hold(enabled)
         self._sync_station_keep_action()
+        self._sync_roll_pitch_level_action()
         self._refresh_drive_status()
         rec = " + recording" if (enabled and self._hold_owns_recording) else ""
         yaw_er = "ON" if getattr(self, "_transect_rotation_servo_enabled", False) else "OFF"
@@ -668,6 +669,54 @@ class MainWindow(QMainWindow):
         except Exception:
             new_state = True
         self._set_station_keep_enabled(new_state)
+
+    def _set_roll_pitch_level_enabled_ui(self, enabled: bool) -> None:
+        """Set roll/pitch (RP) level hold and keep the UI in sync. Station-keep
+        engage force-enables RP level for a stable camera; the P key / Autopilot
+        menu item is how you turn it back OFF -- e.g. to fly a hold without
+        leveling for testing."""
+        enabled = bool(enabled)
+        svc = getattr(self, "pilot_svc", None)
+        if svc is None:
+            return
+        try:
+            svc.set_roll_pitch_level_enabled(enabled)
+        except Exception as exc:
+            logger.exception("RP level set failed: %s", exc)
+            return
+        self._sync_roll_pitch_level_action()
+        self._refresh_drive_status()
+        self.statusBar().showMessage("RP Level ON" if enabled else "RP Level OFF", 3000)
+        trace_event("roll_pitch_level_toggle", enabled=enabled)
+
+    def _toggle_roll_pitch_level_from_keyboard(self) -> None:
+        try:
+            new_state = not bool(self.pilot_svc.is_roll_pitch_level_enabled())
+        except Exception:
+            new_state = False
+        self._set_roll_pitch_level_enabled_ui(new_state)
+
+    def _toggle_roll_pitch_level_from_ui(self, checked: bool | None = None) -> None:
+        if checked is None:
+            try:
+                checked = not bool(self.pilot_svc.is_roll_pitch_level_enabled())
+            except Exception:
+                checked = False
+        self._set_roll_pitch_level_enabled_ui(bool(checked))
+
+    def _sync_roll_pitch_level_action(self) -> None:
+        act = getattr(self, "_roll_pitch_level_act", None)
+        if act is None:
+            return
+        try:
+            enabled = bool(self.pilot_svc.is_roll_pitch_level_enabled())
+        except Exception:
+            enabled = False
+        act.blockSignals(True)
+        try:
+            act.setChecked(enabled)
+        finally:
+            act.blockSignals(False)
 
     def publish_visual_target(self, sample) -> None:
         """Integration point for the future CV: push one tracker output to the ROV.
@@ -1260,6 +1309,7 @@ class MainWindow(QMainWindow):
         self._analysis_transfer_stop_act: QAction | None = None
         self._analysis_transfer_restart_act: QAction | None = None
         self._transect_rotation_servo_act: QAction | None = None
+        self._roll_pitch_level_act: QAction | None = None
         self._analysis_transfer_server = None
         self._analysis_transfer_thread = None
         self._analysis_transfer_root: Path | None = None
@@ -2122,6 +2172,9 @@ class MainWindow(QMainWindow):
                         return True
                     if event.key() == Qt.Key.Key_K:
                         self._toggle_station_keep_from_keyboard()
+                        return True
+                    if event.key() == Qt.Key.Key_P:
+                        self._toggle_roll_pitch_level_from_keyboard()
                         return True
                     direction = self._back_gripper_gain_shortcuts.get(event.key())
                     if direction is not None:
@@ -4561,6 +4614,19 @@ class MainWindow(QMainWindow):
         )
         self._transect_rotation_servo_act.toggled.connect(self._set_transect_rotation_servo_enabled)
         autopilot_menu.addAction(self._transect_rotation_servo_act)
+
+        # Roll/Pitch level hold. Station-keep engage force-enables this for a stable
+        # camera; this action (and the P key) is how to turn it back OFF -- e.g. to
+        # fly a hold without leveling for testing. Toggle key handled in eventFilter.
+        self._roll_pitch_level_act = QAction("Roll/Pitch Level Hold  [P]", self)
+        self._roll_pitch_level_act.setCheckable(True)
+        self._roll_pitch_level_act.setChecked(False)
+        self._roll_pitch_level_act.setToolTip(
+            "Level the vehicle (roll/pitch -> 0). Auto-enabled when Optical Hold "
+            "engages; toggle off here (or press P) to fly without leveling."
+        )
+        self._roll_pitch_level_act.toggled.connect(self._toggle_roll_pitch_level_from_ui)
+        autopilot_menu.addAction(self._roll_pitch_level_act)
 
         self._fullscreen_act = QAction("Full Screen", self)
         self._fullscreen_act.setCheckable(True)
