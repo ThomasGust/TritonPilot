@@ -406,7 +406,7 @@ ARM_AIM_MODIFIER_BUTTON = os.environ.get("TRITON_ARM_AIM_MODIFIER", "rb").strip(
 ARM_STICK_PITCH_AXIS = os.environ.get("TRITON_ARM_STICK_PITCH_AXIS", "ry").strip().lower()
 ARM_STICK_WRIST_AXIS = os.environ.get("TRITON_ARM_STICK_WRIST_AXIS", "rx").strip().lower()
 ARM_STICK_DEADZONE = float(os.environ.get("TRITON_ARM_STICK_DEADZONE", "0.12"))
-ARM_STICK_PITCH_INVERT = float(os.environ.get("TRITON_ARM_STICK_PITCH_INVERT", "1.0"))
+ARM_STICK_PITCH_INVERT = float(os.environ.get("TRITON_ARM_STICK_PITCH_INVERT", "-1.0"))
 ARM_STICK_WRIST_INVERT = float(os.environ.get("TRITON_ARM_STICK_WRIST_INVERT", "1.0"))
 
 # Arm motion rate in normalized position units/sec at 100% ARM gain. Both the

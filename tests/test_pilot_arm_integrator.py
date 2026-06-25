@@ -29,6 +29,7 @@ def test_keyboard_intent_integrates_pitch_position():
 def test_stick_requires_modifier_and_drives_pitch():
     svc = _svc("arm_stick")
     svc.set_arm_keyboard_intent(0.0, 0.0)
+    svc.set_arm_position(0.0, 0.0)
     snap = SimpleNamespace(rx=0.0, ry=1.0)  # full deflection on the pitch axis
 
     # Without the modifier the stick is ignored (it is driving the ROV).
@@ -36,9 +37,9 @@ def test_stick_requires_modifier_and_drives_pitch():
     p_idle, _ = svc._integrate_arm(snap, modifier_held=False, dt=0.1)
     assert p_idle == pytest.approx(p_before)
 
-    # With the modifier held the stick advances the arm pitch.
+    # With the modifier held the stick reverses the raw controller pitch direction.
     p_held, _ = svc._integrate_arm(snap, modifier_held=True, dt=0.1)
-    assert p_held > p_idle
+    assert p_held < p_idle
 
 
 def test_stick_deadzone_blocks_small_input():
