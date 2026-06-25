@@ -464,7 +464,6 @@ class ManagementPage(QWidget):
         }
         self._queue_request("set_config", {"updates": updates}, request_meta={"refresh_after_success": True})
 
-<<<<<<< HEAD
     def _build_limiter_power_card(self) -> "_SectionCard":
         card = _SectionCard(
             "Fuse Limiter & Power (Live)",
@@ -612,7 +611,7 @@ class ManagementPage(QWidget):
             {"updates": {"CURRENT_BUDGET_ENABLE": bool(checked)}},
             request_meta={"refresh_after_success": True},
         )
-=======
+
     def _confirm_arm_alignment_pose(self, pose_key: str) -> None:
         pose = self._arm_alignment_pose_degrees(pose_key)
         if pose is None:
@@ -743,7 +742,6 @@ class ManagementPage(QWidget):
         left = float(geom["left_invert"]) * (d_pitch + d_wrist) / rng
         right = float(geom["right_invert"]) * (d_pitch - d_wrist) / rng
         return max(-1.0, min(1.0, left)), max(-1.0, min(1.0, right))
->>>>>>> 5b15af177237d52d644df4b2106ee942c1ba1da6
 
     def _on_rpc_result_from_thread(self, result: dict) -> None:
         self.rpc_result_sig.emit(result)
