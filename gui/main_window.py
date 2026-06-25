@@ -551,10 +551,12 @@ class MainWindow(QMainWindow):
             yaw_mode = getattr(svc, "set_autopilot_axis_mode", None)
             if enabled:
                 # The transect hold relies on depth hold owning bulk altitude (the
-                # ROV then vision-servos the depth setpoint from es) and a level
-                # attitude for stable camera geometry; enable both with the hold
-                # (enable-only -- disengaging leaves the pilot's holds as-is).
-                for setter in ("set_depth_hold_enabled", "set_roll_pitch_level_enabled"):
+                # ROV then vision-servos the depth setpoint from es); enable it with
+                # the hold (enable-only -- disengaging leaves the pilot's holds as-is).
+                # RP (roll/pitch) level is intentionally NOT auto-enabled: the pilot
+                # preferred holding without leveling (2026-06-24). Toggle it with P /
+                # the Autopilot menu if you want a leveled camera for a given run.
+                for setter in ("set_depth_hold_enabled",):
                     fn = getattr(svc, setter, None)
                     if callable(fn):
                         try:
@@ -593,7 +595,7 @@ class MainWindow(QMainWindow):
         yaw_er = "ON" if getattr(self, "_transect_rotation_servo_enabled", False) else "OFF"
         self.statusBar().showMessage(
             (
-                f"Optical Hold ENGAGED (station-keep + depth + level + yaw/er {yaw_er}{rec})"
+                f"Optical Hold ENGAGED (station-keep + depth; RP level via P; yaw/er {yaw_er}{rec})"
                 if enabled else "Optical Hold OFF"
             ),
             3000,
