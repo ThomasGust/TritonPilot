@@ -312,6 +312,13 @@ CURRENT_BUDGET_DEFAULT = os.environ.get("TRITON_CURRENT_BUDGET_DEFAULT", "1").st
 CURRENT_BUDGET_MAX_A_DEFAULT = float(os.environ.get("TRITON_CURRENT_BUDGET_MAX_A", "22"))
 CURRENT_BUDGET_MAX_A_MIN = float(os.environ.get("TRITON_CURRENT_BUDGET_MAX_A_MIN", "5"))
 CURRENT_BUDGET_MAX_A_MAX = float(os.environ.get("TRITON_CURRENT_BUDGET_MAX_A_MAX", "40"))
+# Live assumed-supply-voltage the ROV's feed-forward model uses to predict draw.
+# Streamed in modes["current_budget_voltage_v"]. Set this to the voltage you
+# measure at the top of the tether so the estimate tracks a real ammeter; higher
+# is more conservative (predicts more current). Default 14 V matches the ROV.
+CURRENT_BUDGET_VOLTAGE_DEFAULT = float(os.environ.get("TRITON_CURRENT_BUDGET_VOLTAGE", "14"))
+CURRENT_BUDGET_VOLTAGE_MIN = float(os.environ.get("TRITON_CURRENT_BUDGET_VOLTAGE_MIN", "10"))
+CURRENT_BUDGET_VOLTAGE_MAX = float(os.environ.get("TRITON_CURRENT_BUDGET_VOLTAGE_MAX", "20"))
 
 
 def _parse_str_list_env(var: str, default: list[str]) -> list[str]:

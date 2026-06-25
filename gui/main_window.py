@@ -1813,6 +1813,7 @@ class MainWindow(QMainWindow):
         self._page_stack.addWidget(self._hold_test_page)
 
         self._management_page = ManagementPage(endpoint=MANAGEMENT_RPC_ENDPOINT, pilot_svc=self.pilot_svc)
+        self._management_page.live_limiter_changed.connect(self._sync_current_budget_panel_from_service)
         self._page_stack.addWidget(self._management_page)
 
         self._raw_sensor_page = self.raw_sensor_page
@@ -2432,6 +2433,21 @@ class MainWindow(QMainWindow):
             except Exception:
                 value = 22.0
         return float(value), float(lo), float(hi)
+
+    def _sync_current_budget_panel_from_service(self) -> None:
+        """Mirror the top-bar limiter panel after a change made in Vehicle Setup."""
+        panel = getattr(self, "_current_budget_panel", None)
+        svc = getattr(self, "pilot_svc", None)
+        if panel is None or svc is None:
+            return
+        try:
+            panel.set_enabled_state(bool(svc.is_current_budget_enabled()))
+        except Exception:
+            pass
+        try:
+            panel.set_budget_value(float(svc.current_budget_max_a()))
+        except Exception:
+            pass
 
     def _on_current_budget_cap_changed(self, amps: float) -> None:
         """Pilot changed the live current cap from the top bar."""

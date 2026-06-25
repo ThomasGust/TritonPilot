@@ -112,6 +112,9 @@ class PilotPublisherService:
             CURRENT_BUDGET_MAX_A_DEFAULT,
             CURRENT_BUDGET_MAX_A_MIN,
             CURRENT_BUDGET_MAX_A_MAX,
+            CURRENT_BUDGET_VOLTAGE_DEFAULT,
+            CURRENT_BUDGET_VOLTAGE_MIN,
+            CURRENT_BUDGET_VOLTAGE_MAX,
             DEPTH_HOLD_TOGGLE_BUTTON,
             DEPTH_HOLD_DEFAULT,
             LIGHTS_TOGGLE_BUTTON,
@@ -178,11 +181,24 @@ class PilotPublisherService:
             min(self._current_budget_max_a_max, float(CURRENT_BUDGET_MAX_A_DEFAULT)),
         )
 
+        self._current_budget_voltage_min = float(CURRENT_BUDGET_VOLTAGE_MIN)
+        self._current_budget_voltage_max = float(CURRENT_BUDGET_VOLTAGE_MAX)
+        if self._current_budget_voltage_max < self._current_budget_voltage_min:
+            self._current_budget_voltage_min, self._current_budget_voltage_max = (
+                self._current_budget_voltage_max,
+                self._current_budget_voltage_min,
+            )
+        self._current_budget_voltage_v = max(
+            self._current_budget_voltage_min,
+            min(self._current_budget_voltage_max, float(CURRENT_BUDGET_VOLTAGE_DEFAULT)),
+        )
+
         self._modes = {
             "depth_hold": bool(DEPTH_HOLD_DEFAULT),
             "max_gain": float(self._max_gain),
             "current_budget": bool(CURRENT_BUDGET_DEFAULT),
             "current_budget_max_a": float(self._current_budget_max_a),
+            "current_budget_voltage_v": float(self._current_budget_voltage_v),
             "reverse": bool(REVERSE_MODE_DEFAULT),
             "roll_pitch_level": bool(ROLL_PITCH_LEVEL_DEFAULT),
             "yaw_hold": bool(YAW_HOLD_DEFAULT),
@@ -276,6 +292,30 @@ class PilotPublisherService:
     def current_max_gain(self) -> float:
         with self._mode_lock:
             return float(self._max_gain)
+
+    def max_gain_bounds(self) -> tuple:
+        return (float(self._max_gain_min), float(self._max_gain_max))
+
+    def set_max_gain(self, value: float) -> bool:
+        """Set the pilot max-gain cap to an absolute fraction (0..1).
+
+        Companion to ``adjust_max_gain`` for a topside slider/spinbox. Returns
+        True if the value changed.
+        """
+        try:
+            new_val = float(value)
+        except Exception:
+            return False
+        with self._mode_lock:
+            prev = float(self._max_gain)
+            new_val = max(float(self._max_gain_min), min(float(self._max_gain_max), new_val))
+            new_val = round(new_val, 2)
+            changed = abs(new_val - prev) > 1e-9
+            self._max_gain = float(new_val)
+            self._modes["max_gain"] = float(self._max_gain)
+        if changed:
+            self._emit_status(self._status_payload(controller="connected"))
+        return changed
 
     def max_gain_step(self) -> float:
         return float(self._max_gain_step)
@@ -611,6 +651,32 @@ class PilotPublisherService:
             prev = float(self._modes.get("current_budget_max_a", self._current_budget_max_a))
             self._current_budget_max_a = value
             self._modes["current_budget_max_a"] = value
+        changed = abs(prev - value) > 1e-9
+        if changed:
+            self._emit_status(self._status_payload())
+        return changed
+
+    def current_budget_voltage_v(self) -> float:
+        return float(self.current_modes().get("current_budget_voltage_v", self._current_budget_voltage_v))
+
+    def current_budget_voltage_bounds(self) -> tuple:
+        return (float(self._current_budget_voltage_min), float(self._current_budget_voltage_max))
+
+    def set_current_budget_voltage_v(self, volts: float) -> bool:
+        """Set the live assumed supply voltage the ROV's draw model uses.
+
+        Set this to the voltage measured at the top of the tether so the
+        feed-forward estimate tracks a real ammeter; higher is more conservative.
+        """
+        try:
+            value = float(volts)
+        except Exception:
+            return False
+        value = max(self._current_budget_voltage_min, min(self._current_budget_voltage_max, value))
+        with self._mode_lock:
+            prev = float(self._modes.get("current_budget_voltage_v", self._current_budget_voltage_v))
+            self._current_budget_voltage_v = value
+            self._modes["current_budget_voltage_v"] = value
         changed = abs(prev - value) > 1e-9
         if changed:
             self._emit_status(self._status_payload())

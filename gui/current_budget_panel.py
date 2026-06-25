@@ -54,8 +54,10 @@ class CurrentBudgetPanel(QWidget):
         self.check.setObjectName("currentBudgetCheck")
         self.check.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         self.check.setToolTip(
-            "Enable the ROV's intelligent thruster current limiter (fuse protection).\n"
-            "Uncheck instantly if it ever feels wrong; the ROV reverts to raw thrust."
+            "Checked: actively clamp thrust to the current budget (fuse protection).\n"
+            "Unchecked: monitor only -- the estimated draw still shows (compare it to a\n"
+            "tether ammeter) but thrust is not limited.\n"
+            "Full configuration lives in Vehicle Setup > Fuse Limiter & Power."
         )
         self.check.setChecked(bool(enabled))
         self.check.toggled.connect(self._on_toggled)
@@ -156,7 +158,9 @@ class CurrentBudgetPanel(QWidget):
         amps = float(predicted_a)
         text = f"{amps:.0f} A"
         if applied:
-            text += "  LIM"
+            text += "  LIM"  # clamping thrust right now
+        elif active is False:
+            text += "  MON"  # estimate only; not limiting
         self.readout.setText(text)
 
         if budget_a is None or budget_a <= 0.0:

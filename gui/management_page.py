@@ -77,6 +77,12 @@ CONFIG_FIELD_SPECS = [
     {"key": "AUTOPILOT_YAW_OUT_LIMIT", "label": "Yaw Output Limit", "min": 0.0, "max": 1.0, "step": 0.01, "decimals": 4},
     {"key": "AUTOPILOT_YAW_SIGN", "label": "Yaw Sign", "min": -1.0, "max": 1.0, "step": 2.0, "decimals": 0},
     {"key": "AUTOPILOT_MIX_DEADBAND", "label": "Autopilot Mix Deadband", "min": 0.0, "max": 1.0, "step": 0.01, "decimals": 4},
+    # Fuse current-budget boot defaults (live overrides for cap/voltage stream
+    # from the top bar / the live card below; these set what the ROV boots with).
+    {"key": "CURRENT_BUDGET_MAX_A", "label": "Current Budget Cap (A)", "min": 1.0, "max": 60.0, "step": 0.5, "decimals": 2},
+    {"key": "CURRENT_BUDGET_RESERVE_A", "label": "Current Budget Reserve (A)", "min": 0.0, "max": 25.0, "step": 0.5, "decimals": 2},
+    {"key": "CURRENT_BUDGET_VOLTAGE_V", "label": "Current Budget Assumed V", "min": 6.0, "max": 30.0, "step": 0.1, "decimals": 2},
+    {"key": "CURRENT_BUDGET_MIN_SCALE", "label": "Current Budget Min Scale", "min": 0.0, "max": 1.0, "step": 0.05, "decimals": 3},
 ]
 
 
@@ -109,6 +115,9 @@ class ManagementPage(QWidget):
     """Operator-facing controls for live ROV configuration and calibration."""
 
     rpc_result_sig = pyqtSignal(dict)
+    # Emitted whenever a live limiter/power control here streams a new value to
+    # the ROV, so the top bar can mirror the change.
+    live_limiter_changed = pyqtSignal()
 
     def __init__(self, endpoint: str = MANAGEMENT_RPC_ENDPOINT, parent=None, *, pilot_svc=None):
         super().__init__(parent)
@@ -290,6 +299,7 @@ class ManagementPage(QWidget):
         root.addWidget(service_card)
 
         root.addWidget(self._build_arm_tuning_card())
+        root.addWidget(self._build_limiter_power_card())
 
         config_card = _SectionCard(
             "Config Values",
@@ -427,6 +437,154 @@ class ManagementPage(QWidget):
         }
         self._queue_request("set_config", {"updates": updates}, request_meta={"refresh_after_success": True})
 
+    def _build_limiter_power_card(self) -> "_SectionCard":
+        card = _SectionCard(
+            "Fuse Limiter & Power (Live)",
+            "Streamed to the ROV instantly over the control link -- no restart. The "
+            "feed-forward limiter predicts total T200 current (8 thrusters + the wrist) "
+            "from commanded PWM and clamps it under the budget so the 25 A fuse survives. "
+            "Run 'Monitor only' first to compare the estimate against a tether ammeter, "
+            "then enable limiting. The live amps readout sits in the top bar.",
+        )
+
+        self.limiter_active_check = QCheckBox("Actively limit thrust to the budget (uncheck = monitor only)")
+        self.limiter_active_check.setToolTip(
+            "When unchecked the ROV still reports the predicted draw (top bar) but does\n"
+            "not clamp thrust -- use it to validate the estimate against your ammeter."
+        )
+        self.limiter_active_check.toggled.connect(self._on_limiter_active_toggled)
+        card.body.addWidget(self.limiter_active_check)
+
+        form = QFormLayout()
+        form.setContentsMargins(0, 6, 0, 0)
+        form.setSpacing(8)
+
+        self.limiter_budget_spin = self._make_spinbox(1.0, 60.0, 0.5, 1, suffix=" A")
+        self.limiter_budget_spin.setToolTip(
+            "Total current cap the ROV limits to. Keep it below the 25 A fuse with margin."
+        )
+        self.limiter_budget_spin.valueChanged.connect(self._on_limiter_budget_changed)
+        form.addRow("Current budget", self.limiter_budget_spin)
+
+        self.limiter_voltage_spin = self._make_spinbox(6.0, 30.0, 0.1, 1, suffix=" V")
+        self.limiter_voltage_spin.setToolTip(
+            "Assumed supply voltage for the draw model. Set it to the voltage you\n"
+            "measure at the top of the tether so the estimate tracks the real ammeter;\n"
+            "higher is more conservative (predicts more current)."
+        )
+        self.limiter_voltage_spin.valueChanged.connect(self._on_limiter_voltage_changed)
+        form.addRow("Assumed supply voltage", self.limiter_voltage_spin)
+
+        self.max_gain_spin = self._make_spinbox(5.0, 100.0, 5.0, 0, suffix=" %")
+        self.max_gain_spin.setToolTip(
+            "Overall power cap (same lever as the Y/A buttons). Lowering it detunes\n"
+            "every axis; the current budget is the better fuse protection, but this is\n"
+            "a quick blunt lever if you want it."
+        )
+        self.max_gain_spin.valueChanged.connect(self._on_max_gain_changed)
+        form.addRow("Max gain / power cap", self.max_gain_spin)
+        card.body.addLayout(form)
+
+        # Persistent master switch (writes rov_config.py via the management RPC).
+        self.limiter_enable_boot_check = QCheckBox(
+            "Enable limiter on boot (persistent; TritonOS restart required)"
+        )
+        self.limiter_enable_boot_check.setToolTip(
+            "Master switch in rov_config.py. When off the ROV never loads the model\n"
+            "(the live controls above become no-ops). Saved on the ROV; needs a restart."
+        )
+        self.limiter_enable_boot_check.toggled.connect(self._on_limiter_enable_boot_toggled)
+        card.body.addWidget(self.limiter_enable_boot_check)
+
+        if self._pilot_svc is None:
+            for w in (self.limiter_active_check, self.limiter_budget_spin, self.limiter_voltage_spin, self.max_gain_spin):
+                w.setEnabled(False)
+        else:
+            self._init_limiter_live_controls()
+        return card
+
+    def _init_limiter_live_controls(self) -> None:
+        """Seed the live spinboxes/checkbox from the pilot service's current state.
+
+        Signals are blocked the whole time: ``setRange`` can emit ``valueChanged``
+        if the (default 0.0) value falls outside the new range, which would
+        otherwise stream a spurious value to the ROV during construction.
+        """
+        svc = self._pilot_svc
+        if svc is None:
+            return
+
+        def _seed(spin, bounds, value):
+            prev = spin.blockSignals(True)
+            try:
+                lo, hi = (float(x) for x in bounds)
+                spin.setRange(lo, hi)
+                spin.setValue(float(value))
+            finally:
+                spin.blockSignals(prev)
+
+        try:
+            _seed(self.limiter_budget_spin, svc.current_budget_max_a_bounds(), svc.current_budget_max_a())
+        except Exception:
+            pass
+        try:
+            _seed(self.limiter_voltage_spin, svc.current_budget_voltage_bounds(), svc.current_budget_voltage_v())
+        except Exception:
+            pass
+        try:
+            glo, ghi = (float(x) for x in svc.max_gain_bounds())
+            _seed(self.max_gain_spin, (glo * 100.0, ghi * 100.0), float(svc.current_max_gain()) * 100.0)
+        except Exception:
+            pass
+        try:
+            self._set_check_value(self.limiter_active_check, bool(svc.is_current_budget_enabled()))
+        except Exception:
+            pass
+
+    def _on_limiter_active_toggled(self, checked: bool) -> None:
+        if self._pilot_svc is None:
+            return
+        try:
+            self._pilot_svc.set_current_budget_enabled(bool(checked))
+            self.live_limiter_changed.emit()
+        except Exception:
+            pass
+
+    def _on_limiter_budget_changed(self, value) -> None:
+        if self._pilot_svc is None:
+            return
+        try:
+            self._pilot_svc.set_current_budget_max_a(float(value))
+            self.live_limiter_changed.emit()
+        except Exception:
+            pass
+
+    def _on_limiter_voltage_changed(self, value) -> None:
+        if self._pilot_svc is None:
+            return
+        try:
+            self._pilot_svc.set_current_budget_voltage_v(float(value))
+            self.live_limiter_changed.emit()
+        except Exception:
+            pass
+
+    def _on_max_gain_changed(self, value) -> None:
+        if self._pilot_svc is None:
+            return
+        try:
+            self._pilot_svc.set_max_gain(float(value) / 100.0)
+            self.live_limiter_changed.emit()
+        except Exception:
+            pass
+
+    def _on_limiter_enable_boot_toggled(self, checked: bool) -> None:
+        # Persistent write to rov_config.py (restart required to load/unload model).
+        self._queue_request(
+            "set_config",
+            {"updates": {"CURRENT_BUDGET_ENABLE": bool(checked)}},
+            request_meta={"refresh_after_success": True},
+        )
+
     def _on_rpc_result_from_thread(self, result: dict) -> None:
         self.rpc_result_sig.emit(result)
 
@@ -515,6 +673,17 @@ class ManagementPage(QWidget):
                 self._set_spin_value(spin, config.get(key))
 
         self._apply_arm_tune_config(config)
+
+        # Reflect the persistent limiter master switch (rov_config CURRENT_BUDGET_ENABLE).
+        if hasattr(self, "limiter_enable_boot_check"):
+            enable_present = "CURRENT_BUDGET_ENABLE" in config
+            if enable_present:
+                self._set_check_value(self.limiter_enable_boot_check, bool(config.get("CURRENT_BUDGET_ENABLE")))
+            self.limiter_enable_boot_check.setEnabled(enable_present and "set_config" in self._available_commands)
+            self.limiter_enable_boot_check.setToolTip(
+                "" if enable_present else "CURRENT_BUDGET_ENABLE is not present in rov_config.py on the ROV."
+            )
+
         self._sync_action_state()
 
     def _handle_mutation_success(self, cmd: str, data: dict) -> None:
@@ -596,6 +765,9 @@ class ManagementPage(QWidget):
         self.save_config_btn.setEnabled((not busy) and can_set_config and has_enabled_config_field)
         if hasattr(self, "arm_tune_save_btn"):
             self.arm_tune_save_btn.setEnabled((not busy) and can_set_config)
+        if hasattr(self, "limiter_enable_boot_check"):
+            enable_present = "CURRENT_BUDGET_ENABLE" in self._config_keys_present
+            self.limiter_enable_boot_check.setEnabled((not busy) and can_set_config and enable_present)
 
         if not has_state:
             self.save_sensor_offset_btn.setEnabled(False)
@@ -608,6 +780,8 @@ class ManagementPage(QWidget):
             self.save_config_btn.setEnabled(False)
             if hasattr(self, "arm_tune_save_btn"):
                 self.arm_tune_save_btn.setEnabled(False)
+            if hasattr(self, "limiter_enable_boot_check"):
+                self.limiter_enable_boot_check.setEnabled(False)
 
     def _save_sensor_offset(self) -> None:
         self._queue_request(
