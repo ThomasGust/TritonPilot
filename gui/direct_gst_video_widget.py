@@ -6,6 +6,7 @@ import ctypes
 import logging
 import os
 import signal
+import socket
 import subprocess
 import threading
 import time
@@ -18,6 +19,12 @@ from PyQt6.QtWidgets import QApplication, QLabel, QSizePolicy, QVBoxLayout, QWid
 from config import VIDEO_RPC_ENDPOINT
 from network.net_select import choose_video_receive_ip, parse_zmq_endpoint
 from recording.capture_trace import trace_event
+from recording.video_recorder import (
+    RECORD_FANOUT_HOST,
+    cv_fanout_port,
+    liveness_fanout_port,
+    record_fanout_port,
+)
 from video.gst_receiver import _suppress_gst_stderr_line, _win_kill_udp_port_users
 from video.gst_runtime import bootstrap_gstreamer_env
 from video.cam import RemoteCameraManager
@@ -41,6 +48,18 @@ class DirectReceiverConfig:
     h264_decoder: str = "openh264dec"
     sink: str = "d3d11videosink"
     square_crop: bool = False
+    # When > 0, also fan the raw received RTP out to 127.0.0.1:<port> via a tee so
+    # local consumers can read the exact stream the laptop already gets -- full
+    # quality, no extra tether load. record_fanout_port feeds the mp4 recorder;
+    # cv_fanout_port feeds the transect tracker's own decode. Each fan-out branch
+    # is leaky so it can never back-pressure or stall the live display, and
+    # sending to a loopback port with no listener is harmless on Windows
+    # (verified: no WSAECONNRESET pipeline death).
+    record_fanout_port: int = 0
+    cv_fanout_port: int = 0
+    # Dedicated loopback port the widget binds to count datagrams as a liveness
+    # signal (see _LivenessProbe). Leaky like the others; no listener required.
+    liveness_fanout_port: int = 0
 
 
 def _find_gst_launch() -> str:
@@ -149,10 +168,8 @@ def build_direct_receiver_cmd(gst_launch: str, cfg: DirectReceiverConfig) -> lis
         use_d3d11 = _decoder_outputs_d3d11(cfg.h264_decoder) and not crop_chain
         convert = "d3d11convert" if use_d3d11 else "videoconvert"
         caps = "application/x-rtp,media=video,encoding-name=H264,payload=96,clock-rate=90000"
-        pipeline = [
-            "udpsrc", f"address={cfg.bind_address}", "reuse=true", f"port={cfg.port}",
-            f"buffer-size={udp_buffer_size}", f"caps={caps}",
-            "!", "rtpjitterbuffer", f"latency={cfg.latency_ms}",
+        display_tail = [
+            "rtpjitterbuffer", f"latency={cfg.latency_ms}",
             f"drop-on-latency={drop_on_latency}", "faststart-min-packets=1",
             "!", "rtph264depay",
             "!", "h264parse", "config-interval=-1", "disable-passthrough=true",
@@ -162,16 +179,52 @@ def build_direct_receiver_cmd(gst_launch: str, cfg: DirectReceiverConfig) -> lis
         ]
     else:
         caps = "application/x-rtp,media=video,encoding-name=JPEG,payload=26,clock-rate=90000"
-        pipeline = [
-            "udpsrc", f"address={cfg.bind_address}", "reuse=true", f"port={cfg.port}",
-            f"buffer-size={udp_buffer_size}", f"caps={caps}",
-            "!", "rtpjitterbuffer", f"latency={cfg.latency_ms}",
+        display_tail = [
+            "rtpjitterbuffer", f"latency={cfg.latency_ms}",
             f"drop-on-latency={drop_on_latency}", "faststart-min-packets=1",
             "!", "rtpjpegdepay",
             "!", "jpegdec",
             "!", "videoconvert",
             *output_chain,
         ]
+
+    src = [
+        "udpsrc", f"address={cfg.bind_address}", "reuse=true", f"port={cfg.port}",
+        f"buffer-size={udp_buffer_size}", f"caps={caps}",
+    ]
+
+    fanout_ports = [
+        p for p in (
+            int(getattr(cfg, "record_fanout_port", 0) or 0),
+            int(getattr(cfg, "cv_fanout_port", 0) or 0),
+            int(getattr(cfg, "liveness_fanout_port", 0) or 0),
+        ) if p > 0
+    ]
+    if fanout_ports:
+        # Tee the raw RTP: one branch feeds the live display exactly as before, the
+        # rest forward the same UDP packets to loopback ports for local consumers
+        # (recorder, transect CV). Each tee branch needs its own queue (separate
+        # threads). The display queue is non-leaky so it never drops packets before
+        # the jitter buffer (matching the old udpsrc->jitterbuffer back-pressure).
+        # Each fan-out queue is leaky so a stalled/absent consumer can never back up
+        # the tee and freeze the display.
+        pipeline = [
+            *src,
+            "!", "tee", "name=rtptee",
+            "rtptee.",
+            "!", "queue", "max-size-buffers=512", "max-size-bytes=0", "max-size-time=0",
+            "!", *display_tail,
+        ]
+        for fp in fanout_ports:
+            pipeline += [
+                "rtptee.",
+                "!", "queue", "max-size-buffers=512", "max-size-bytes=0", "max-size-time=0",
+                "leaky=downstream",
+                "!", "udpsink", f"host={RECORD_FANOUT_HOST}", f"port={fp}",
+                "sync=false", "async=false",
+            ]
+    else:
+        pipeline = [*src, "!", *display_tail]
     return base + pipeline
 
 
@@ -294,6 +347,11 @@ class _DirectConnectWorker(QThread):
             sink = str(stream_opts.get("receiver_direct_sink", stream_opts.get("direct_sink", "d3d11videosink")))
             width = int(stream_opts.get("width", start_kwargs.get("width", 0)) or 0)
             height = int(stream_opts.get("height", start_kwargs.get("height", 0)) or 0)
+            # Always provide the loopback fan-outs so a recording or the transect CV
+            # can start (and survive display reconnects) with zero tether cost. Idle
+            # fan-out to a port with no listener is harmless. Opt out per stream if
+            # ever needed.
+            enable_fanout = _truthy(stream_opts.get("enable_local_record", True), default=True)
             cfg = DirectReceiverConfig(
                 name=self.stream_name,
                 codec=codec,
@@ -307,6 +365,9 @@ class _DirectConnectWorker(QThread):
                 h264_decoder=h264_decoder,
                 sink=sink,
                 square_crop=bool(self.square_crop),
+                record_fanout_port=record_fanout_port(port) if enable_fanout else 0,
+                cv_fanout_port=cv_fanout_port(port) if enable_fanout else 0,
+                liveness_fanout_port=liveness_fanout_port(port) if enable_fanout else 0,
             )
             cmd = build_direct_receiver_cmd(_find_gst_launch(), cfg)
             env = dict(os.environ)
@@ -341,6 +402,7 @@ class _DirectConnectWorker(QThread):
                 self.suppressor = None
             receiver_info = {
                 "codec": codec,
+                "liveness_port": int(cfg.liveness_fanout_port or 0),
             }
             self.receiver_started.emit(self.proc, receiver_info)
 
@@ -556,6 +618,77 @@ class _RendererSuppressor:
             self._stop.wait(self._interval_s)
 
 
+class _LivenessProbe:
+    """Counts RTP datagrams fanned out to a dedicated loopback port.
+
+    The direct-render path never touches frames in Python (GStreamer renders
+    straight to Direct3D), so a frozen pane whose renderer process is still alive
+    is otherwise invisible to us. The pipeline tees the received RTP to a private
+    loopback port; this binds that port and bumps ``last_ts`` on every datagram.
+    A watchdog in the widget then treats a long gap as "stream silently died"
+    and forces a reconnect. Fully passive and isolated: the port is unique per
+    stream and nothing else ever binds it, so it cannot disturb the display.
+    """
+
+    def __init__(self, port: int):
+        self.port = int(port)
+        self.last_ts: float = 0.0
+        self.packets: int = 0
+        self._sock: socket.socket | None = None
+        self._stop = threading.Event()
+        self._thread: threading.Thread | None = None
+
+    def start(self) -> bool:
+        if self.port <= 0:
+            return False
+        try:
+            sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            sock.bind((RECORD_FANOUT_HOST, self.port))
+            sock.settimeout(0.5)
+        except Exception:
+            try:
+                sock.close()  # type: ignore[union-attr]
+            except Exception:
+                pass
+            return False
+        self._sock = sock
+        # Seed last_ts so the watchdog grace window starts now, not at epoch.
+        self.last_ts = time.monotonic()
+        self._thread = threading.Thread(
+            target=self._run, name=f"video-liveness-{self.port}", daemon=True
+        )
+        self._thread.start()
+        return True
+
+    def stop(self) -> None:
+        self._stop.set()
+        sock = self._sock
+        self._sock = None
+        if sock is not None:
+            try:
+                sock.close()
+            except Exception:
+                pass
+
+    def _run(self) -> None:
+        sock = self._sock
+        if sock is None:
+            return
+        while not self._stop.is_set():
+            try:
+                data = sock.recv(65535)
+            except socket.timeout:
+                continue
+            except OSError:
+                return
+            except Exception:
+                return
+            if data:
+                self.packets += 1
+                self.last_ts = time.monotonic()
+
+
 def _top_level_windows_for_pid(pid: int) -> list[int]:
     if os.name != "nt":
         return []
@@ -653,13 +786,22 @@ class DirectGstVideoWidget(QWidget):
         self._proc: subprocess.Popen | None = None
         self._connect_worker: _DirectConnectWorker | None = None
         self._connect_attempt_active = False
+        self._connect_started_ts = 0.0
         self._embedded_hwnd: int | None = None
         self._window_suppressor: "_RendererSuppressor | None" = None
+        self._liveness: "_LivenessProbe | None" = None
         self._state = "waiting"
         self._last_error: str | None = None
         self._connected_ts = 0.0
         self._retry_backoff_s = 0.5
         self._next_retry_ts = 0.0
+        # Self-healing watchdog windows. The direct renderer process staying
+        # alive is NOT proof the pane is live: the ROV sender can stop, a camera
+        # can drop, or the Direct3D window can fail to embed -- all leave a frozen
+        # pane that the old code never recovered from. These force a reconnect.
+        self._data_watchdog_s = 8.0   # no RTP datagrams while playing -> dead feed
+        self._embed_watchdog_s = 9.0  # process alive but never showed a window
+        self._connect_watchdog_s = 25.0  # a connect attempt that never returns
         self._display_fps = 30.0
         self._water_correction_enabled = False
         self._square_display_enabled = False
@@ -721,6 +863,7 @@ class DirectGstVideoWidget(QWidget):
         self._state = "connecting"
         self._last_error = None
         self._embedded_hwnd = None
+        self._connect_started_ts = time.time()
         self._show_message(f"{self.stream_name}\nConnecting direct renderer...")
         self._connect_worker = _DirectConnectWorker(
             self.manager,
@@ -736,6 +879,30 @@ class DirectGstVideoWidget(QWidget):
         self._connect_worker.failed.connect(self._on_connect_failed)
         self._connect_attempt_active = True
         self._connect_worker.start()
+
+    def _start_liveness_probe(self, port: int) -> None:
+        self._stop_liveness_probe()
+        if port <= 0:
+            return
+        probe = _LivenessProbe(port)
+        if probe.start():
+            self._liveness = probe
+
+    def _stop_liveness_probe(self) -> None:
+        probe = self._liveness
+        self._liveness = None
+        if probe is not None:
+            try:
+                probe.stop()
+            except Exception:
+                pass
+
+    def _data_age_s(self) -> float | None:
+        """Seconds since the last RTP datagram, or None when no probe is active."""
+        probe = self._liveness
+        if probe is None or probe.last_ts <= 0:
+            return None
+        return max(0.0, time.monotonic() - probe.last_ts)
 
     def _remove_window_suppressor(self) -> None:
         suppressor = self._window_suppressor
@@ -757,7 +924,7 @@ class DirectGstVideoWidget(QWidget):
             self._window_suppressor = worker.suppressor
         embedded_hwnd = 0
         if isinstance(info, dict):
-            pass
+            self._start_liveness_probe(int(info.get("liveness_port", 0) or 0))
         else:
             try:
                 embedded_hwnd = int(info or 0)
@@ -889,11 +1056,48 @@ class DirectGstVideoWidget(QWidget):
             self._show_message(f"{self.stream_name}\nRenderer stopped. Reconnecting...")
             return
 
-        if self._state == "playing" and self._embedded_hwnd is None:
-            self._try_embed()
-        elif self._state == "connecting":
+        # A connect attempt that never returns (e.g. the RPC wedged) would leave
+        # the pane stuck "Connecting..." forever -- bound it and retry.
+        if self._connect_attempt_active:
+            if self._connect_started_ts > 0 and now - self._connect_started_ts > self._connect_watchdog_s:
+                trace_event("direct_video_connect_watchdog", stream=self.stream_name)
+                self._force_reconnect(
+                    f"{self.stream_name}\nConnect timed out. Retrying...",
+                    retry_delay_s=0.2,
+                )
             return
-        elif now >= self._next_retry_ts:
+
+        if self._state == "playing":
+            # Watchdog 1: renderer process alive but no video data is arriving
+            # (ROV sender stopped, camera dropped, start/stop raced). Self-heal.
+            data_age = self._data_age_s()
+            if data_age is not None and data_age > self._data_watchdog_s:
+                trace_event(
+                    "direct_video_data_watchdog",
+                    stream=self.stream_name,
+                    data_age_s=round(data_age, 2),
+                )
+                self._force_reconnect(
+                    f"{self.stream_name}\nNo video data. Reconnecting...",
+                    retry_delay_s=0.2,
+                )
+                return
+            # Watchdog 2: connected but the Direct3D window never embedded.
+            if self._embedded_hwnd is None:
+                self._try_embed()
+                if (
+                    self._embedded_hwnd is None
+                    and self._connected_ts > 0
+                    and now - self._connected_ts > self._embed_watchdog_s
+                ):
+                    trace_event("direct_video_embed_watchdog", stream=self.stream_name)
+                    self._force_reconnect(
+                        f"{self.stream_name}\nRenderer window stuck. Reconnecting...",
+                        retry_delay_s=0.2,
+                    )
+            return
+
+        if now >= self._next_retry_ts:
             self._start_connect()
 
     def _force_reconnect(self, message: str, *, retry_delay_s: float = 0.2) -> None:
@@ -995,6 +1199,7 @@ class DirectGstVideoWidget(QWidget):
 
     def shutdown(self, release_only: bool = True, *, async_release: bool = True) -> None:
         self._stop_connect_worker(async_release=bool(async_release))
+        self._stop_liveness_probe()
         self._remove_window_suppressor()
         proc = self._proc
         self._proc = None

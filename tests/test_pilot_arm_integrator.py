@@ -4,7 +4,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from config import ARM_INIT_PITCH, ARM_RATE
+from config import ARM_INIT_PITCH, ARM_INIT_WRIST, ARM_RATE
 from input.pilot_service import PilotPublisherService
 
 
@@ -16,6 +16,7 @@ def test_keyboard_intent_integrates_pitch_position():
     svc = _svc("arm_kb")
     p0, w0 = svc.arm_position()
     assert p0 == pytest.approx(ARM_INIT_PITCH)
+    assert w0 == pytest.approx(ARM_INIT_WRIST)
 
     svc.set_arm_keyboard_intent(1.0, 0.0)
     p, w = svc._integrate_arm(SimpleNamespace(rx=0.0, ry=0.0), modifier_held=False, dt=0.1)
@@ -28,6 +29,7 @@ def test_keyboard_intent_integrates_pitch_position():
 def test_stick_requires_modifier_and_drives_pitch():
     svc = _svc("arm_stick")
     svc.set_arm_keyboard_intent(0.0, 0.0)
+    svc.set_arm_position(0.0, 0.0)
     snap = SimpleNamespace(rx=0.0, ry=1.0)  # full deflection on the pitch axis
 
     # Without the modifier the stick is ignored (it is driving the ROV).
@@ -35,9 +37,9 @@ def test_stick_requires_modifier_and_drives_pitch():
     p_idle, _ = svc._integrate_arm(snap, modifier_held=False, dt=0.1)
     assert p_idle == pytest.approx(p_before)
 
-    # With the modifier held the stick advances the arm pitch.
+    # With the modifier held the stick reverses the raw controller pitch direction.
     p_held, _ = svc._integrate_arm(snap, modifier_held=True, dt=0.1)
-    assert p_held > p_idle
+    assert p_held < p_idle
 
 
 def test_stick_deadzone_blocks_small_input():
@@ -97,3 +99,16 @@ def test_clear_keyboard_intent_stops_motion():
     p, w = svc._integrate_arm(SimpleNamespace(rx=0.0, ry=0.0), modifier_held=False, dt=0.1)
     assert p == pytest.approx(p0)
     assert w == pytest.approx(w0)
+
+
+def test_set_arm_position_sets_target_and_clears_keyboard_intent():
+    svc = _svc("arm_set_pose")
+    svc.set_arm_keyboard_intent(1.0, -1.0)
+
+    p, w = svc.set_arm_position(-2.0, 0.25)
+
+    assert p == pytest.approx(-1.0)
+    assert w == pytest.approx(0.25)
+    p2, w2 = svc._integrate_arm(SimpleNamespace(rx=0.0, ry=0.0), modifier_held=False, dt=0.1)
+    assert p2 == pytest.approx(-1.0)
+    assert w2 == pytest.approx(0.25)

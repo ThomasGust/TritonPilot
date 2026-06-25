@@ -113,6 +113,12 @@ ROV-side configuration. Treat it as a live vehicle tool:
 - Avoid changing calibration values while another operator is piloting.
 - Confirm the ROV is in a safe state before actuator or calibration actions.
 - If a request times out, check the TritonOS service before repeating commands.
+- Arm Tuning includes alignment pose buttons for the differential arm. `Servo
+  Center` is the existing neutral mount pose; `Flat / Wrist 90` and `Flat /
+  Wrist 0` command easier flat-pitch physical references through the normal
+  pilot stream.
+- The pilot starts the differential arm at flat pitch with 90-degree wrist roll,
+  matching the TritonOS arm/disarm park pose.
 
 ## Raw Sensor Logging
 

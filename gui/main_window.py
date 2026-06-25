@@ -80,7 +80,13 @@ from recording.stream_recorder import StreamRecorder
 from recording.save_location import DEFAULT_RECORDINGS_DIR, SaveLocation, is_available_directory, resolve_recordings_dir
 from stereo.capture import StereoCaptureSession, default_stereo_session_name, safe_filename_component
 from stereo.pairs import load_stereo_pairs
-from recording.video_recorder import VideoRecorder, VideoRecorderConfig
+from recording.video_recorder import (
+    RECORD_FANOUT_HOST,
+    VideoRecorder,
+    VideoRecorderConfig,
+    cv_fanout_port,
+    record_fanout_port,
+)
 from tracking import (
     NullOpticalTracker,
     StationKeepCommand,
@@ -545,10 +551,12 @@ class MainWindow(QMainWindow):
             yaw_mode = getattr(svc, "set_autopilot_axis_mode", None)
             if enabled:
                 # The transect hold relies on depth hold owning bulk altitude (the
-                # ROV then vision-servos the depth setpoint from es) and a level
-                # attitude for stable camera geometry; enable both with the hold
-                # (enable-only -- disengaging leaves the pilot's holds as-is).
-                for setter in ("set_depth_hold_enabled", "set_roll_pitch_level_enabled"):
+                # ROV then vision-servos the depth setpoint from es); enable it with
+                # the hold (enable-only -- disengaging leaves the pilot's holds as-is).
+                # RP (roll/pitch) level is intentionally NOT auto-enabled: the pilot
+                # preferred holding without leveling (2026-06-24). Toggle it with P /
+                # the Autopilot menu if you want a leveled camera for a given run.
+                for setter in ("set_depth_hold_enabled",):
                     fn = getattr(svc, setter, None)
                     if callable(fn):
                         try:
@@ -581,12 +589,13 @@ class MainWindow(QMainWindow):
         # Auto-record the hold so every attempt is captured for later review.
         self._auto_record_hold(enabled)
         self._sync_station_keep_action()
+        self._sync_roll_pitch_level_action()
         self._refresh_drive_status()
         rec = " + recording" if (enabled and self._hold_owns_recording) else ""
         yaw_er = "ON" if getattr(self, "_transect_rotation_servo_enabled", False) else "OFF"
         self.statusBar().showMessage(
             (
-                f"Optical Hold ENGAGED (station-keep + depth + level + yaw/er {yaw_er}{rec})"
+                f"Optical Hold ENGAGED (station-keep + depth; RP level via P; yaw/er {yaw_er}{rec})"
                 if enabled else "Optical Hold OFF"
             ),
             3000,
@@ -662,6 +671,54 @@ class MainWindow(QMainWindow):
         except Exception:
             new_state = True
         self._set_station_keep_enabled(new_state)
+
+    def _set_roll_pitch_level_enabled_ui(self, enabled: bool) -> None:
+        """Set roll/pitch (RP) level hold and keep the UI in sync. Station-keep
+        engage force-enables RP level for a stable camera; the P key / Autopilot
+        menu item is how you turn it back OFF -- e.g. to fly a hold without
+        leveling for testing."""
+        enabled = bool(enabled)
+        svc = getattr(self, "pilot_svc", None)
+        if svc is None:
+            return
+        try:
+            svc.set_roll_pitch_level_enabled(enabled)
+        except Exception as exc:
+            logger.exception("RP level set failed: %s", exc)
+            return
+        self._sync_roll_pitch_level_action()
+        self._refresh_drive_status()
+        self.statusBar().showMessage("RP Level ON" if enabled else "RP Level OFF", 3000)
+        trace_event("roll_pitch_level_toggle", enabled=enabled)
+
+    def _toggle_roll_pitch_level_from_keyboard(self) -> None:
+        try:
+            new_state = not bool(self.pilot_svc.is_roll_pitch_level_enabled())
+        except Exception:
+            new_state = False
+        self._set_roll_pitch_level_enabled_ui(new_state)
+
+    def _toggle_roll_pitch_level_from_ui(self, checked: bool | None = None) -> None:
+        if checked is None:
+            try:
+                checked = not bool(self.pilot_svc.is_roll_pitch_level_enabled())
+            except Exception:
+                checked = False
+        self._set_roll_pitch_level_enabled_ui(bool(checked))
+
+    def _sync_roll_pitch_level_action(self) -> None:
+        act = getattr(self, "_roll_pitch_level_act", None)
+        if act is None:
+            return
+        try:
+            enabled = bool(self.pilot_svc.is_roll_pitch_level_enabled())
+        except Exception:
+            enabled = False
+        act.blockSignals(True)
+        try:
+            act.setChecked(enabled)
+        finally:
+            act.blockSignals(False)
 
     def publish_visual_target(self, sample) -> None:
         """Integration point for the future CV: push one tracker output to the ROV.
@@ -1016,15 +1073,14 @@ class MainWindow(QMainWindow):
             )
             codec = "h264" if tx_is_h264 else "jpeg"
             channel_order = str(opts.get("channel_order", "BGR") or "BGR")
-            # Bigger jitter buffer than the display feed: the CV view is a
-            # hold-assist overlay, so absorbing motion-burst jitter (fewer decode
-            # stalls when the arm swings) is worth ~150ms of extra latency.
-            latency_ms = int(opts.get("transect_cv_latency_ms", 150) or 150)
-            # Mirror to a freshly-allocated local port (same proven approach as the
-            # snapshot taps) rather than a fixed offset, so it never collides with
-            # the display/recorder receivers.
-            alloc = getattr(cam_mgr, "_allocate_udp_port", None)
-            mirror_port = int(alloc(bind)) if callable(alloc) else int(opts.get("port", 5000)) + 300
+            # Read the H.264 the laptop already receives via the display pipeline's
+            # always-on loopback fan-out -- NO ROV tether mirror, so the CV feed no
+            # longer competes for tether bandwidth (which lost packets -> corrupt
+            # frames + lag straight into the autopilot). Because the source is a
+            # lossless loopback, the big jitter buffer the old tether feed needed is
+            # just latency now: default down to 60ms (override: transect_cv_latency_ms).
+            latency_ms = int(opts.get("transect_cv_latency_ms", 60) or 60)
+            cv_port = cv_fanout_port(int(opts.get("port", 5000)))
         except Exception as exc:
             logger.debug("transect CV: could not resolve stream '%s': %s", stream, exc)
             return False
@@ -1035,23 +1091,17 @@ class MainWindow(QMainWindow):
             from tracking.transect_cv import ClassicalTransectDetector
             self._transect_detector = ClassicalTransectDetector()
 
-        def _mirror(add: bool) -> None:
-            try:
-                self._set_stream_mirror(stream, mirror_port, add=add)
-            except Exception as exc:
-                logger.debug("transect CV mirror %s failed: %s", "add" if add else "remove", exc)
-
         try:
             source = TransectVisionSource(
                 width=width, height=height,
                 on_estimate=self._on_transect_estimate,
                 receiver_factory=default_receiver_factory(
-                    port=mirror_port, codec=codec, width=width, height=height,
-                    bind_address=bind, channel_order=channel_order, latency_ms=latency_ms,
+                    port=cv_port, codec=codec, width=width, height=height,
+                    bind_address=RECORD_FANOUT_HOST, channel_order=channel_order, latency_ms=latency_ms,
                 ),
                 detector=self._transect_detector,
                 policy=self._transect_policy,
-                mirror_setter=_mirror,
+                mirror_setter=None,  # loopback fan-out is part of the display pipeline; no ROV mirror
                 name=f"transect-cv:{stream}",
             )
             source.start()
@@ -1060,7 +1110,7 @@ class MainWindow(QMainWindow):
             return False
         self._transect_cv_source = source
         self._transect_cv_stream = stream
-        trace_event("transect_cv_started", stream=stream, mirror_port=mirror_port, codec=codec,
+        trace_event("transect_cv_started", stream=stream, cv_fanout_port=cv_port, codec=codec,
                     width=width, height=height)
         return True
 
@@ -1261,6 +1311,7 @@ class MainWindow(QMainWindow):
         self._analysis_transfer_stop_act: QAction | None = None
         self._analysis_transfer_restart_act: QAction | None = None
         self._transect_rotation_servo_act: QAction | None = None
+        self._roll_pitch_level_act: QAction | None = None
         self._analysis_transfer_server = None
         self._analysis_transfer_thread = None
         self._analysis_transfer_root: Path | None = None
@@ -1314,9 +1365,9 @@ class MainWindow(QMainWindow):
         # NOT drive the video -- the tab keeps the smooth d3d11 feed, and results
         # surface in the transparent lock/error HUD so a CV decode stall can
         # never replace/flicker the picture.
-        # Nadir arm camera (post 90-deg mount fix): the geometric defaults are
-        # correct -- target_cx/cy=0.5 and on-station blue width is 50/90 = 55.6%
-        # of frame width. Be careful when changing target_blue_fraction from a
+        # Nadir arm camera (post 90-deg mount fix): target_cx/cy=0.5 is the
+        # geometric center, and the operator-facing blue-width default is 50% of
+        # frame width. Be careful when changing target_blue_fraction from a
         # recording's median: that may just reflect how high the ROV happened to
         # fly. Use tools/transect_replay.py --calibrate to re-check centering if
         # the mount moves.
@@ -2124,6 +2175,9 @@ class MainWindow(QMainWindow):
                         return True
                     if event.key() == Qt.Key.Key_K:
                         self._toggle_station_keep_from_keyboard()
+                        return True
+                    if event.key() == Qt.Key.Key_P:
+                        self._toggle_roll_pitch_level_from_keyboard()
                         return True
                     direction = self._back_gripper_gain_shortcuts.get(event.key())
                     if direction is not None:
@@ -3492,14 +3546,14 @@ class MainWindow(QMainWindow):
             return
         rec = self._video_recorder
         stream_name = self._video_recording_stream or ""
-        mirror_port = int(self._video_recording_mirror_port or 0)
+        fanout_port = int(self._video_recording_mirror_port or 0)
         self._video_recorder = None
         self._video_recording_busy = True
         self.statusBar().showMessage("Finalizing video recording…", 2500)
         self._update_capture_status_label()
         threading.Thread(
             target=self._video_recording_stop_worker,
-            args=(rec, stream_name, mirror_port),
+            args=(rec, stream_name, fanout_port),
             name="video-recording-stop",
             daemon=True,
         ).start()
@@ -3613,48 +3667,41 @@ class MainWindow(QMainWindow):
             pass
 
     def _video_recording_start_worker(self, stream_name: str, session_dir: str) -> None:
-        mirror_applied: int | None = None
         try:
             opts = video_stream_options(self.cam_mgr, stream_name)
             host = resolve_video_host(self.cam_mgr, opts)
             kwargs = video_start_kwargs(opts, host=host)
             port = int(kwargs.get("port", 5000))
-            mirror_port = port + 200
+            # Record the H.264 the laptop already receives: the live display
+            # receiver fans the exact RTP out to this loopback port (zero extra
+            # tether load -- the old ROV-side mirror doubled the stream over the
+            # tether and corrupted both the live picture and the file). The fan-out
+            # is part of the display pipeline, so it also survives display
+            # reconnects without any ROV round-trip.
+            fanout_port = record_fanout_port(port)
             tx_is_h264 = (
                 str(kwargs.get("video_format", "")).lower() == "h264"
                 or str(kwargs.get("encode", "")).lower() == "h264"
             )
             codec = "h264" if tx_is_h264 else "jpeg"
-            bind = host if bool(opts.get("bind_receiver_to_host", True)) else "0.0.0.0"
 
             video_dir = Path(session_dir) / "video"
             stamp = time.strftime("%Y%m%d-%H%M%S")
             fname = f"{safe_filename_component(stream_name)}-{stamp}.mp4"
             out_path = self._unused_snapshot_path(video_dir / fname)
 
-            # Register the mirror so a later display reconnect keeps it, then
-            # apply it live to the already-running stream.
-            mirrors = getattr(self.cam_mgr, "recording_mirror_ports", None)
-            if mirrors is None:
-                mirrors = {}
-                self.cam_mgr.recording_mirror_ports = mirrors
-            mirrors[stream_name] = [mirror_port]
-
-            self._set_stream_mirror(stream_name, mirror_port, add=True)
-            mirror_applied = mirror_port
-
             recorder = VideoRecorder(
                 VideoRecorderConfig(
                     name=stream_name,
                     out_path=str(out_path),
                     codec=codec,
-                    port=mirror_port,
-                    bind_address=bind,
+                    port=fanout_port,
+                    bind_address=RECORD_FANOUT_HOST,
                 )
             )
             recorder.start()
             self._video_recorder = recorder
-            self._video_recording_mirror_port = mirror_port
+            self._video_recording_mirror_port = fanout_port
             try:
                 self._write_capture_manifest(
                     Path(session_dir),
@@ -3668,7 +3715,7 @@ class MainWindow(QMainWindow):
             trace_event(
                 "video_recording_started",
                 stream=stream_name,
-                mirror_port=mirror_port,
+                fanout_port=fanout_port,
                 codec=codec,
                 path=str(out_path),
                 session_dir=str(session_dir),
@@ -3676,21 +3723,10 @@ class MainWindow(QMainWindow):
             )
             self.video_recording_state_sig.emit(True, stream_name, str(out_path))
         except Exception as exc:
-            try:
-                getattr(self.cam_mgr, "recording_mirror_ports", {}).pop(stream_name, None)
-            except Exception:
-                pass
-            # If the mirror was already applied live but the recorder then failed
-            # to start, remove it so the ROV doesn't keep duplicating RTP to nobody.
-            if mirror_applied is not None:
-                try:
-                    self._set_stream_mirror(stream_name, mirror_applied, add=False)
-                except Exception:
-                    pass
             trace_event("video_recording_start_failed", reason="exception", error=str(exc))
             self.video_recording_state_sig.emit(False, stream_name, f"ERROR: {exc}")
 
-    def _video_recording_stop_worker(self, recorder, stream_name: str, mirror_port: int) -> None:
+    def _video_recording_stop_worker(self, recorder, stream_name: str, fanout_port: int) -> None:
         path = ""
         try:
             if recorder is not None:
@@ -3698,6 +3734,8 @@ class MainWindow(QMainWindow):
         except Exception as exc:
             trace_event("video_recording_stop_error", stream=stream_name, error=str(exc))
         finally:
+            # Nothing to tear down on the ROV: the loopback fan-out lives in the
+            # display pipeline and stays harmlessly idle once the recorder exits.
             session_dir = self._video_capture_session_dir
             if session_dir:
                 try:
@@ -3711,14 +3749,6 @@ class MainWindow(QMainWindow):
                     )
                 except Exception:
                     pass
-            try:
-                getattr(self.cam_mgr, "recording_mirror_ports", {}).pop(stream_name, None)
-            except Exception:
-                pass
-            try:
-                self._set_stream_mirror(stream_name, mirror_port, add=False)
-            except Exception as exc:
-                trace_event("video_recording_mirror_remove_failed", stream=stream_name, error=str(exc))
             trace_event("video_recording_stopped", stream=stream_name, path=str(path))
             self.video_recording_state_sig.emit(False, stream_name, str(path))
 
@@ -4602,6 +4632,19 @@ class MainWindow(QMainWindow):
         )
         self._transect_rotation_servo_act.toggled.connect(self._set_transect_rotation_servo_enabled)
         autopilot_menu.addAction(self._transect_rotation_servo_act)
+
+        # Roll/Pitch level hold. Station-keep engage force-enables this for a stable
+        # camera; this action (and the P key) is how to turn it back OFF -- e.g. to
+        # fly a hold without leveling for testing. Toggle key handled in eventFilter.
+        self._roll_pitch_level_act = QAction("Roll/Pitch Level Hold  [P]", self)
+        self._roll_pitch_level_act.setCheckable(True)
+        self._roll_pitch_level_act.setChecked(False)
+        self._roll_pitch_level_act.setToolTip(
+            "Level the vehicle (roll/pitch -> 0). Auto-enabled when Optical Hold "
+            "engages; toggle off here (or press P) to fly without leveling."
+        )
+        self._roll_pitch_level_act.toggled.connect(self._toggle_roll_pitch_level_from_ui)
+        autopilot_menu.addAction(self._roll_pitch_level_act)
 
         self._fullscreen_act = QAction("Full Screen", self)
         self._fullscreen_act.setCheckable(True)

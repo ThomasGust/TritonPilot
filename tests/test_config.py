@@ -68,3 +68,14 @@ def test_config_does_not_silently_use_wifi_fallback_by_default(monkeypatch):
     monkeypatch.setattr("socket.create_connection", fake_create_connection)
     cfg = _reload_config(monkeypatch)
     assert cfg.ROV_HOST == "192.168.1.4"
+
+
+def test_transect_defaults_enable_yaw_er_and_50_percent_blue_target(monkeypatch):
+    monkeypatch.delenv("TRITON_TRANSECT_ROTATION_SERVO_DEFAULT", raising=False)
+    monkeypatch.delenv("TRITON_TRANSECT_TARGET_BLUE_WIDTH_PERCENT", raising=False)
+    monkeypatch.delenv("TRITON_TRANSECT_TARGET_FOOTPRINT_CM", raising=False)
+
+    cfg = _reload_config(monkeypatch)
+
+    assert cfg.TRANSECT_ROTATION_SERVO_DEFAULT is True
+    assert cfg.TRANSECT_TARGET_BLUE_WIDTH_PERCENT_DEFAULT == 50.0

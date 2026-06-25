@@ -49,6 +49,61 @@ def test_direct_h264_receiver_defaults_to_software_decoder():
     assert "decodebin" not in cmd
 
 
+def test_direct_receiver_fans_rtp_to_loopback_for_recording():
+    cmd = build_direct_receiver_cmd(
+        "gst-launch-1.0",
+        DirectReceiverConfig(
+            name="Primary Camera",
+            codec="h264",
+            port=5000,
+            bind_address="192.168.1.1",
+            record_fanout_port=5200,
+        ),
+    )
+
+    # A tee splits the raw RTP: one branch drives the live display exactly as
+    # before, the other forwards the same packets to a loopback recording port.
+    assert "tee" in cmd
+    assert "name=rtptee" in cmd
+    assert "udpsink" in cmd
+    assert "host=127.0.0.1" in cmd
+    assert "port=5200" in cmd  # fan-out target (display udpsrc still on port=5000)
+    assert "port=5000" in cmd
+    # Display path stays intact downstream of the tee.
+    assert "rtph264depay" in cmd
+    assert "d3d11videosink" in cmd
+    # Fan-out is teed off the raw RTP, before the display jitter buffer.
+    assert cmd.index("tee") < cmd.index("rtpjitterbuffer")
+    assert cmd.index("udpsink") > cmd.index("tee")
+    # The recording branch must be leaky so an absent/slow recorder can never
+    # back up the tee and stall the live display.
+    assert "leaky=downstream" in cmd
+
+
+def test_direct_receiver_fans_to_both_recording_and_cv_loopback_ports():
+    from recording.video_recorder import cv_fanout_port, record_fanout_port
+
+    cmd = build_direct_receiver_cmd(
+        "gst-launch-1.0",
+        DirectReceiverConfig(
+            name="Arm Camera",
+            codec="h264",
+            port=5001,
+            bind_address="192.168.1.1",
+            record_fanout_port=record_fanout_port(5001),  # 5201
+            cv_fanout_port=cv_fanout_port(5001),          # 5211
+        ),
+    )
+    # One tee, the live display branch, plus a loopback udpsink per consumer.
+    assert cmd.count("tee") == 1
+    assert cmd.count("udpsink") == 2
+    assert "port=5201" in cmd  # recorder
+    assert "port=5211" in cmd  # transect CV
+    assert "d3d11videosink" in cmd  # display still rendered
+    # Distinct ports so the recorder and CV never fight over the same socket.
+    assert record_fanout_port(5001) != cv_fanout_port(5001)
+
+
 def test_direct_jpeg_receiver_uses_direct3d_sink():
     cmd = build_direct_receiver_cmd(
         "gst-launch-1.0",

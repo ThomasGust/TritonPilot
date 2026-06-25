@@ -7,7 +7,40 @@ from gui.direct_gst_video_widget import (
     build_direct_receiver_cmd,
     _stream_options,
 )
-from recording.video_recorder import VideoRecorderConfig, build_video_recorder_cmd
+from recording.video_recorder import (
+    RECORD_FANOUT_HOST,
+    RECORD_FANOUT_PORT_OFFSET,
+    VideoRecorderConfig,
+    build_video_recorder_cmd,
+    record_fanout_port,
+)
+
+
+# --------------------------- loopback fan-out --------------------------- #
+
+def test_record_fanout_port_matches_receiver_and_recorder():
+    # The display receiver and the recorder both derive the loopback port from the
+    # display port the same way, so they always agree without extra plumbing.
+    assert RECORD_FANOUT_HOST == "127.0.0.1"
+    for display_port in (5000, 5001, 5002, 5003):
+        fanout = record_fanout_port(display_port)
+        assert fanout == display_port + RECORD_FANOUT_PORT_OFFSET
+        # No collision with any of the four display ports.
+        assert fanout not in {5000, 5001, 5002, 5003}
+
+    # The recorder binds the loopback fan-out port and host the receiver sends to.
+    cmd = build_video_recorder_cmd(
+        "gst-launch-1.0",
+        VideoRecorderConfig(
+            name="Primary Camera",
+            out_path="/tmp/out.mp4",
+            codec="h264",
+            port=record_fanout_port(5000),
+            bind_address=RECORD_FANOUT_HOST,
+        ),
+    )
+    assert "port=5200" in cmd
+    assert "address=127.0.0.1" in cmd
 
 
 # --------------------------- recorder pipeline --------------------------- #

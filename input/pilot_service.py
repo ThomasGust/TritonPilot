@@ -494,6 +494,19 @@ class PilotPublisherService:
         with self._arm_lock:
             return float(self._arm_pitch), float(self._arm_wrist)
 
+    def set_arm_position(self, pitch: float, wrist: float) -> tuple[float, float]:
+        """Set the absolute differential-arm target in [-1, 1].
+
+        Used by setup/alignment actions that need to command a known pose directly
+        instead of walking there through keyboard or stick intent.
+        """
+        with self._arm_lock:
+            self._arm_pitch = self._clamp_unit(pitch)
+            self._arm_wrist = self._clamp_unit(wrist)
+            self._arm_kb_pitch_dir = 0.0
+            self._arm_kb_wrist_dir = 0.0
+            return float(self._arm_pitch), float(self._arm_wrist)
+
     @staticmethod
     def _stick_axis(value: float, deadzone: float) -> float:
         """Deadzone + rescale a stick axis into a proportional [-1, 1] intent."""
@@ -1111,6 +1124,64 @@ class PilotPublisherService:
             self._apply_reverse_axes(frame)
         return frame
 
+    def _publish_neutral_frame(self, t: float) -> None:
+        """Publish one zeroed pilot frame (neutral sticks, no button edges, current
+        modes, last arm pose) to keep the ROV's pilot link fresh while the controller
+        is unavailable.
+
+        Without this, a sleeping/repluging gamepad starves the ROV of frames during
+        the controller-reopen wait; the ROV's stale-frame failsafe then auto-disarms
+        mid-hold (recording 20260624-220944: a 3.6 s frame gap -> pilot_age 3.0 s >
+        failsafe_disarm_s 2.0 s -> disarm while station-keep was still engaged).
+
+        Safe by construction: if the topside *app* dies or the tether drops, these
+        frames stop too, so the failsafe still protects against a real topside loss --
+        this only suppresses the benign gamepad-asleep case, during which the autopilot
+        is what actually holds the vehicle. The pilot can always disarm explicitly."""
+        sock = getattr(self, "sock", None)
+        if sock is None:
+            return
+        with self._arm_lock:
+            arm_pitch = float(self._arm_pitch)
+            arm_wrist = float(self._arm_wrist)
+        self.seq += 1
+        frame_dict = {
+            "type": "pilot",
+            "schema": 1,
+            "seq": self.seq,
+            "ts": t,
+            "axes": {"lx": 0.0, "ly": 0.0, "rx": 0.0, "ry": 0.0, "lt": 0.0, "rt": 0.0},
+            "buttons": {k: False for k in (
+                "a", "b", "x", "y", "lb", "rb", "win", "menu", "lstick", "rstick")},
+            "dpad": [0, 0],
+            "edges": {},
+            "modes": self.current_modes(),
+            "aux": {"gripper_pitch": arm_pitch, "gripper_yaw": arm_wrist},
+        }
+        if self.on_send:
+            try:
+                self.on_send(frame_dict)
+            except Exception:
+                pass
+        try:
+            sock.send_string(json.dumps(frame_dict, separators=(",", ":")), flags=zmq.NOBLOCK)
+        except zmq.Again:
+            pass
+        except Exception:
+            pass
+
+    def _keepalive_wait(self, duration_s: float) -> None:
+        """Wait ~duration_s while still emitting neutral keepalive frames at the normal
+        publish rate, so a controller dropout/reopen doesn't trip the ROV failsafe.
+        Replaces a plain sleep in the controller-(re)open paths."""
+        end = time.time() + max(0.0, float(duration_s))
+        while not self._stop.is_set() and time.time() < end:
+            t = time.time()
+            self._publish_neutral_frame(t)
+            slp = self.period - (time.time() - t)
+            if slp > 0:
+                time.sleep(slp)
+
     def _run_loop(self):
         # Create/connect PUB socket in this thread (ZMQ sockets are thread-affine)
         ctx = zmq.Context.instance()
@@ -1148,7 +1219,7 @@ class PilotPublisherService:
                     print(f"[pilot] ERROR opening controller index={self.index}: {e}")
                 if self.debug:
                     traceback.print_exc()
-                time.sleep(max(0.1, self.reopen_on_error_s))
+                self._keepalive_wait(max(0.1, self.reopen_on_error_s))
                 continue
 
         while not self._stop.is_set():
@@ -1239,7 +1310,7 @@ class PilotPublisherService:
                     pass
                 self._controller = None
                 self._prev_buttons = None
-                time.sleep(max(0.1, self.reopen_on_error_s))
+                self._keepalive_wait(max(0.1, self.reopen_on_error_s))
                 while not self._stop.is_set() and self._controller is None:
                     try:
                         self._controller = self._open_controller()
@@ -1252,7 +1323,7 @@ class PilotPublisherService:
                             print(f"[pilot] ERROR reopening controller: {e2}")
                         if self.debug:
                             traceback.print_exc()
-                        time.sleep(max(0.1, self.reopen_on_error_s))
+                        self._keepalive_wait(max(0.1, self.reopen_on_error_s))
 
             # pacing
             elapsed = time.time() - t0

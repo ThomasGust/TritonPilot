@@ -245,7 +245,7 @@ $env:TRITON_BACK_GRIPPER_GAIN_STEP="0.05"
 
 The older `TRITON_T200_WRIST_GAIN_*` names are still accepted as fallbacks.
 
-Keyboard arm gain:
+Arm gain and controller aiming:
 
 ```powershell
 $env:TRITON_ARM_GAIN_DEFAULT="0.50"
@@ -253,15 +253,20 @@ $env:TRITON_ARM_GAIN_MIN="0.10"
 $env:TRITON_ARM_GAIN_MAX="1.0"
 $env:TRITON_ARM_GAIN_STEP="0.05"
 $env:TRITON_ARM_RATE="2.5"
+$env:TRITON_ARM_STICK_PITCH_INVERT="-1.0"
+$env:TRITON_ARM_STICK_WRIST_INVERT="1.0"
 ```
 
 `TRITON_ARM_RATE` controls how quickly WASD and the modifier-held right stick walk
-the arm target, in normalized command units per second at 100% ARM gain. Geometry
-knobs such as servo range, pitch span, and pitch neutral are onboard TritonOS settings; the
-Vehicle Setup page can stream and save those values while tuning.
+the arm target, in normalized command units per second at 100% ARM gain.
+`TRITON_ARM_STICK_PITCH_INVERT` and `TRITON_ARM_STICK_WRIST_INVERT` affect only
+the modifier-held controller stick path; keyboard direction and TritonOS absolute
+pitch geometry are unchanged. Geometry knobs such as servo range, pitch span, and
+pitch neutral are onboard TritonOS settings; the Vehicle Setup page can stream
+and save those values while tuning.
 
-These values are transmitted in `PilotFrame.modes`. TritonOS decides how they
-map to actuator output.
+The live gain values are transmitted in `PilotFrame.modes`. TritonOS decides how
+they map to actuator output.
 
 ## Depth-Hold Display Helpers
 

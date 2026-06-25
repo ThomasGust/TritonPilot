@@ -142,6 +142,7 @@ class ManagementPage(QWidget):
         self._status_labels: dict[str, QLabel] = {}
         self._arm_tune_checks: dict[str, QCheckBox] = {}
         self._arm_tune_spins: dict[str, QDoubleSpinBox] = {}
+        self._arm_alignment_buttons: dict[str, QPushButton] = {}
         self._arm_tune_config_defaults = {
             "left_invert": 1.0,
             "right_invert": -1.0,
@@ -150,6 +151,10 @@ class ManagementPage(QWidget):
             "servo_range_deg": 100.0,
             "pitch_span_deg": 90.0,
             "pitch_neutral_deg": 45.0,
+            "wrist_span_deg": 90.0,
+            "wrist_neutral_deg": 45.0,
+            "servo_center_us": 1500.0,
+            "servo_pulse_halfspan_us": 800.0,
         }
 
         self._build_ui()
@@ -392,12 +397,34 @@ class ManagementPage(QWidget):
         buttons.addStretch(1)
         card.body.addLayout(buttons)
 
+        align_buttons = QHBoxLayout()
+        align_buttons.setSpacing(8)
+        for pose_key, label in (
+            ("center", "Servo Center"),
+            ("flat_wrist_90", "Flat / Wrist 90"),
+            ("flat_wrist_0", "Flat / Wrist 0"),
+        ):
+            btn = QPushButton(label)
+            btn.clicked.connect(lambda _checked=False, k=pose_key: self._confirm_arm_alignment_pose(k))
+            align_buttons.addWidget(btn)
+            self._arm_alignment_buttons[pose_key] = btn
+        align_buttons.addStretch(1)
+        card.body.addLayout(align_buttons)
+
+        self.arm_alignment_status_label = QLabel("-")
+        self.arm_alignment_status_label.setWordWrap(True)
+        self.arm_alignment_status_label.setObjectName("managementMetaValue")
+        self.arm_alignment_status_label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        card.body.addWidget(self.arm_alignment_status_label)
+
         if self._pilot_svc is None:
             for cb in self._arm_tune_checks.values():
                 cb.setEnabled(False)
             for spin in self._arm_tune_spins.values():
                 spin.setEnabled(False)
             self.arm_tune_reset_btn.setEnabled(False)
+            for btn in self._arm_alignment_buttons.values():
+                btn.setEnabled(False)
         return card
 
     def _on_arm_tune_invert(self, key: str, checked: bool) -> None:
@@ -437,6 +464,7 @@ class ManagementPage(QWidget):
         }
         self._queue_request("set_config", {"updates": updates}, request_meta={"refresh_after_success": True})
 
+<<<<<<< HEAD
     def _build_limiter_power_card(self) -> "_SectionCard":
         card = _SectionCard(
             "Fuse Limiter & Power (Live)",
@@ -584,6 +612,138 @@ class ManagementPage(QWidget):
             {"updates": {"CURRENT_BUDGET_ENABLE": bool(checked)}},
             request_meta={"refresh_after_success": True},
         )
+=======
+    def _confirm_arm_alignment_pose(self, pose_key: str) -> None:
+        pose = self._arm_alignment_pose_degrees(pose_key)
+        if pose is None:
+            return
+        label, pitch_deg, wrist_deg = pose
+        answer = QMessageBox.question(
+            self,
+            "Arm Alignment Pose",
+            (
+                f"Command {label}?\n\n"
+                f"Target: pitch {pitch_deg:.1f} deg, wrist {wrist_deg:.1f} deg.\n"
+                "This moves the differential arm through the normal pilot command stream. "
+                "Keep the arm clear and only arm the ROV when it is safe for the servos to move."
+            ),
+        )
+        if answer != QMessageBox.StandardButton.Yes:
+            return
+        self._send_arm_alignment_pose(pose_key)
+
+    def _send_arm_alignment_pose(self, pose_key: str) -> bool:
+        if self._pilot_svc is None or not hasattr(self._pilot_svc, "set_arm_position"):
+            self._set_feedback("Arm alignment poses need the live pilot publisher.", tone="error")
+            return False
+
+        pose = self._arm_alignment_pose_degrees(pose_key)
+        if pose is None:
+            self._set_feedback(f"Unknown arm alignment pose: {pose_key}", tone="error")
+            return False
+
+        label, pitch_deg, wrist_deg = pose
+        geom = self._current_arm_geometry()
+        pitch_norm, wrist_norm = self._arm_pose_norms(pitch_deg, wrist_deg, geom)
+        pitch_cmd = self._axis_command_for_invert(pitch_norm, geom["pitch_invert"])
+        wrist_cmd = self._axis_command_for_invert(wrist_norm, geom["yaw_invert"])
+
+        try:
+            self._pilot_svc.set_arm_position(pitch_cmd, wrist_cmd)
+        except Exception as exc:
+            self._set_feedback(f"Could not set arm alignment target: {exc}", tone="error")
+            return False
+
+        left_norm, right_norm = self._diff_mix_norm_for_geometry(pitch_norm, wrist_norm, geom)
+        left_us = geom["servo_center_us"] + left_norm * geom["servo_pulse_halfspan_us"]
+        right_us = geom["servo_center_us"] + right_norm * geom["servo_pulse_halfspan_us"]
+        status = (
+            f"{label}: pitch {pitch_deg:.1f} deg, wrist {wrist_deg:.1f} deg | "
+            f"pilot target {pitch_cmd:+.3f}, {wrist_cmd:+.3f} | "
+            f"servos left {left_norm:+.3f} ({left_us:.0f} us), "
+            f"right {right_norm:+.3f} ({right_us:.0f} us)"
+        )
+        self.arm_alignment_status_label.setText(status)
+
+        runtime = dict((self._last_state or {}).get("runtime") or {})
+        if runtime.get("armed") is False:
+            status += " | ROV is reported disarmed; the target will apply when armed."
+        self._set_feedback(status, tone="info")
+        return True
+
+    def _arm_alignment_pose_degrees(self, pose_key: str) -> tuple[str, float, float] | None:
+        geom = self._current_arm_geometry()
+        key = str(pose_key or "").strip().lower()
+        if key == "center":
+            return ("Servo Center", float(geom["pitch_neutral_deg"]), float(geom["wrist_neutral_deg"]))
+        if key == "flat_wrist_90":
+            return ("Flat / Wrist 90", 0.0, float(geom["wrist_span_deg"]))
+        if key == "flat_wrist_0":
+            return ("Flat / Wrist 0", 0.0, 0.0)
+        return None
+
+    def _current_arm_geometry(self) -> dict[str, float]:
+        config = dict((self._last_state or {}).get("config") or {})
+        defaults = dict(self._arm_tune_config_defaults)
+
+        def cfg_float(cfg_key: str, default_key: str) -> float:
+            return self._float_or_default(config.get(cfg_key), defaults[default_key])
+
+        center_us = cfg_float("GRIPPER_SERVO_CENTER_US", "servo_center_us")
+        pulse_halfspan = config.get("GRIPPER_SERVO_PULSE_HALFSPAN_US")
+        if pulse_halfspan is None:
+            min_us = config.get("GRIPPER_SERVO_MIN_US")
+            max_us = config.get("GRIPPER_SERVO_MAX_US")
+            try:
+                pulse_halfspan = max(abs(float(center_us) - float(min_us)), abs(float(max_us) - float(center_us)))
+            except Exception:
+                pulse_halfspan = defaults["servo_pulse_halfspan_us"]
+
+        return {
+            "left_invert": -1.0 if self._arm_tune_checks["left_invert"].isChecked() else 1.0,
+            "right_invert": -1.0 if self._arm_tune_checks["right_invert"].isChecked() else 1.0,
+            "pitch_invert": -1.0 if self._arm_tune_checks["pitch_invert"].isChecked() else 1.0,
+            "yaw_invert": -1.0 if self._arm_tune_checks["yaw_invert"].isChecked() else 1.0,
+            "servo_range_deg": float(self._arm_tune_spins["servo_range_deg"].value()),
+            "pitch_span_deg": float(self._arm_tune_spins["pitch_span_deg"].value()),
+            "pitch_neutral_deg": float(self._arm_tune_spins["pitch_neutral_deg"].value()),
+            "wrist_span_deg": cfg_float("GRIPPER_WRIST_SPAN_DEG", "wrist_span_deg"),
+            "wrist_neutral_deg": cfg_float("GRIPPER_WRIST_NEUTRAL_DEG", "wrist_neutral_deg"),
+            "servo_center_us": float(center_us),
+            "servo_pulse_halfspan_us": self._float_or_default(pulse_halfspan, defaults["servo_pulse_halfspan_us"]),
+        }
+
+    @staticmethod
+    def _arm_pose_norms(pitch_deg: float, wrist_deg: float, geom: dict[str, float]) -> tuple[float, float]:
+        def norm(deg: float, span: float) -> float:
+            span = max(1e-6, float(span))
+            value = (float(deg) / span) * 2.0 - 1.0
+            return max(-1.0, min(1.0, value))
+
+        return norm(pitch_deg, geom["pitch_span_deg"]), norm(wrist_deg, geom["wrist_span_deg"])
+
+    @staticmethod
+    def _axis_command_for_invert(position_norm: float, invert: float) -> float:
+        try:
+            inv = float(invert)
+        except Exception:
+            inv = 1.0
+        if abs(inv) < 1e-6:
+            inv = 1.0
+        return max(-1.0, min(1.0, float(position_norm) / inv))
+
+    @staticmethod
+    def _diff_mix_norm_for_geometry(pitch_norm: float, wrist_norm: float, geom: dict[str, float]) -> tuple[float, float]:
+        rng = max(1.0, float(geom["servo_range_deg"]))
+        pitch_deg = (max(-1.0, min(1.0, float(pitch_norm))) + 1.0) * 0.5 * float(geom["pitch_span_deg"])
+        wrist_deg = (max(-1.0, min(1.0, float(wrist_norm))) + 1.0) * 0.5 * float(geom["wrist_span_deg"])
+        d_pitch = max(-rng, min(rng, pitch_deg - float(geom["pitch_neutral_deg"])))
+        room = max(0.0, rng - abs(d_pitch))
+        d_wrist = max(-room, min(room, wrist_deg - float(geom["wrist_neutral_deg"])))
+        left = float(geom["left_invert"]) * (d_pitch + d_wrist) / rng
+        right = float(geom["right_invert"]) * (d_pitch - d_wrist) / rng
+        return max(-1.0, min(1.0, left)), max(-1.0, min(1.0, right))
+>>>>>>> 5b15af177237d52d644df4b2106ee942c1ba1da6
 
     def _on_rpc_result_from_thread(self, result: dict) -> None:
         self.rpc_result_sig.emit(result)

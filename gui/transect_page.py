@@ -131,8 +131,8 @@ class TransectPage(QWidget):
         stream_names: list[str],
         parent=None,
         *,
-        rotation_servo_enabled: bool = False,
-        target_blue_width_percent: float = 55.6,
+        rotation_servo_enabled: bool = True,
+        target_blue_width_percent: float = 50.0,
         target_blue_width_min_percent: float = 25.0,
         target_blue_width_max_percent: float = 95.0,
     ):
