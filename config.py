@@ -111,6 +111,10 @@ VIDEO_WARM_HIDDEN_STREAMS = os.environ.get("TRITON_VIDEO_WARM_HIDDEN_STREAMS", "
     "on",
 )
 VIDEO_WARMUP_INTERVAL_MS = int(os.environ.get("TRITON_VIDEO_WARMUP_INTERVAL_MS", "750"))
+# Delay between bringing cameras back one-at-a-time when a multi-pane layout is
+# restored (e.g. leaving the transect tab). Avoids the simultaneous start spike
+# that can make a camera fail to come up. 0 disables staggering.
+VIDEO_RESTART_STAGGER_MS = int(os.environ.get("TRITON_VIDEO_RESTART_STAGGER_MS", "400"))
 VIDEO_DEFER_STREAMS_UNTIL_LINK = os.environ.get("TRITON_VIDEO_DEFER_UNTIL_LINK", "1").strip().lower() not in (
     "0",
     "false",
@@ -250,7 +254,7 @@ YAW_HOLD_DEFAULT = os.environ.get("TRITON_YAW_HOLD_DEFAULT", "0").strip().lower(
 # apparent target size, not a pressure-sensor depth. Larger blue width percent
 # means lower/closer to the square; smaller means higher/farther.
 TRANSECT_ROTATION_SERVO_DEFAULT = (
-    os.environ.get("TRITON_TRANSECT_ROTATION_SERVO_DEFAULT", "0").strip().lower()
+    os.environ.get("TRITON_TRANSECT_ROTATION_SERVO_DEFAULT", "1").strip().lower()
     in ("1", "true", "yes", "on")
 )
 
@@ -263,7 +267,7 @@ def _transect_target_blue_width_percent_default() -> float:
     footprint_s = os.environ.get("TRITON_TRANSECT_TARGET_FOOTPRINT_CM", "").strip()
     if footprint_s:
         return 100.0 * 50.0 / max(1e-6, float(footprint_s))
-    return 100.0 * 50.0 / 90.0
+    return 50.0
 
 
 TRANSECT_TARGET_BLUE_WIDTH_PERCENT_DEFAULT = _transect_target_blue_width_percent_default()

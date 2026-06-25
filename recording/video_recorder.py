@@ -41,9 +41,11 @@ logger = logging.getLogger(__name__)
 # here (not with ad-hoc offsets) to keep them unique.
 #   +200  recording   (recording/video_recorder.py)
 #   +210  transect CV  (tracking/transect_source.py)
+#   +220  liveness     (gui/direct_gst_video_widget.py watchdog)
 RECORD_FANOUT_HOST = "127.0.0.1"
 RECORD_FANOUT_PORT_OFFSET = 200
 CV_FANOUT_PORT_OFFSET = 210
+LIVENESS_FANOUT_PORT_OFFSET = 220
 
 
 def record_fanout_port(display_port: int) -> int:
@@ -59,6 +61,18 @@ def cv_fanout_port(display_port: int) -> int:
     (which lost packets -> corrupt frames + lag straight into the autopilot).
     """
     return int(display_port) + CV_FANOUT_PORT_OFFSET
+
+
+def liveness_fanout_port(display_port: int) -> int:
+    """Loopback UDP port a display receiver fans live RTP to for liveness checks.
+
+    The DirectGstVideoWidget binds this dedicated loopback port and counts
+    datagrams: while the pipeline is delivering video, packets arrive
+    continuously, so a gap means the stream has silently died (ROV sender
+    stopped, camera dropped, etc.) even though the local renderer process is
+    still alive. Dedicated per stream so nothing else ever competes for it.
+    """
+    return int(display_port) + LIVENESS_FANOUT_PORT_OFFSET
 
 
 def _find_gst_launch() -> str:

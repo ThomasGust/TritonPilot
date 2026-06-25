@@ -18,6 +18,17 @@ def _app():
     return QApplication.instance() or QApplication([])
 
 
+def test_runtime_servo_controls_default_to_yaw_er_on_and_50_percent_blue_width():
+    app = _app()
+    page = TransectPage(stream_names=["Arm Camera"])
+    try:
+        assert page.rotation_servo_check.isChecked() is True
+        assert page.target_blue_width_spin.value() == pytest.approx(50.0)
+    finally:
+        page.deleteLater()
+        app.processEvents()
+
+
 def test_engage_button_emits_toggled_both_ways():
     app = _app()
     page = TransectPage(stream_names=["Arm Camera"])
@@ -38,7 +49,7 @@ def test_runtime_servo_controls_emit_operator_changes():
     page = TransectPage(
         stream_names=["Arm Camera"],
         rotation_servo_enabled=False,
-        target_blue_width_percent=55.6,
+        target_blue_width_percent=50.0,
     )
     try:
         rotation_events = []

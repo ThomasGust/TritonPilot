@@ -1365,9 +1365,9 @@ class MainWindow(QMainWindow):
         # NOT drive the video -- the tab keeps the smooth d3d11 feed, and results
         # surface in the transparent lock/error HUD so a CV decode stall can
         # never replace/flicker the picture.
-        # Nadir arm camera (post 90-deg mount fix): the geometric defaults are
-        # correct -- target_cx/cy=0.5 and on-station blue width is 50/90 = 55.6%
-        # of frame width. Be careful when changing target_blue_fraction from a
+        # Nadir arm camera (post 90-deg mount fix): target_cx/cy=0.5 is the
+        # geometric center, and the operator-facing blue-width default is 50% of
+        # frame width. Be careful when changing target_blue_fraction from a
         # recording's median: that may just reflect how high the ROV happened to
         # fly. Use tools/transect_replay.py --calibrate to re-check centering if
         # the mount moves.

@@ -19,6 +19,7 @@ from config import (
     VIDEO_DISPLAY_FPS_MULTI,
     VIDEO_DISPLAY_FPS_SINGLE,
     VIDEO_DEFAULT_LAYOUT_COUNT,
+    VIDEO_RESTART_STAGGER_MS,
     VIDEO_STOP_HIDDEN_STREAMS,
     VIDEO_WARM_HIDDEN_STREAMS,
     VIDEO_WARMUP_INTERVAL_MS,
@@ -150,6 +151,16 @@ class VideoTabs(QWidget):
         self._warmup_timer = QTimer(self)
         self._warmup_timer.setSingleShot(True)
         self._warmup_timer.timeout.connect(self._warmup_next)
+
+        # Staggered (re)start queue. Bringing several cameras back at once (e.g.
+        # leaving the transect tab restores the multi-pane layout) spikes the
+        # shared USB2 bus + Pi pipeline spin-up all at once, which is exactly the
+        # condition that makes a start fail. Starting them a few hundred ms apart
+        # lets each pipeline stabilise before the next.
+        self._stagger_queue: list[str] = []
+        self._stagger_timer = QTimer(self)
+        self._stagger_timer.setSingleShot(True)
+        self._stagger_timer.timeout.connect(self._start_next_staggered)
 
         self._layout_combo = QComboBox()
         self._layout_combo.setObjectName("videoLayoutCombo")
@@ -675,6 +686,46 @@ class VideoTabs(QWidget):
         if self._warmup_index < len(self.stream_names):
             self._warmup_timer.start(max(0, int(VIDEO_WARMUP_INTERVAL_MS)))
 
+    def _start_visible_streams_staggered(self) -> None:
+        """Bring visible streams up one-at-a-time instead of all at once.
+
+        The first (active) pane starts immediately so the operator sees video
+        right away; the rest are queued and started a few hundred ms apart by
+        ``_stagger_timer`` to avoid the concurrent-start spike that can make a
+        camera fail to enumerate. Falls back to immediate starts if staggering
+        is disabled.
+        """
+        names = [n for n in self.visible_stream_names() if self._widgets.get(n) is None]
+        interval = max(0, int(VIDEO_RESTART_STAGGER_MS))
+        if interval <= 0 or len(names) <= 1:
+            for name in self.visible_stream_names():
+                self._ensure_stream_started(name)
+            return
+        # Start the active pane now; queue the others.
+        active = self.current_stream_name()
+        if active in names:
+            self._ensure_stream_started(active)
+            names.remove(active)
+        else:
+            self._ensure_stream_started(names.pop(0))
+        # Merge into any in-flight queue without duplicates, preserving order.
+        for name in names:
+            if name not in self._stagger_queue:
+                self._stagger_queue.append(name)
+        if self._stagger_queue and not self._stagger_timer.isActive():
+            self._stagger_timer.start(interval)
+
+    def _start_next_staggered(self) -> None:
+        # Skip any that became visible-and-started or are no longer visible.
+        visible = set(self.visible_stream_names())
+        while self._stagger_queue:
+            name = self._stagger_queue.pop(0)
+            if name in visible and self._widgets.get(name) is None:
+                self._ensure_stream_started(name)
+                break
+        if self._stagger_queue:
+            self._stagger_timer.start(max(0, int(VIDEO_RESTART_STAGGER_MS)))
+
     def resume_visible_streams(self) -> None:
         for name in self.visible_stream_names():
             self._ensure_stream_started(name)
@@ -790,8 +841,7 @@ class VideoTabs(QWidget):
         except Exception:
             pass
         self._refresh_layout(save=save, emit=emit)
-        for name in self.visible_stream_names():
-            self._ensure_stream_started(name)
+        self._start_visible_streams_staggered()
         self._stop_hidden_streams()
 
     def apply_temporary_layout(
@@ -935,6 +985,11 @@ class VideoTabs(QWidget):
             self._warmup_timer.stop()
         except Exception:
             pass
+        try:
+            self._stagger_timer.stop()
+        except Exception:
+            pass
+        self._stagger_queue.clear()
         for name, widget in list(self._widgets.items()):
             if widget is None:
                 continue
