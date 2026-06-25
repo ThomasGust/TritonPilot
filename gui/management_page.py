@@ -143,6 +143,17 @@ class ManagementPage(QWidget):
         self._arm_tune_checks: dict[str, QCheckBox] = {}
         self._arm_tune_spins: dict[str, QDoubleSpinBox] = {}
         self._arm_alignment_buttons: dict[str, QPushButton] = {}
+        # Disarm/arm park pose + per-axis travel limits (live to pilot + persisted).
+        self._arm_park_spins: dict[str, QDoubleSpinBox] = {}
+        self._arm_limit_spins: dict[str, QDoubleSpinBox] = {}
+        self._arm_limits_defaults = {
+            "park_pitch": -1.0,
+            "park_wrist": 1.0,
+            "pitch_min": -1.0,
+            "pitch_max": 1.0,
+            "wrist_min": -1.0,
+            "wrist_max": 1.0,
+        }
         self._arm_tune_config_defaults = {
             "left_invert": 1.0,
             "right_invert": -1.0,
@@ -304,6 +315,7 @@ class ManagementPage(QWidget):
         root.addWidget(service_card)
 
         root.addWidget(self._build_arm_tuning_card())
+        root.addWidget(self._build_arm_limits_card())
         root.addWidget(self._build_limiter_power_card())
 
         config_card = _SectionCard(
@@ -463,6 +475,128 @@ class ManagementPage(QWidget):
             "GRIPPER_PITCH_NEUTRAL_DEG": float(self._arm_tune_spins["pitch_neutral_deg"].value()),
         }
         self._queue_request("set_config", {"updates": updates}, request_meta={"refresh_after_success": True})
+
+    def _build_arm_limits_card(self) -> "_SectionCard":
+        card = _SectionCard(
+            "Arm Park & Travel Limits (Live + Save)",
+            "Disarm/arm park pose and per-axis travel limits for the differential arm. "
+            "Changes stream to the pilot instantly (the park pose is where the arm freezes "
+            "while disarmed; the limits clamp how far the stick can drive each axis -- e.g. "
+            "set Wrist max to -0.8 to spare the gearbox). 'Save to ROV config' writes them to "
+            "rov_config.py (GRIPPER_DISARM_* and GRIPPER_*_NORM); a TritonOS restart fully "
+            "applies the ROV-side park and backstop.",
+        )
+
+        park_form = QFormLayout()
+        park_form.setContentsMargins(0, 0, 0, 0)
+        park_form.setSpacing(8)
+        for key, label in (("park_pitch", "Disarm/arm pitch"), ("park_wrist", "Disarm/arm wrist")):
+            spin = self._make_spinbox(-1.0, 1.0, 0.05, 2)
+            self._set_spin_value(spin, self._arm_limits_defaults[key])
+            spin.valueChanged.connect(lambda _v: self._push_arm_limits_live(stream_tune=True))
+            self._arm_park_spins[key] = spin
+            park_form.addRow(label, spin)
+        card.body.addLayout(park_form)
+
+        limit_form = QFormLayout()
+        limit_form.setContentsMargins(0, 6, 0, 0)
+        limit_form.setSpacing(8)
+        for key, label in (
+            ("pitch_min", "Pitch min"),
+            ("pitch_max", "Pitch max"),
+            ("wrist_min", "Wrist min"),
+            ("wrist_max", "Wrist max"),
+        ):
+            spin = self._make_spinbox(-1.0, 1.0, 0.05, 2)
+            self._set_spin_value(spin, self._arm_limits_defaults[key])
+            spin.valueChanged.connect(lambda _v: self._push_arm_limits_live(stream_tune=True))
+            self._arm_limit_spins[key] = spin
+            limit_form.addRow(label, spin)
+        card.body.addLayout(limit_form)
+
+        buttons = QHBoxLayout()
+        buttons.setSpacing(8)
+        self.arm_limits_save_btn = QPushButton("Save to ROV config")
+        self.arm_limits_save_btn.clicked.connect(self._save_arm_limits_config)
+        buttons.addWidget(self.arm_limits_save_btn)
+        buttons.addStretch(1)
+        card.body.addLayout(buttons)
+
+        if self._pilot_svc is None:
+            for spin in (*self._arm_park_spins.values(), *self._arm_limit_spins.values()):
+                spin.setEnabled(False)
+        return card
+
+    def _push_arm_limits_live(self, *, stream_tune: bool) -> None:
+        """Push the park pose + per-axis travel limits to the pilot integrator.
+
+        When ``stream_tune`` is True (a live operator edit) the limits are also
+        mirrored to the ROV over the arm_tune override channel for instant effect.
+        Seeding from saved config passes False -- the ROV already booted with those
+        rov_config values, so only the pilot state needs to be synced.
+        """
+        svc = self._pilot_svc
+        if svc is None:
+            return
+        try:
+            park_pitch = float(self._arm_park_spins["park_pitch"].value())
+            park_wrist = float(self._arm_park_spins["park_wrist"].value())
+        except Exception:
+            park_pitch, park_wrist = self._arm_limits_defaults["park_pitch"], self._arm_limits_defaults["park_wrist"]
+        try:
+            if hasattr(svc, "set_arm_park_position"):
+                svc.set_arm_park_position(park_pitch, park_wrist)
+        except Exception:
+            pass
+
+        try:
+            limits = {k: float(self._arm_limit_spins[k].value()) for k in self._arm_limit_spins}
+        except Exception:
+            limits = {k: self._arm_limits_defaults[k] for k in ("pitch_min", "pitch_max", "wrist_min", "wrist_max")}
+        try:
+            if hasattr(svc, "set_arm_range"):
+                svc.set_arm_range(limits["pitch_min"], limits["pitch_max"], limits["wrist_min"], limits["wrist_max"])
+        except Exception:
+            pass
+        if stream_tune:
+            # Live mirror to the ROV (no restart) via the arm_tune override channel.
+            for key, value in limits.items():
+                try:
+                    svc.set_arm_tune(key, value)
+                except Exception:
+                    pass
+
+    def _save_arm_limits_config(self) -> None:
+        updates = {
+            "GRIPPER_DISARM_PITCH": float(self._arm_park_spins["park_pitch"].value()),
+            "GRIPPER_DISARM_YAW": float(self._arm_park_spins["park_wrist"].value()),
+            "GRIPPER_PITCH_MIN_NORM": float(self._arm_limit_spins["pitch_min"].value()),
+            "GRIPPER_PITCH_MAX_NORM": float(self._arm_limit_spins["pitch_max"].value()),
+            "GRIPPER_WRIST_MIN_NORM": float(self._arm_limit_spins["wrist_min"].value()),
+            "GRIPPER_WRIST_MAX_NORM": float(self._arm_limit_spins["wrist_max"].value()),
+        }
+        self._queue_request("set_config", {"updates": updates}, request_meta={"refresh_after_success": True})
+
+    def _apply_arm_limits_config(self, config: dict) -> None:
+        cfg = dict(config or {})
+        defaults = dict(self._arm_limits_defaults)
+        key_map = {
+            ("_arm_park_spins", "park_pitch"): "GRIPPER_DISARM_PITCH",
+            ("_arm_park_spins", "park_wrist"): "GRIPPER_DISARM_YAW",
+            ("_arm_limit_spins", "pitch_min"): "GRIPPER_PITCH_MIN_NORM",
+            ("_arm_limit_spins", "pitch_max"): "GRIPPER_PITCH_MAX_NORM",
+            ("_arm_limit_spins", "wrist_min"): "GRIPPER_WRIST_MIN_NORM",
+            ("_arm_limit_spins", "wrist_max"): "GRIPPER_WRIST_MAX_NORM",
+        }
+        for (attr, spin_key), cfg_key in key_map.items():
+            spin = getattr(self, attr).get(spin_key)
+            if spin is None:
+                continue
+            value = self._float_or_default(cfg.get(cfg_key), defaults[spin_key])
+            self._set_spin_value(spin, value)
+        # Push the persisted config to the pilot so its freeze pose + clamp match
+        # the ROV; no arm_tune stream (the ROV already booted with these values).
+        self._push_arm_limits_live(stream_tune=False)
 
     def _build_limiter_power_card(self) -> "_SectionCard":
         card = _SectionCard(
@@ -831,6 +965,7 @@ class ManagementPage(QWidget):
                 self._set_spin_value(spin, config.get(key))
 
         self._apply_arm_tune_config(config)
+        self._apply_arm_limits_config(config)
 
         # Reflect the persistent limiter master switch (rov_config CURRENT_BUDGET_ENABLE).
         if hasattr(self, "limiter_enable_boot_check"):
@@ -923,6 +1058,8 @@ class ManagementPage(QWidget):
         self.save_config_btn.setEnabled((not busy) and can_set_config and has_enabled_config_field)
         if hasattr(self, "arm_tune_save_btn"):
             self.arm_tune_save_btn.setEnabled((not busy) and can_set_config)
+        if hasattr(self, "arm_limits_save_btn"):
+            self.arm_limits_save_btn.setEnabled((not busy) and can_set_config)
         if hasattr(self, "limiter_enable_boot_check"):
             enable_present = "CURRENT_BUDGET_ENABLE" in self._config_keys_present
             self.limiter_enable_boot_check.setEnabled((not busy) and can_set_config and enable_present)
@@ -938,6 +1075,8 @@ class ManagementPage(QWidget):
             self.save_config_btn.setEnabled(False)
             if hasattr(self, "arm_tune_save_btn"):
                 self.arm_tune_save_btn.setEnabled(False)
+            if hasattr(self, "arm_limits_save_btn"):
+                self.arm_limits_save_btn.setEnabled(False)
             if hasattr(self, "limiter_enable_boot_check"):
                 self.limiter_enable_boot_check.setEnabled(False)
 

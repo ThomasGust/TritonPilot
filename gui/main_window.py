@@ -46,6 +46,7 @@ from PyQt6.QtWidgets import (
 from config import (
     ARM_DISARM_TOGGLE_EDGE,
     ARM_DISARM_TOGGLE_SHORTCUT,
+    ARM_PARK_SHORTCUT,
     PILOT_PUB_ENDPOINT,
     SENSOR_SUB_ENDPOINT,
     MANAGEMENT_RPC_ENDPOINT,
@@ -954,7 +955,6 @@ class MainWindow(QMainWindow):
                     pass
             self._page_stack.setCurrentWidget(self._raw_sensor_page)
         elif page_name == "ssh":
-            self._release_keyboard_vehicle_controls()
             if self.video_panel is not None:
                 if self._active_page_name == "pilot":
                     self._pilot_layout_count_restore = int(self.video_panel.layout_count())
@@ -1564,16 +1564,9 @@ class MainWindow(QMainWindow):
         self._last_pilot_msg: dict = {}
 
         # 1) pilot publisher (xbox -> ROV)
-        # These keyboard controls feed a direction intent (A/D -> pitch,
-        # W/S -> wrist) to the arm position integrator that lives in
-        # PilotPublisherService; the integrator publishes the absolute pose.
-        self._servo_wrist_keys_down: set[str] = set()
-        self._servo_wrist_keymap = {
-            Qt.Key.Key_W: ("gripper_yaw", +1.0, "W"),
-            Qt.Key.Key_S: ("gripper_yaw", -1.0, "S"),
-            Qt.Key.Key_D: ("gripper_pitch", +1.0, "D"),
-            Qt.Key.Key_A: ("gripper_pitch", -1.0, "A"),
-        }
+        # The servo arm is driven from the gamepad (right stick while the aim
+        # modifier is held); W/A/S/D are intentionally NOT bound to the arm so
+        # they are free for other hotkeys.
         self._back_gripper_gain_shortcuts = {
             Qt.Key.Key_1: -1.0,
             Qt.Key.Key_2: +1.0,
@@ -1594,10 +1587,10 @@ class MainWindow(QMainWindow):
         self._lights_toggle_edge = str(LIGHTS_TOGGLE_EDGE or "lights").strip().lower() or "lights"
         self._arm_disarm_shortcut_text = str(ARM_DISARM_TOGGLE_SHORTCUT or "O").strip() or "O"
         self._arm_disarm_edge = str(ARM_DISARM_TOGGLE_EDGE or "menu").strip().lower() or "menu"
-        self._servo_wrist_timer = QTimer(self)
-        self._servo_wrist_timer.setInterval(33)
-        self._servo_wrist_timer.timeout.connect(self._push_servo_wrist_keyboard_intent)
-        self._servo_wrist_timer.start()
+        self._arm_park_shortcut_text = str(ARM_PARK_SHORTCUT or "A").strip() or "A"
+        # Tracks the last armed state pushed into the pilot arm integrator so the
+        # arm freezes (and snaps to its park pose) while the ROV is disarmed.
+        self._arm_integrator_armed: bool | None = None
 
         self.pilot_svc = PilotPublisherService(
             endpoint=PILOT_PUB_ENDPOINT,
@@ -1901,28 +1894,6 @@ class MainWindow(QMainWindow):
         resize_to_available_screen(self, 1440, 860, min_width=980, min_height=620, height_ratio=0.96)
 
 
-    def _servo_wrist_keyboard_targets(self) -> tuple[float, float]:
-        # A/D -> arm pitch direction, W/S -> wrist direction. A held key sets a
-        # direction intent; the pilot-side integrator turns that into motion.
-        pitch_dir = 0.0
-        yaw_dir = 0.0
-        if "D" in self._servo_wrist_keys_down and "A" not in self._servo_wrist_keys_down:
-            pitch_dir = 1.0
-        elif "A" in self._servo_wrist_keys_down and "D" not in self._servo_wrist_keys_down:
-            pitch_dir = -1.0
-        if "W" in self._servo_wrist_keys_down and "S" not in self._servo_wrist_keys_down:
-            yaw_dir = 1.0
-        elif "S" in self._servo_wrist_keys_down and "W" not in self._servo_wrist_keys_down:
-            yaw_dir = -1.0
-        return pitch_dir, yaw_dir
-
-    def _push_servo_wrist_keyboard_intent(self) -> None:
-        pitch_dir, wrist_dir = self._servo_wrist_keyboard_targets()
-        try:
-            self.pilot_svc.set_arm_keyboard_intent(pitch_dir, wrist_dir)
-        except Exception:
-            pass
-
     def _refresh_gain_indicators_from_modes(self, modes: dict) -> None:
         column = getattr(self, "pilot_telemetry_column", None)
         if column is None:
@@ -2037,14 +2008,37 @@ class MainWindow(QMainWindow):
             3000,
         )
 
-    def _release_keyboard_vehicle_controls(self) -> None:
-        """Neutralize keyboard-only vehicle controls when focus belongs to text input."""
-        if not self._servo_wrist_keys_down:
+    def _send_arm_to_park_from_keyboard(self) -> None:
+        """Command the differential arm straight to its park pose (key A)."""
+        svc = getattr(self, "pilot_svc", None)
+        mover = getattr(svc, "move_arm_to_park", None) if svc is not None else None
+        if mover is None:
             return
-        self._servo_wrist_keys_down.clear()
         try:
-            # Stop commanding arm motion; the ROV holds the last pose.
-            self.pilot_svc.clear_arm_keyboard_intent()
+            mover()
+        except Exception as exc:
+            self.statusBar().showMessage(f"Could not send arm to park: {exc}", 5000)
+            return
+        shortcut_text = str(self._arm_park_shortcut_text or "A").upper()
+        if getattr(self, "_arm_integrator_armed", None) is False:
+            msg = f"Arm already at park (disarmed)  |  key: {shortcut_text}"
+        else:
+            msg = f"Arm sent to park pose  |  key: {shortcut_text}"
+        self.statusBar().showMessage(msg, 3000)
+
+    def _sync_arm_integrator_armed(self, hb: dict) -> None:
+        """Mirror the ROV's armed state from the heartbeat into the pilot arm
+        integrator. While disarmed the integrator freezes and snaps to the park
+        pose, so the servo target cannot drift and snap on re-arm. Only acts on a
+        real change, and ignores heartbeats that omit the armed flag."""
+        if not isinstance(hb, dict) or "armed" not in hb:
+            return
+        armed = bool(hb.get("armed", False))
+        if armed == self._arm_integrator_armed:
+            return
+        self._arm_integrator_armed = armed
+        try:
+            self.pilot_svc.set_armed(armed)
         except Exception:
             pass
 
@@ -2128,7 +2122,6 @@ class MainWindow(QMainWindow):
                         self._start_competition_clock_from_keyboard()
                         return True
                 if self._keyboard_vehicle_shortcuts_suppressed(obj):
-                    self._release_keyboard_vehicle_controls()
                     return False
                 if et == QEvent.Type.KeyPress and getattr(self, "_active_page_name", "") == "transect":
                     if event.key() == Qt.Key.Key_T:
@@ -2137,15 +2130,6 @@ class MainWindow(QMainWindow):
                     if event.key() == Qt.Key.Key_R:
                         self._reset_transect_stopwatch_from_keyboard()
                         return True
-                entry = self._servo_wrist_keymap.get(event.key())
-                if entry is not None:
-                    _axis_name, _axis_value, label = entry
-                    if et == QEvent.Type.KeyPress:
-                        self._servo_wrist_keys_down.add(label)
-                    else:
-                        self._servo_wrist_keys_down.discard(label)
-                    self._push_servo_wrist_keyboard_intent()
-                    return True
                 if et == QEvent.Type.KeyPress:
                     if event.key() == Qt.Key.Key_R:
                         self._toggle_reverse_mode()
@@ -2158,8 +2142,15 @@ class MainWindow(QMainWindow):
                         arm_shortcut_text = self._arm_disarm_shortcut_text.upper()
                     except Exception:
                         arm_shortcut_text = "O"
+                    try:
+                        arm_park_shortcut_text = self._arm_park_shortcut_text.upper()
+                    except Exception:
+                        arm_park_shortcut_text = "A"
                     if event.text().upper() == arm_shortcut_text:
                         self._toggle_arm_disarm_from_ui()
+                        return True
+                    if event.text().upper() == arm_park_shortcut_text:
+                        self._send_arm_to_park_from_keyboard()
                         return True
                     if event.text().upper() == shortcut_text:
                         self._toggle_lights_from_keyboard()
@@ -2553,6 +2544,7 @@ class MainWindow(QMainWindow):
             self._prev_hb_rx_ts = now_ts
             self._last_hb_ts = now_ts
             self._last_hb = msg
+            self._sync_arm_integrator_armed(msg)
             self._refresh_arm_disarm_button()
         elif typ == "net" or msg.get("sensor") == "network":
             self._last_net_ts = time.time()

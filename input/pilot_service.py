@@ -98,12 +98,18 @@ class PilotPublisherService:
             ARM_GAIN_STEP,
             ARM_INIT_PITCH,
             ARM_INIT_WRIST,
+            ARM_PARK_PITCH,
+            ARM_PARK_WRIST,
+            ARM_PITCH_MAX,
+            ARM_PITCH_MIN,
             ARM_RATE,
             ARM_STICK_DEADZONE,
             ARM_STICK_PITCH_AXIS,
             ARM_STICK_PITCH_INVERT,
             ARM_STICK_WRIST_AXIS,
             ARM_STICK_WRIST_INVERT,
+            ARM_WRIST_MAX,
+            ARM_WRIST_MIN,
             BACK_GRIPPER_GAIN_DEFAULT,
             BACK_GRIPPER_GAIN_MAX,
             BACK_GRIPPER_GAIN_MIN,
@@ -227,16 +233,25 @@ class PilotPublisherService:
         self._pending_edges: list[tuple[str, str]] = []
 
         # --- Differential arm (servo wrist) position integrator ---------------
-        # Single source of truth for the arm pose. Keyboard W/A/S/D supplies a
-        # direction intent (set_arm_keyboard_intent); the right stick supplies a
+        # Single source of truth for the arm pose. The right stick supplies a
         # proportional intent while ARM_AIM_MODIFIER_BUTTON is held. The publish
-        # loop integrates position from those intents at ARM_RATE * arm_gain and
+        # loop integrates position from that intent at ARM_RATE * arm_gain and
         # publishes the absolute pose as PilotFrame.aux gripper_pitch/gripper_yaw.
+        #
+        # Safety: while the ROV is DISARMED the integrator is frozen at the park
+        # pose (set_armed snaps the target to it on the arm->disarm transition), so
+        # the streamed target cannot drift away from the parked servos and snap on
+        # re-arm. Pilot-commanded motion is also clamped to the per-axis travel
+        # limits below (the park pose itself is exempt -- it is the safe stow).
         self._arm_lock = threading.Lock()
+        self._arm_park_pitch = self._clamp_unit(ARM_PARK_PITCH)
+        self._arm_park_wrist = self._clamp_unit(ARM_PARK_WRIST)
         self._arm_pitch = self._clamp_unit(ARM_INIT_PITCH)
         self._arm_wrist = self._clamp_unit(ARM_INIT_WRIST)
-        self._arm_kb_pitch_dir = 0.0
-        self._arm_kb_wrist_dir = 0.0
+        # Default to disarmed: hold the arm until a heartbeat reports armed=True.
+        self._armed = False
+        self._arm_pitch_min, self._arm_pitch_max = self._ordered_limits(ARM_PITCH_MIN, ARM_PITCH_MAX)
+        self._arm_wrist_min, self._arm_wrist_max = self._ordered_limits(ARM_WRIST_MIN, ARM_WRIST_MAX)
         self._arm_last_t: Optional[float] = None
         self._arm_modifier_button = str(ARM_AIM_MODIFIER_BUTTON or "").strip().lower()
         self._arm_stick_pitch_axis = str(ARM_STICK_PITCH_AXIS or "ry").strip().lower()
@@ -413,6 +428,8 @@ class PilotPublisherService:
             "left_invert", "right_invert", "pitch_invert", "yaw_invert",
             "pitch_neutral_deg", "wrist_neutral_deg", "servo_range_deg",
             "pitch_span_deg", "wrist_span_deg",
+            # Per-axis normalized travel limits (live mirror of GRIPPER_*_NORM).
+            "pitch_min", "pitch_max", "wrist_min", "wrist_max",
         }
         k = str(key or "").strip()
         if k not in valid:
@@ -450,6 +467,25 @@ class PilotPublisherService:
             return 1.0
         return v
 
+    @classmethod
+    def _ordered_limits(cls, lo, hi) -> tuple[float, float]:
+        """Return a sane (min, max) limit pair clamped to [-1, 1] and ordered."""
+        a = cls._clamp_unit(lo)
+        b = cls._clamp_unit(hi)
+        return (a, b) if a <= b else (b, a)
+
+    @staticmethod
+    def _clamp_range(value: float, lo: float, hi: float) -> float:
+        try:
+            v = float(value)
+        except Exception:
+            v = 0.0
+        if v < lo:
+            return float(lo)
+        if v > hi:
+            return float(hi)
+        return v
+
     def set_aux_axis(self, name: str, value: float) -> None:
         key = str(name or "").strip()
         if not key:
@@ -473,21 +509,76 @@ class PilotPublisherService:
             return dict(self._aux_axes)
 
     # --- differential arm position integrator -----------------------------
-    def set_arm_keyboard_intent(self, pitch_dir: float, wrist_dir: float) -> None:
-        """Set the keyboard direction intent for the differential arm.
+    def set_armed(self, armed: bool) -> None:
+        """Mirror the ROV's armed state into the arm integrator.
 
-        Each value is -1, 0, or +1 (A/D -> pitch, W/S -> wrist). The publish loop
-        integrates these into the absolute arm position at ARM_RATE * arm_gain.
+        Topside learns the real armed state from the ROV heartbeat. While
+        disarmed the integrator is frozen, and on the arm->disarm transition the
+        target snaps to the park pose so the parked servos do not snap on re-arm.
+        """
+        armed = bool(armed)
+        with self._arm_lock:
+            was = self._armed
+            self._armed = armed
+            if (not armed) and (was is not False):
+                # Entering disarmed: force the streamed target to the park pose.
+                self._arm_pitch = self._clamp_unit(self._arm_park_pitch)
+                self._arm_wrist = self._clamp_unit(self._arm_park_wrist)
+
+    def is_arm_frozen(self) -> bool:
+        """True when arm motion is locked because the ROV is not armed."""
+        with self._arm_lock:
+            return self._armed is not True
+
+    def set_arm_park_position(self, pitch: float, wrist: float) -> tuple[float, float]:
+        """Set the disarm/arm park pose (normalized) the arm freezes at when disarmed.
+
+        Vehicle Setup keeps this in sync with the ROV's GRIPPER_DISARM_* config.
+        If the ROV is currently disarmed, the held target follows the new pose.
         """
         with self._arm_lock:
-            self._arm_kb_pitch_dir = self._clamp_unit(pitch_dir)
-            self._arm_kb_wrist_dir = self._clamp_unit(wrist_dir)
+            self._arm_park_pitch = self._clamp_unit(pitch)
+            self._arm_park_wrist = self._clamp_unit(wrist)
+            if self._armed is not True:
+                self._arm_pitch = self._arm_park_pitch
+                self._arm_wrist = self._arm_park_wrist
+            return float(self._arm_park_pitch), float(self._arm_park_wrist)
 
-    def clear_arm_keyboard_intent(self) -> None:
-        """Drop any held keyboard arm intent (e.g. on focus loss)."""
+    def arm_park_position(self) -> tuple[float, float]:
         with self._arm_lock:
-            self._arm_kb_pitch_dir = 0.0
-            self._arm_kb_wrist_dir = 0.0
+            return float(self._arm_park_pitch), float(self._arm_park_wrist)
+
+    def move_arm_to_park(self) -> tuple[float, float]:
+        """Command the arm target straight to the park pose (a 'send home' hotkey).
+
+        Sets the streamed target to the configured park pose; the ROV slews the
+        servos there (GRIPPER_SLEW_NORM_PER_S). Safe whether armed or not -- while
+        disarmed the target is already held at park, so this is a no-op there.
+        """
+        with self._arm_lock:
+            self._arm_pitch = self._clamp_unit(self._arm_park_pitch)
+            self._arm_wrist = self._clamp_unit(self._arm_park_wrist)
+            return float(self._arm_pitch), float(self._arm_wrist)
+
+    def set_arm_range(self, pitch_min, pitch_max, wrist_min, wrist_max) -> None:
+        """Set the per-axis normalized travel limits for pilot-commanded motion.
+
+        Vehicle Setup keeps these in sync with the ROV's GRIPPER_*_NORM config.
+        The park pose is exempt; the next integrate frame pulls an out-of-range
+        target back inside the new limits.
+        """
+        with self._arm_lock:
+            self._arm_pitch_min, self._arm_pitch_max = self._ordered_limits(pitch_min, pitch_max)
+            self._arm_wrist_min, self._arm_wrist_max = self._ordered_limits(wrist_min, wrist_max)
+
+    def arm_range(self) -> tuple[float, float, float, float]:
+        with self._arm_lock:
+            return (
+                float(self._arm_pitch_min),
+                float(self._arm_pitch_max),
+                float(self._arm_wrist_min),
+                float(self._arm_wrist_max),
+            )
 
     def arm_position(self) -> tuple[float, float]:
         """Return the current integrated (pitch, wrist) arm position in [-1, 1]."""
@@ -497,14 +588,14 @@ class PilotPublisherService:
     def set_arm_position(self, pitch: float, wrist: float) -> tuple[float, float]:
         """Set the absolute differential-arm target in [-1, 1].
 
-        Used by setup/alignment actions that need to command a known pose directly
-        instead of walking there through keyboard or stick intent.
+        Used by deliberate setup/alignment actions that command a known pose
+        directly instead of walking there through stick intent. Clamped only to
+        the full [-1, 1] range (not the operating travel limits) so bench
+        calibration poses stay reachable.
         """
         with self._arm_lock:
             self._arm_pitch = self._clamp_unit(pitch)
             self._arm_wrist = self._clamp_unit(wrist)
-            self._arm_kb_pitch_dir = 0.0
-            self._arm_kb_wrist_dir = 0.0
             return float(self._arm_pitch), float(self._arm_wrist)
 
     @staticmethod
@@ -519,12 +610,18 @@ class PilotPublisherService:
         return sign * min(1.0, (abs(x) - dz) / span)
 
     def _integrate_arm(self, snap: ControllerSnapshot, modifier_held: bool, dt: float) -> tuple[float, float]:
-        """Advance the arm position from keyboard + (modifier-gated) stick intent."""
-        with self._arm_lock:
-            kp = self._arm_kb_pitch_dir
-            kw = self._arm_kb_wrist_dir
+        """Advance the arm position from the modifier-gated right stick.
 
-        sp = sw = 0.0
+        While the ROV is disarmed the target is frozen (held at the park pose) so
+        it cannot drift away from the parked servos. Pilot-commanded motion is
+        clamped to the configured per-axis travel limits.
+        """
+        with self._arm_lock:
+            if self._armed is not True:
+                # Disarmed (or unknown): hold the frozen/park target.
+                return float(self._arm_pitch), float(self._arm_wrist)
+
+        pitch_intent = wrist_intent = 0.0
         if modifier_held:
             try:
                 pv = float(getattr(snap, self._arm_stick_pitch_axis, 0.0) or 0.0)
@@ -534,12 +631,8 @@ class PilotPublisherService:
                 wv = float(getattr(snap, self._arm_stick_wrist_axis, 0.0) or 0.0)
             except Exception:
                 wv = 0.0
-            sp = self._stick_axis(pv, self._arm_stick_deadzone) * self._arm_stick_pitch_invert
-            sw = self._stick_axis(wv, self._arm_stick_deadzone) * self._arm_stick_wrist_invert
-
-        # Stick takes priority when deflected; otherwise hold the keyboard intent.
-        pitch_intent = sp if abs(sp) > 1e-6 else kp
-        wrist_intent = sw if abs(sw) > 1e-6 else kw
+            pitch_intent = self._stick_axis(pv, self._arm_stick_deadzone) * self._arm_stick_pitch_invert
+            wrist_intent = self._stick_axis(wv, self._arm_stick_deadzone) * self._arm_stick_wrist_invert
 
         try:
             gain = float(self.current_arm_gain())
@@ -549,8 +642,17 @@ class PilotPublisherService:
         step = float(self._arm_rate) * gain * max(0.0, min(0.1, float(dt)))
 
         with self._arm_lock:
-            self._arm_pitch = self._clamp_unit(self._arm_pitch + pitch_intent * step)
-            self._arm_wrist = self._clamp_unit(self._arm_wrist + wrist_intent * step)
+            # Clamp the integrated target to the per-axis travel limits. The park
+            # pose should be configured within these limits (Vehicle Setup exposes
+            # both) so the arm truly holds at park on re-arm; the ROV applies the
+            # same clamp as a backstop, so an out-of-range park would settle at the
+            # nearest limit on arm regardless.
+            self._arm_pitch = self._clamp_range(
+                self._arm_pitch + pitch_intent * step, self._arm_pitch_min, self._arm_pitch_max
+            )
+            self._arm_wrist = self._clamp_range(
+                self._arm_wrist + wrist_intent * step, self._arm_wrist_min, self._arm_wrist_max
+            )
             return float(self._arm_pitch), float(self._arm_wrist)
 
     def queue_edge(self, name: str, state: str = "down") -> None:
@@ -1249,8 +1351,8 @@ class PilotPublisherService:
                     self._apply_reverse_axes(frame)
                 self._prev_buttons = frame.buttons
 
-                # Differential arm: integrate position from keyboard + the
-                # modifier-gated right stick, and publish the absolute pose.
+                # Differential arm: integrate position from the modifier-gated
+                # right stick (frozen while disarmed), and publish the absolute pose.
                 dt_arm = self.period if self._arm_last_t is None else (t0 - self._arm_last_t)
                 self._arm_last_t = t0
                 modifier_held = (

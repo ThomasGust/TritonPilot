@@ -293,6 +293,11 @@ LIGHTS_TOGGLE_EDGE = os.environ.get("TRITON_LIGHTS_TOGGLE_EDGE", "lights").strip
 ARM_DISARM_TOGGLE_SHORTCUT = os.environ.get("TRITON_ARM_DISARM_SHORTCUT", "O").strip() or "O"
 ARM_DISARM_TOGGLE_EDGE = os.environ.get("TRITON_ARM_DISARM_EDGE", "menu").strip().lower() or "menu"
 
+# Keyboard "send the arm home" shortcut: commands the differential arm straight to
+# its configured park pose (ARM_PARK_PITCH/WRIST, mirrored from rov_config
+# GRIPPER_DISARM_*). The ROV slews the servos there. Default key A.
+ARM_PARK_SHORTCUT = os.environ.get("TRITON_ARM_PARK_SHORTCUT", "A").strip() or "A"
+
 # Reverse drive mode rotates the pilot's translation commands by 180 degrees
 # so surge/sway still match when the operator swaps to a rear camera. Yaw keeps
 # its normal left/right sign.
@@ -428,6 +433,25 @@ ARM_RATE = float(os.environ.get("TRITON_ARM_RATE", "2.5"))
 # Startup arm position (normalized): pitch -1 = flat/folded, wrist +1 = 90 deg.
 ARM_INIT_PITCH = float(os.environ.get("TRITON_ARM_INIT_PITCH", "-1.0"))
 ARM_INIT_WRIST = float(os.environ.get("TRITON_ARM_INIT_WRIST", "1.0"))
+
+# Arm park (disarm/arm) position, normalized. While the ROV is DISARMED the pilot
+# forces its streamed arm target to this pose and freezes it, so the servos cannot
+# drift away from where they were parked and snap on re-arm. Mirror the ROV's
+# rov_config GRIPPER_DISARM_PITCH / GRIPPER_DISARM_YAW (Vehicle Setup keeps the two
+# in sync). Defaults match the startup pose.
+ARM_PARK_PITCH = float(os.environ.get("TRITON_ARM_PARK_PITCH", str(ARM_INIT_PITCH)))
+ARM_PARK_WRIST = float(os.environ.get("TRITON_ARM_PARK_WRIST", str(ARM_INIT_WRIST)))
+
+# Per-axis normalized travel limits for the arm. The position integrator clamps
+# pilot-commanded motion to these (the park pose above is exempt -- it is the safe
+# stow). Default to the full [-1, 1] range; narrow a limit to spare the janky
+# gearbox (e.g. ARM_WRIST_MAX = -0.8 to keep the wrist short of its hard stop).
+# Mirror the ROV's rov_config GRIPPER_*_MIN_NORM / *_MAX_NORM (Vehicle Setup syncs
+# both). min must be <= max; the pilot swaps them defensively if reversed.
+ARM_PITCH_MIN = float(os.environ.get("TRITON_ARM_PITCH_MIN", "-1.0"))
+ARM_PITCH_MAX = float(os.environ.get("TRITON_ARM_PITCH_MAX", "1.0"))
+ARM_WRIST_MIN = float(os.environ.get("TRITON_ARM_WRIST_MIN", "-1.0"))
+ARM_WRIST_MAX = float(os.environ.get("TRITON_ARM_WRIST_MAX", "1.0"))
 
 
 # Legacy topside walk-target display settings. Current depth-hold manual

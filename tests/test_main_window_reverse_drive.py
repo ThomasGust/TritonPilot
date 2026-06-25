@@ -45,8 +45,8 @@ class _FakePilotService:
         self.max_gain = 1.0
         self.back_gripper_gain = 0.5
         self.arm_gain = 0.5
-        self.arm_kb_pitch_dir = 0.0
-        self.arm_kb_wrist_dir = 0.0
+        self.armed_calls = []
+        self.park_calls = 0
         self.arm_pitch = -1.0
         self.arm_wrist = 0.0
 
@@ -121,15 +121,13 @@ class _FakePilotService:
     def current_arm_gain(self):
         return self.arm_gain
 
-    def set_arm_keyboard_intent(self, pitch_dir, wrist_dir):
-        self.arm_kb_pitch_dir = float(pitch_dir)
-        self.arm_kb_wrist_dir = float(wrist_dir)
+    def set_armed(self, armed):
+        self.armed_calls.append(bool(armed))
         return None
 
-    def clear_arm_keyboard_intent(self):
-        self.arm_kb_pitch_dir = 0.0
-        self.arm_kb_wrist_dir = 0.0
-        return None
+    def move_arm_to_park(self):
+        self.park_calls += 1
+        return (self.arm_pitch, self.arm_wrist)
 
     def arm_position(self):
         return (self.arm_pitch, self.arm_wrist)
@@ -299,6 +297,9 @@ class _FakeVideoPanel(QWidget):
 
 
 class _SimplePage(QWidget):
+    # Mirrors the real ManagementPage signal so MainWindow can connect to it.
+    live_limiter_changed = pyqtSignal()
+
     def __init__(self, *args, **kwargs):
         super().__init__()
 
@@ -433,9 +434,11 @@ def test_transect_page_applies_square_single_camera_layout(monkeypatch, tmp_path
 
         before_calls = len(panel.apply_temporary_layout_calls)
         win._transect_page.camera_combo.setFocus()
+        # 'A' is the "send arm to park" hotkey: it is consumed as a vehicle
+        # shortcut (parks the arm) and does not change the transect camera.
         key_event = QKeyEvent(QEvent.Type.KeyPress, Qt.Key.Key_A, Qt.KeyboardModifier.NoModifier, "a")
         assert win.eventFilter(win._transect_page.camera_combo, key_event) is True
-        assert win._servo_wrist_keys_down == {"A"}
+        assert win.pilot_svc.park_calls == 1
         assert len(panel.apply_temporary_layout_calls) == before_calls
         assert win._transect_page.current_stream_name() == "Aux Camera"
 
@@ -1395,10 +1398,8 @@ def test_keyboard_vehicle_shortcuts_are_suppressed_for_ssh_and_text_input(monkey
         ssh_input = win._ssh_page.command_edit
         win.eventFilter(ssh_input, QKeyEvent(QEvent.Type.KeyPress, Qt.Key.Key_O, Qt.KeyboardModifier.NoModifier, "o"))
         win.eventFilter(ssh_input, QKeyEvent(QEvent.Type.KeyPress, Qt.Key.Key_L, Qt.KeyboardModifier.NoModifier, "l"))
-        win.eventFilter(ssh_input, QKeyEvent(QEvent.Type.KeyPress, Qt.Key.Key_W, Qt.KeyboardModifier.NoModifier, "w"))
 
         assert win.pilot_svc.queued_edges == []
-        assert "W" not in win._servo_wrist_keys_down
 
         win._set_center_page("pilot", announce=False)
         win.eventFilter(ssh_input, QKeyEvent(QEvent.Type.KeyPress, Qt.Key.Key_O, Qt.KeyboardModifier.NoModifier, "o"))
@@ -1411,7 +1412,9 @@ def test_keyboard_vehicle_shortcuts_are_suppressed_for_ssh_and_text_input(monkey
         app.processEvents()
 
 
-def test_switching_to_ssh_releases_keyboard_wrist_controls(monkeypatch, tmp_path):
+def test_wasd_keys_are_not_consumed_as_arm_controls(monkeypatch, tmp_path):
+    # WASD were freed from the (removed) servo-wrist keymap: W/S/D are unbound and
+    # the arm is gamepad-only, while A is repurposed as the "send to park" hotkey.
     app = _app()
     streams_path = tmp_path / "streams.json"
     streams_path.write_text("{}", encoding="utf-8")
@@ -1428,21 +1431,22 @@ def test_switching_to_ssh_releases_keyboard_wrist_controls(monkeypatch, tmp_path
     win = main_window.MainWindow(str(streams_path))
     try:
         app.processEvents()
+        win._set_center_page("pilot", announce=False)
 
-        win._servo_wrist_keys_down = {"W", "D"}
-        win.pilot_svc.set_arm_keyboard_intent(1.0, 1.0)
-
-        win._set_center_page("ssh", announce=False)
-
-        assert win._servo_wrist_keys_down == set()
-        assert win.pilot_svc.arm_kb_pitch_dir == pytest.approx(0.0)
-        assert win.pilot_svc.arm_kb_wrist_dir == pytest.approx(0.0)
+        assert not hasattr(win, "_servo_wrist_keymap")
+        assert not hasattr(win, "_servo_wrist_keys_down")
+        # W/S/D stay free (no arm movement keymap).
+        for key, text in ((Qt.Key.Key_W, "w"), (Qt.Key.Key_S, "s"), (Qt.Key.Key_D, "d")):
+            event = QKeyEvent(QEvent.Type.KeyPress, key, Qt.KeyboardModifier.NoModifier, text)
+            assert win.eventFilter(win, event) is False
+        assert win.pilot_svc.park_calls == 0
+        assert win.pilot_svc.queued_edges == []
     finally:
         win.close()
         app.processEvents()
 
 
-def test_keyboard_wrist_controls_swap_ws_and_ad_axes(monkeypatch, tmp_path):
+def test_a_key_sends_arm_to_park(monkeypatch, tmp_path):
     app = _app()
     streams_path = tmp_path / "streams.json"
     streams_path.write_text("{}", encoding="utf-8")
@@ -1459,30 +1463,48 @@ def test_keyboard_wrist_controls_swap_ws_and_ad_axes(monkeypatch, tmp_path):
     win = main_window.MainWindow(str(streams_path))
     try:
         app.processEvents()
-        assert win._servo_wrist_keymap[Qt.Key.Key_W][0] == "gripper_yaw"
-        assert win._servo_wrist_keymap[Qt.Key.Key_S][0] == "gripper_yaw"
-        assert win._servo_wrist_keymap[Qt.Key.Key_D][0] == "gripper_pitch"
-        assert win._servo_wrist_keymap[Qt.Key.Key_A][0] == "gripper_pitch"
+        win._set_center_page("pilot", announce=False)
 
-        # W/S drive the wrist intent; A/D drive the pitch intent.
-        win._servo_wrist_keys_down = {"W"}
-        win._push_servo_wrist_keyboard_intent()
-        assert win.pilot_svc.arm_kb_pitch_dir == pytest.approx(0.0)
-        assert win.pilot_svc.arm_kb_wrist_dir == pytest.approx(1.0)
+        event = QKeyEvent(QEvent.Type.KeyPress, Qt.Key.Key_A, Qt.KeyboardModifier.NoModifier, "a")
+        assert win.eventFilter(win, event) is True
+        assert win.pilot_svc.park_calls == 1
 
-        win._servo_wrist_keys_down = {"D"}
-        win._push_servo_wrist_keyboard_intent()
-        assert win.pilot_svc.arm_kb_pitch_dir == pytest.approx(1.0)
-        assert win.pilot_svc.arm_kb_wrist_dir == pytest.approx(0.0)
+        # Suppressed while typing into a text field (no accidental parking).
+        win._set_center_page("ssh", announce=False)
+        ssh_input = win._ssh_page.command_edit
+        win.eventFilter(ssh_input, QKeyEvent(QEvent.Type.KeyPress, Qt.Key.Key_A, Qt.KeyboardModifier.NoModifier, "a"))
+        assert win.pilot_svc.park_calls == 1
+    finally:
+        win.close()
+        app.processEvents()
 
-        win._servo_wrist_keys_down = {"S"}
-        assert win._servo_wrist_keyboard_targets()[1] == pytest.approx(-1.0)
-        win._servo_wrist_keys_down = {"A"}
-        assert win._servo_wrist_keyboard_targets()[0] == pytest.approx(-1.0)
-        win._servo_wrist_keys_down = set()
-        win._push_servo_wrist_keyboard_intent()
-        assert win.pilot_svc.arm_kb_pitch_dir == pytest.approx(0.0)
-        assert win.pilot_svc.arm_kb_wrist_dir == pytest.approx(0.0)
+
+def test_heartbeat_syncs_armed_state_into_pilot_integrator(monkeypatch, tmp_path):
+    app = _app()
+    streams_path = tmp_path / "streams.json"
+    streams_path.write_text("{}", encoding="utf-8")
+
+    monkeypatch.setattr(main_window, "QSettings", lambda *args, **kwargs: _FakeSettings())
+    monkeypatch.setattr(main_window, "PilotPublisherService", _FakePilotService)
+    monkeypatch.setattr(main_window, "SensorSubscriberService", _FakeSensorService)
+    monkeypatch.setattr(main_window, "RemoteCameraManager", _FakeRemoteCameraManager)
+    monkeypatch.setattr(main_window, "VideoTabs", _FakeVideoPanel)
+    monkeypatch.setattr(main_window, "HoldTestPanel", _SimplePage)
+    monkeypatch.setattr(main_window, "ManagementPage", _SimplePage)
+    monkeypatch.setattr(main_window.threading, "Thread", _NoopThread)
+
+    win = main_window.MainWindow(str(streams_path))
+    try:
+        app.processEvents()
+
+        # Only real transitions are forwarded, and heartbeats without an armed
+        # flag are ignored.
+        win._handle_sensor_msg_on_ui({"type": "heartbeat", "armed": True})
+        win._handle_sensor_msg_on_ui({"type": "heartbeat", "armed": True})
+        win._handle_sensor_msg_on_ui({"type": "heartbeat"})
+        win._handle_sensor_msg_on_ui({"type": "heartbeat", "armed": False})
+
+        assert win.pilot_svc.armed_calls == [True, False]
     finally:
         win.close()
         app.processEvents()
