@@ -1603,6 +1603,27 @@ def test_top_bar_gain_button_sets_pilot_max_gain(monkeypatch, tmp_path):
         assert win.pilot_telemetry_column.rov_gain_indicator.value == pytest.approx(0.55)
         assert win._max_gain_btn.text() == "Gain 55%"
         assert win._gain_lbl.text() == "Max Gain: 55%"
+
+        win._max_gain_spin.setValue(100)
+        app.processEvents()
+
+        assert win._max_gain_spin.value() == 80
+        assert win.pilot_svc.max_gain == pytest.approx(0.8)
+        assert win.pilot_svc.current_modes()["max_gain"] == pytest.approx(0.8)
+        assert win.pilot_telemetry_column.rov_gain_indicator.value == pytest.approx(0.8)
+        assert win._max_gain_btn.text() == "Gain 80%"
+
+        for _ in range(10):
+            win.eventFilter(win, QKeyEvent(QEvent.Type.KeyPress, Qt.Key.Key_Plus, Qt.KeyboardModifier.NoModifier, "+"))
+            win.eventFilter(win, QKeyEvent(QEvent.Type.KeyRelease, Qt.Key.Key_Plus, Qt.KeyboardModifier.NoModifier, "+"))
+        app.processEvents()
+
+        assert win.pilot_svc.max_gain == pytest.approx(0.8)
+        assert win.pilot_telemetry_column.rov_gain_indicator.value == pytest.approx(0.8)
+        assert win._max_gain_btn.text() == "Gain 80%"
+
+        win._refresh_gain_indicators_from_modes({"max_gain": 1.0})
+        assert win.pilot_telemetry_column.rov_gain_indicator.value == pytest.approx(0.8)
     finally:
         win.close()
         app.processEvents()

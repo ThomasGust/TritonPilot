@@ -1905,10 +1905,13 @@ class MainWindow(QMainWindow):
         column = getattr(self, "pilot_telemetry_column", None)
         if column is None:
             return
+        rov_gain = (modes or {}).get("max_gain")
+        if rov_gain is not None:
+            rov_gain = self._clamp_rov_gain(rov_gain)
         try:
             column.set_gains(
                 back=(modes or {}).get("back_gripper_gain", (modes or {}).get("t200_wrist_gain")),
-                rov=(modes or {}).get("max_gain"),
+                rov=rov_gain,
                 arm=(modes or {}).get("arm_gain"),
             )
         except Exception:
@@ -1938,6 +1941,14 @@ class MainWindow(QMainWindow):
             lo, hi = hi, lo
         step = max(1, self._gain_percent(_svc_value("max_gain_step", 0.05)))
         return lo, hi, step
+
+    def _clamp_rov_gain(self, gain):
+        try:
+            value = float(gain)
+        except Exception:
+            return None
+        lo, hi, _step = self._max_gain_percent_bounds()
+        return max(float(lo) / 100.0, min(float(hi) / 100.0, value))
 
     def _make_max_gain_control(self) -> QToolButton:
         btn = QToolButton()
@@ -1990,6 +2001,9 @@ class MainWindow(QMainWindow):
                 gain = self.pilot_svc.current_max_gain()
             except Exception:
                 gain = None
+        if gain is None:
+            return
+        gain = self._clamp_rov_gain(gain)
         if gain is None:
             return
 

@@ -218,6 +218,49 @@ def test_arm_and_max_gains_are_exposed_in_modes(monkeypatch):
     assert svc.current_max_gain() < start_max
 
 
+def test_max_gain_is_clamped_before_publish(monkeypatch):
+    monkeypatch.setattr("input.pilot_service.time.sleep", lambda *_args, **_kwargs: None)
+
+    svc = PilotPublisherService(endpoint="inproc://max_gain_clamp_test", rate_hz=30.0, deadzone=0.0, debug=False)
+    max_gain = svc.max_gain_max()
+
+    assert svc.set_max_gain(max_gain + 1.0) is True
+    assert svc.current_max_gain() == pytest.approx(max_gain)
+    assert svc.current_modes()["max_gain"] == pytest.approx(max_gain)
+
+    assert svc.adjust_max_gain(+svc.max_gain_step()) is False
+    assert svc.current_max_gain() == pytest.approx(max_gain)
+
+    frame = svc._build_frame(
+        0.0,
+        ControllerSnapshot(
+            lx=0.0,
+            ly=0.0,
+            rx=0.0,
+            ry=0.0,
+            lt=0.0,
+            rt=0.0,
+            dpad=(0, 0),
+            a=False,
+            b=False,
+            x=False,
+            y=True,
+            lb=False,
+            rb=False,
+            win=False,
+            menu=False,
+            lstick=False,
+            rstick=False,
+        ),
+    )
+    edges = dict(frame.edges or {})
+    edges.update(svc._compute_edges(svc._prev_buttons, frame.buttons))
+    svc._handle_mode_edges(edges)
+    frame.edges = dict(edges)
+    frame.modes = svc.current_modes()
+    assert frame.modes["max_gain"] == pytest.approx(max_gain)
+
+
 def test_hold_modes_are_exposed_and_toggleable(monkeypatch):
     monkeypatch.setattr("input.pilot_service.time.sleep", lambda *_args, **_kwargs: None)
 
