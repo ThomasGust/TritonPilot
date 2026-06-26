@@ -258,6 +258,7 @@ $env:TRITON_ARM_STICK_WRIST_INVERT="1.0"
 $env:TRITON_ARM_PARK_SHORTCUT="A"
 $env:TRITON_ARM_PARK_PITCH="-1.0"
 $env:TRITON_ARM_PARK_WRIST="1.0"
+$env:TRITON_ARM_PARK_RATE="0.80"
 ```
 
 `TRITON_ARM_RATE` controls how quickly the modifier-held right stick walks the arm
@@ -266,10 +267,12 @@ target, in normalized command units per second at 100% ARM gain.
 the modifier-held controller stick path; TritonOS absolute pitch geometry is
 unchanged. Keyboard `A` commands the Pilot-side park target. `TRITON_ARM_PARK_*`
 sets the startup fallback for that shortcut; Vehicle Setup refreshes it from the
-ROV's `GRIPPER_ARM_*` / `GRIPPER_DISARM_*` config when connected. Keyboard
-`W`/`S`/`D` are not bound to manipulator motion. Geometry knobs such as servo
-range, pitch span, and pitch neutral are onboard TritonOS settings; the Vehicle
-Setup page can stream and save those values while tuning.
+ROV's `GRIPPER_ARM_*` / `GRIPPER_DISARM_*` config when connected.
+`TRITON_ARM_PARK_RATE` controls how slowly that explicit park command walks the
+Pilot-side arm target. Keyboard `W`/`S`/`D` are not bound to manipulator motion.
+Geometry knobs such as servo range, pitch span, and pitch neutral are onboard
+TritonOS settings; the Vehicle Setup page can stream and save those values while
+tuning.
 
 The live gain values are transmitted in `PilotFrame.modes`. TritonOS decides how
 they map to actuator output.

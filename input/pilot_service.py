@@ -99,6 +99,7 @@ class PilotPublisherService:
             ARM_INIT_PITCH,
             ARM_INIT_WRIST,
             ARM_PARK_PITCH,
+            ARM_PARK_RATE,
             ARM_PARK_WRIST,
             ARM_RATE,
             ARM_STICK_DEADZONE,
@@ -222,6 +223,9 @@ class PilotPublisherService:
         self._arm_wrist = self._clamp_unit(ARM_INIT_WRIST)
         self._arm_park_pitch = self._clamp_unit(ARM_PARK_PITCH)
         self._arm_park_wrist = self._clamp_unit(ARM_PARK_WRIST)
+        self._arm_park_rate = max(0.0, float(ARM_PARK_RATE))
+        self._arm_park_active = False
+        self._arm_inputs_enabled = True
         self._arm_kb_pitch_dir = 0.0
         self._arm_kb_wrist_dir = 0.0
         self._arm_last_t: Optional[float] = None
@@ -466,11 +470,20 @@ class PilotPublisherService:
             return float(self._arm_park_pitch), float(self._arm_park_wrist)
 
     def park_arm(self) -> tuple[float, float]:
-        """Command the differential arm to the configured park target."""
+        """Start walking the differential arm toward the configured park target."""
         with self._arm_lock:
-            pitch = float(self._arm_park_pitch)
-            wrist = float(self._arm_park_wrist)
-        return self.set_arm_position(pitch, wrist)
+            self._arm_park_active = True
+            self._arm_kb_pitch_dir = 0.0
+            self._arm_kb_wrist_dir = 0.0
+            return float(self._arm_park_pitch), float(self._arm_park_wrist)
+
+    def set_arm_inputs_enabled(self, enabled: bool) -> None:
+        """Enable/disable live arm inputs such as the modifier-held controller stick."""
+        with self._arm_lock:
+            self._arm_inputs_enabled = bool(enabled)
+            if not self._arm_inputs_enabled:
+                self._arm_kb_pitch_dir = 0.0
+                self._arm_kb_wrist_dir = 0.0
 
     def set_arm_position(self, pitch: float, wrist: float) -> tuple[float, float]:
         """Set the absolute differential-arm target in [-1, 1].
@@ -483,6 +496,7 @@ class PilotPublisherService:
             self._arm_wrist = self._clamp_unit(wrist)
             self._arm_kb_pitch_dir = 0.0
             self._arm_kb_wrist_dir = 0.0
+            self._arm_park_active = False
             return float(self._arm_pitch), float(self._arm_wrist)
 
     @staticmethod
@@ -496,10 +510,40 @@ class PilotPublisherService:
         sign = 1.0 if x > 0 else -1.0
         return sign * min(1.0, (abs(x) - dz) / span)
 
+    @staticmethod
+    def _move_toward(current: float, target: float, max_delta: float) -> float:
+        cur = float(current)
+        tgt = float(target)
+        step = max(0.0, float(max_delta))
+        if abs(tgt - cur) <= step:
+            return tgt
+        return cur + step if tgt > cur else cur - step
+
     def _integrate_arm(self, snap: ControllerSnapshot, modifier_held: bool, dt: float) -> tuple[float, float]:
         """Advance the arm position from modifier-gated stick intent."""
+        dt_s = max(0.0, min(0.1, float(dt)))
+        with self._arm_lock:
+            park_active = bool(self._arm_park_active)
+            inputs_enabled = bool(self._arm_inputs_enabled)
+            park_pitch = float(self._arm_park_pitch)
+            park_wrist = float(self._arm_park_wrist)
+            park_rate = float(self._arm_park_rate)
+
+        if park_active:
+            max_delta = park_rate * dt_s
+            with self._arm_lock:
+                if park_rate <= 0.0:
+                    self._arm_pitch = self._clamp_unit(park_pitch)
+                    self._arm_wrist = self._clamp_unit(park_wrist)
+                elif dt_s > 0.0:
+                    self._arm_pitch = self._clamp_unit(self._move_toward(self._arm_pitch, park_pitch, max_delta))
+                    self._arm_wrist = self._clamp_unit(self._move_toward(self._arm_wrist, park_wrist, max_delta))
+                if abs(self._arm_pitch - park_pitch) < 1e-6 and abs(self._arm_wrist - park_wrist) < 1e-6:
+                    self._arm_park_active = False
+                return float(self._arm_pitch), float(self._arm_wrist)
+
         sp = sw = 0.0
-        if modifier_held:
+        if inputs_enabled and modifier_held:
             try:
                 pv = float(getattr(snap, self._arm_stick_pitch_axis, 0.0) or 0.0)
             except Exception:
@@ -519,7 +563,7 @@ class PilotPublisherService:
         except Exception:
             gain = 1.0
         gain = max(0.0, min(1.0, gain))
-        step = float(self._arm_rate) * gain * max(0.0, min(0.1, float(dt)))
+        step = float(self._arm_rate) * gain * dt_s
 
         with self._arm_lock:
             self._arm_pitch = self._clamp_unit(self._arm_pitch + pitch_intent * step)

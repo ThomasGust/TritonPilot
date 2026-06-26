@@ -74,6 +74,7 @@ def test_arm_tuning_controls_load_and_save_rov_config(monkeypatch):
                 "commands": ["get_state", "set_config"],
                 "config_path": "rov_config.py",
                 "references": {},
+                "runtime": {"armed": True},
                 "config": {
                     "GRIPPER_LEFT_INVERT": 1.0,
                     "GRIPPER_RIGHT_INVERT": -1.0,
@@ -158,6 +159,7 @@ def test_arm_alignment_pose_compensates_axis_inverts(monkeypatch):
                 "commands": ["get_state", "set_config"],
                 "config_path": "rov_config.py",
                 "references": {},
+                "runtime": {"armed": True},
                 "config": {
                     "GRIPPER_PITCH_INVERT": -1.0,
                     "GRIPPER_YAW_INVERT": -1.0,
@@ -178,6 +180,32 @@ def test_arm_alignment_pose_compensates_axis_inverts(monkeypatch):
         app.processEvents()
 
 
+def test_arm_alignment_pose_is_blocked_when_disarmed(monkeypatch):
+    app = _app()
+    monkeypatch.setattr(management_page, "ManagementRpcService", _FakeManagementRpcService)
+
+    pilot = _FakePilotService()
+    page = management_page.ManagementPage(endpoint="inproc://arm-align-disarmed-test", pilot_svc=pilot)
+    try:
+        page._apply_state(
+            {
+                "commands": ["get_state", "set_config"],
+                "config_path": "rov_config.py",
+                "references": {},
+                "runtime": {"armed": False},
+                "config": {},
+            }
+        )
+
+        assert page._send_arm_alignment_pose("flat_wrist_90") is False
+        assert pilot.positions == []
+        assert "disarmed" in page.feedback_label.text()
+    finally:
+        page.shutdown()
+        page.close()
+        app.processEvents()
+
+
 def test_arm_park_pose_loads_commands_and_saves_rov_config(monkeypatch):
     app = _app()
     monkeypatch.setattr(management_page, "ManagementRpcService", _FakeManagementRpcService)
@@ -190,6 +218,7 @@ def test_arm_park_pose_loads_commands_and_saves_rov_config(monkeypatch):
                 "commands": ["get_state", "set_config"],
                 "config_path": "rov_config.py",
                 "references": {},
+                "runtime": {"armed": True},
                 "config": {
                     "GRIPPER_PITCH_INVERT": -1.0,
                     "GRIPPER_YAW_INVERT": 1.0,

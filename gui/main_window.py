@@ -1601,6 +1601,10 @@ class MainWindow(QMainWindow):
             on_status=self._on_pilot_status_from_thread,
             on_send=self._on_pilot_msg_from_thread,
         )
+        try:
+            self.pilot_svc.set_arm_inputs_enabled(False)
+        except Exception:
+            pass
         self.pilot_svc.start()
         self._reverse_enabled = bool(self.pilot_svc.is_reverse_enabled())
 
@@ -2516,6 +2520,11 @@ class MainWindow(QMainWindow):
             self._prev_hb_rx_ts = now_ts
             self._last_hb_ts = now_ts
             self._last_hb = msg
+            if "armed" in msg:
+                try:
+                    self.pilot_svc.set_arm_inputs_enabled(bool(msg.get("armed", False)))
+                except Exception:
+                    pass
             self._refresh_arm_disarm_button()
         elif typ == "net" or msg.get("sensor") == "network":
             self._last_net_ts = time.time()

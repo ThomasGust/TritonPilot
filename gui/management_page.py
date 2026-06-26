@@ -587,6 +587,11 @@ class ManagementPage(QWidget):
             self._set_feedback("Arm alignment poses need the live pilot publisher.", tone="error")
             return False
 
+        runtime = dict((self._last_state or {}).get("runtime") or {})
+        if runtime.get("armed") is not True:
+            self._set_feedback("Arm alignment poses are disabled while the ROV is disarmed.", tone="error")
+            return False
+
         pose = self._arm_alignment_pose_degrees(pose_key)
         if pose is None:
             self._set_feedback(f"Unknown arm alignment pose: {pose_key}", tone="error")
@@ -615,9 +620,6 @@ class ManagementPage(QWidget):
         )
         self.arm_alignment_status_label.setText(status)
 
-        runtime = dict((self._last_state or {}).get("runtime") or {})
-        if runtime.get("armed") is False:
-            status += " | ROV is reported disarmed; the target will apply when armed."
         self._set_feedback(status, tone="info")
         return True
 

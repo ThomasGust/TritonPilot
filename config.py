@@ -420,6 +420,7 @@ ARM_INIT_WRIST = float(os.environ.get("TRITON_ARM_INIT_WRIST", "1.0"))
 ARM_PARK_SHORTCUT = os.environ.get("TRITON_ARM_PARK_SHORTCUT", "A").strip() or "A"
 ARM_PARK_PITCH = float(os.environ.get("TRITON_ARM_PARK_PITCH", "-1.0"))
 ARM_PARK_WRIST = float(os.environ.get("TRITON_ARM_PARK_WRIST", "1.0"))
+ARM_PARK_RATE = float(os.environ.get("TRITON_ARM_PARK_RATE", "0.80"))
 
 
 # Legacy topside walk-target display settings. Current depth-hold manual

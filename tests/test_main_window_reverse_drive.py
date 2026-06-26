@@ -48,6 +48,7 @@ class _FakePilotService:
         self.arm_kb_pitch_dir = 0.0
         self.arm_kb_wrist_dir = 0.0
         self.arm_kb_intent_calls = []
+        self.arm_inputs_enabled_calls = []
         self.arm_park_pitch = -1.0
         self.arm_park_wrist = 1.0
         self.arm_position_calls = []
@@ -134,6 +135,10 @@ class _FakePilotService:
     def clear_arm_keyboard_intent(self):
         self.arm_kb_pitch_dir = 0.0
         self.arm_kb_wrist_dir = 0.0
+        return None
+
+    def set_arm_inputs_enabled(self, enabled):
+        self.arm_inputs_enabled_calls.append(bool(enabled))
         return None
 
     def arm_position(self):
@@ -1384,8 +1389,10 @@ def test_arm_disarm_backup_controls_queue_menu_edge(monkeypatch, tmp_path):
 
         win._handle_sensor_msg_on_ui({"type": "heartbeat", "sensor": "heartbeat", "armed": False})
         assert win._arm_disarm_btn.text() == "Arm (O)"
+        assert win.pilot_svc.arm_inputs_enabled_calls[-1] is False
         win._handle_sensor_msg_on_ui({"type": "heartbeat", "sensor": "heartbeat", "armed": True})
         assert win._arm_disarm_btn.text() == "Disarm (O)"
+        assert win.pilot_svc.arm_inputs_enabled_calls[-1] is True
     finally:
         win.close()
         app.processEvents()
