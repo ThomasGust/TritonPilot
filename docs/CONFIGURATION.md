@@ -234,6 +234,9 @@ $env:TRITON_PILOT_MAX_GAIN_MAX="0.80"
 $env:TRITON_PILOT_MAX_GAIN_STEP="0.05"
 ```
 
+TritonOS uses this value both as a pre-mix motion scale and as a final mixed
+thruster-output cap, bounded by its configured `THRUSTER_MAX_ABS`.
+
 Back rotating gripper gain:
 
 ```powershell
