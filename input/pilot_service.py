@@ -373,13 +373,15 @@ class PilotPublisherService:
         """Set one live arm-tuning override (streamed in modes["arm_tune"]).
 
         The ROV applies these per-frame on top of its rov_config defaults, so
-        inverts / neutral / range can be dialed in without a TritonOS restart.
+        inverts, neutral/range values, and axis limits can be dialed in without
+        a TritonOS restart.
         Pass ``value=None`` to clear that key (fall back to rov_config).
         """
         valid = {
             "left_invert", "right_invert", "pitch_invert", "yaw_invert",
             "pitch_neutral_deg", "wrist_neutral_deg", "servo_range_deg",
             "pitch_span_deg", "wrist_span_deg",
+            "pitch_min", "pitch_max", "yaw_min", "yaw_max",
         }
         k = str(key or "").strip()
         if k not in valid:

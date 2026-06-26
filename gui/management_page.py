@@ -145,6 +145,10 @@ class ManagementPage(QWidget):
             "pitch_neutral_deg": 45.0,
             "wrist_span_deg": 90.0,
             "wrist_neutral_deg": 45.0,
+            "pitch_min": -1.0,
+            "pitch_max": 1.0,
+            "yaw_min": -1.0,
+            "yaw_max": 1.0,
             "servo_center_us": 1500.0,
             "servo_pulse_halfspan_us": 800.0,
             "park_pitch": -1.0,
@@ -361,12 +365,16 @@ class ManagementPage(QWidget):
         form.setContentsMargins(0, 6, 0, 0)
         form.setSpacing(8)
         spin_specs = [
-            ("servo_range_deg", "Servo range", 30.0, 120.0, 100.0),
-            ("pitch_span_deg", "Pitch span", 30.0, 140.0, 90.0),
-            ("pitch_neutral_deg", "Pitch neutral", 0.0, 140.0, 45.0),
+            ("servo_range_deg", "Servo range", 30.0, 120.0, 1.0, 1, " deg", 100.0),
+            ("pitch_span_deg", "Pitch span", 30.0, 140.0, 1.0, 1, " deg", 90.0),
+            ("pitch_neutral_deg", "Pitch neutral", 0.0, 140.0, 1.0, 1, " deg", 45.0),
+            ("pitch_min", "Pitch min", -1.0, 1.0, 0.05, 2, "", -1.0),
+            ("pitch_max", "Pitch max", -1.0, 1.0, 0.05, 2, "", 1.0),
+            ("yaw_min", "Wrist roll min", -1.0, 1.0, 0.05, 2, "", -1.0),
+            ("yaw_max", "Wrist roll max", -1.0, 1.0, 0.05, 2, "", 1.0),
         ]
-        for key, label, minimum, maximum, default in spin_specs:
-            spin = self._make_spinbox(minimum, maximum, 1.0, 1, suffix=" deg")
+        for key, label, minimum, maximum, step, decimals, suffix, default in spin_specs:
+            spin = self._make_spinbox(minimum, maximum, step, decimals, suffix=suffix)
             self._set_spin_value(spin, default)
             spin.valueChanged.connect(lambda v, k=key: self._on_arm_tune_value(k, v))
             self._arm_tune_spins[key] = spin
@@ -477,6 +485,14 @@ class ManagementPage(QWidget):
         self._set_feedback("Arm tuning overrides cleared; controls restored to ROV config values.", tone="info")
 
     def _save_arm_tune_config(self) -> None:
+        pitch_min, pitch_max = self._ordered_norm_pair(
+            self._arm_tune_spins["pitch_min"].value(),
+            self._arm_tune_spins["pitch_max"].value(),
+        )
+        yaw_min, yaw_max = self._ordered_norm_pair(
+            self._arm_tune_spins["yaw_min"].value(),
+            self._arm_tune_spins["yaw_max"].value(),
+        )
         updates = {
             "GRIPPER_LEFT_INVERT": -1.0 if self._arm_tune_checks["left_invert"].isChecked() else 1.0,
             "GRIPPER_RIGHT_INVERT": -1.0 if self._arm_tune_checks["right_invert"].isChecked() else 1.0,
@@ -485,6 +501,10 @@ class ManagementPage(QWidget):
             "GRIPPER_SERVO_RANGE_DEG": float(self._arm_tune_spins["servo_range_deg"].value()),
             "GRIPPER_PITCH_SPAN_DEG": float(self._arm_tune_spins["pitch_span_deg"].value()),
             "GRIPPER_PITCH_NEUTRAL_DEG": float(self._arm_tune_spins["pitch_neutral_deg"].value()),
+            "GRIPPER_PITCH_MIN": pitch_min,
+            "GRIPPER_PITCH_MAX": pitch_max,
+            "GRIPPER_YAW_MIN": yaw_min,
+            "GRIPPER_YAW_MAX": yaw_max,
         }
         self._queue_request("set_config", {"updates": updates}, request_meta={"refresh_after_success": True})
 
@@ -499,8 +519,9 @@ class ManagementPage(QWidget):
     def _arm_park_command_values(self) -> tuple[float, float, float, float]:
         park_pitch, park_wrist = self._current_arm_park_norm()
         geom = self._current_arm_geometry()
-        pitch_cmd = self._axis_command_for_invert(park_pitch, geom["pitch_invert"])
-        wrist_cmd = self._axis_command_for_invert(park_wrist, geom["yaw_invert"])
+        command_pitch, command_wrist = self._apply_arm_position_limits(park_pitch, park_wrist, geom)
+        pitch_cmd = self._axis_command_for_invert(command_pitch, geom["pitch_invert"])
+        wrist_cmd = self._axis_command_for_invert(command_wrist, geom["yaw_invert"])
         return park_pitch, park_wrist, pitch_cmd, wrist_cmd
 
     def _sync_pilot_arm_park_pose(self) -> tuple[float, float] | None:
@@ -600,6 +621,7 @@ class ManagementPage(QWidget):
         label, pitch_deg, wrist_deg = pose
         geom = self._current_arm_geometry()
         pitch_norm, wrist_norm = self._arm_pose_norms(pitch_deg, wrist_deg, geom)
+        pitch_norm, wrist_norm = self._apply_arm_position_limits(pitch_norm, wrist_norm, geom)
         pitch_cmd = self._axis_command_for_invert(pitch_norm, geom["pitch_invert"])
         wrist_cmd = self._axis_command_for_invert(wrist_norm, geom["yaw_invert"])
 
@@ -641,6 +663,12 @@ class ManagementPage(QWidget):
         def cfg_float(cfg_key: str, default_key: str) -> float:
             return self._float_or_default(config.get(cfg_key), defaults[default_key])
 
+        def spin_or_cfg(spin_key: str, cfg_key: str, default_key: str) -> float:
+            spin = self._arm_tune_spins.get(spin_key)
+            if spin is not None:
+                return float(spin.value())
+            return cfg_float(cfg_key, default_key)
+
         center_us = cfg_float("GRIPPER_SERVO_CENTER_US", "servo_center_us")
         pulse_halfspan = config.get("GRIPPER_SERVO_PULSE_HALFSPAN_US")
         if pulse_halfspan is None:
@@ -650,6 +678,15 @@ class ManagementPage(QWidget):
                 pulse_halfspan = max(abs(float(center_us) - float(min_us)), abs(float(max_us) - float(center_us)))
             except Exception:
                 pulse_halfspan = defaults["servo_pulse_halfspan_us"]
+
+        pitch_min, pitch_max = self._ordered_norm_pair(
+            spin_or_cfg("pitch_min", "GRIPPER_PITCH_MIN", "pitch_min"),
+            spin_or_cfg("pitch_max", "GRIPPER_PITCH_MAX", "pitch_max"),
+        )
+        yaw_min, yaw_max = self._ordered_norm_pair(
+            spin_or_cfg("yaw_min", "GRIPPER_YAW_MIN", "yaw_min"),
+            spin_or_cfg("yaw_max", "GRIPPER_YAW_MAX", "yaw_max"),
+        )
 
         return {
             "left_invert": -1.0 if self._arm_tune_checks["left_invert"].isChecked() else 1.0,
@@ -661,6 +698,10 @@ class ManagementPage(QWidget):
             "pitch_neutral_deg": float(self._arm_tune_spins["pitch_neutral_deg"].value()),
             "wrist_span_deg": cfg_float("GRIPPER_WRIST_SPAN_DEG", "wrist_span_deg"),
             "wrist_neutral_deg": cfg_float("GRIPPER_WRIST_NEUTRAL_DEG", "wrist_neutral_deg"),
+            "pitch_min": pitch_min,
+            "pitch_max": pitch_max,
+            "yaw_min": yaw_min,
+            "yaw_max": yaw_max,
             "servo_center_us": float(center_us),
             "servo_pulse_halfspan_us": self._float_or_default(pulse_halfspan, defaults["servo_pulse_halfspan_us"]),
         }
@@ -683,6 +724,16 @@ class ManagementPage(QWidget):
         if abs(inv) < 1e-6:
             inv = 1.0
         return max(-1.0, min(1.0, float(position_norm) / inv))
+
+    @classmethod
+    def _apply_arm_position_limits(
+        cls, pitch_norm: float, wrist_norm: float, geom: dict[str, float]
+    ) -> tuple[float, float]:
+        pitch_min, pitch_max = cls._ordered_norm_pair(geom.get("pitch_min", -1.0), geom.get("pitch_max", 1.0))
+        yaw_min, yaw_max = cls._ordered_norm_pair(geom.get("yaw_min", -1.0), geom.get("yaw_max", 1.0))
+        pitch = max(pitch_min, min(pitch_max, float(pitch_norm)))
+        wrist = max(yaw_min, min(yaw_max, float(wrist_norm)))
+        return pitch, wrist
 
     @staticmethod
     def _diff_mix_norm_for_geometry(pitch_norm: float, wrist_norm: float, geom: dict[str, float]) -> tuple[float, float]:
@@ -993,6 +1044,14 @@ class ManagementPage(QWidget):
         except Exception:
             return float(default)
 
+    @classmethod
+    def _ordered_norm_pair(cls, minimum, maximum) -> tuple[float, float]:
+        lo = max(-1.0, min(1.0, cls._float_or_default(minimum, -1.0)))
+        hi = max(-1.0, min(1.0, cls._float_or_default(maximum, 1.0)))
+        if lo > hi:
+            lo, hi = hi, lo
+        return lo, hi
+
     @staticmethod
     def _set_check_value(check: QCheckBox, checked: bool) -> None:
         prev = check.blockSignals(True)
@@ -1021,6 +1080,10 @@ class ManagementPage(QWidget):
             "servo_range_deg": "GRIPPER_SERVO_RANGE_DEG",
             "pitch_span_deg": "GRIPPER_PITCH_SPAN_DEG",
             "pitch_neutral_deg": "GRIPPER_PITCH_NEUTRAL_DEG",
+            "pitch_min": "GRIPPER_PITCH_MIN",
+            "pitch_max": "GRIPPER_PITCH_MAX",
+            "yaw_min": "GRIPPER_YAW_MIN",
+            "yaw_max": "GRIPPER_YAW_MAX",
         }
         for tune_key, cfg_key in spin_map.items():
             spin = self._arm_tune_spins.get(tune_key)

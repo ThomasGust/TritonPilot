@@ -117,7 +117,8 @@ ROV-side configuration. Treat it as a live vehicle tool:
 - Arm Tuning includes alignment pose buttons for the differential arm. `Servo
   Center` is the existing neutral mount pose; `Flat / Wrist 90` and `Flat /
   Wrist 0` command easier flat-pitch physical references through the normal
-  pilot stream.
+  pilot stream. The pitch and wrist-roll min/max fields limit normalized arm
+  position commands before they are mixed on the ROV.
 - The park-pose controls edit the normalized TritonOS `GRIPPER_ARM_*` and
   `GRIPPER_DISARM_*` pose. Keyboard `A` walks the same pose through the normal
   pilot stream, and non-park alignment commands require the ROV to be armed.

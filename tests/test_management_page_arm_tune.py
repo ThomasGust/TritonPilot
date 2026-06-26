@@ -82,6 +82,10 @@ def test_arm_tuning_controls_load_and_save_rov_config(monkeypatch):
                     "GRIPPER_YAW_INVERT": 1.0,
                     "GRIPPER_PITCH_SPAN_DEG": 90.0,
                     "GRIPPER_PITCH_NEUTRAL_DEG": 45.0,
+                    "GRIPPER_PITCH_MIN": -0.80,
+                    "GRIPPER_PITCH_MAX": 0.60,
+                    "GRIPPER_YAW_MIN": -0.25,
+                    "GRIPPER_YAW_MAX": 0.70,
                 },
             }
         )
@@ -91,6 +95,10 @@ def test_arm_tuning_controls_load_and_save_rov_config(monkeypatch):
         assert page._arm_tune_spins["servo_range_deg"].value() == 100.0
         assert page._arm_tune_spins["pitch_span_deg"].value() == 90.0
         assert page._arm_tune_spins["pitch_neutral_deg"].value() == 45.0
+        assert page._arm_tune_spins["pitch_min"].value() == pytest.approx(-0.80)
+        assert page._arm_tune_spins["pitch_max"].value() == pytest.approx(0.60)
+        assert page._arm_tune_spins["yaw_min"].value() == pytest.approx(-0.25)
+        assert page._arm_tune_spins["yaw_max"].value() == pytest.approx(0.70)
         assert pilot.tune_calls == []
 
         page._save_arm_tune_config()
@@ -99,6 +107,10 @@ def test_arm_tuning_controls_load_and_save_rov_config(monkeypatch):
         assert args["updates"]["GRIPPER_RIGHT_INVERT"] == -1.0
         assert args["updates"]["GRIPPER_PITCH_SPAN_DEG"] == 90.0
         assert args["updates"]["GRIPPER_PITCH_NEUTRAL_DEG"] == 45.0
+        assert args["updates"]["GRIPPER_PITCH_MIN"] == pytest.approx(-0.80)
+        assert args["updates"]["GRIPPER_PITCH_MAX"] == pytest.approx(0.60)
+        assert args["updates"]["GRIPPER_YAW_MIN"] == pytest.approx(-0.25)
+        assert args["updates"]["GRIPPER_YAW_MAX"] == pytest.approx(0.70)
     finally:
         page.shutdown()
         page.close()
@@ -248,6 +260,41 @@ def test_arm_park_pose_loads_commands_and_saves_rov_config(monkeypatch):
             "GRIPPER_ARM_PITCH": -0.25,
             "GRIPPER_ARM_YAW": 1.0,
         }
+    finally:
+        page.shutdown()
+        page.close()
+        app.processEvents()
+
+
+def test_arm_park_pose_command_respects_configured_limits(monkeypatch):
+    app = _app()
+    monkeypatch.setattr(management_page, "ManagementRpcService", _FakeManagementRpcService)
+
+    pilot = _FakePilotService()
+    page = management_page.ManagementPage(endpoint="inproc://arm-park-limit-test", pilot_svc=pilot)
+    try:
+        page._apply_state(
+            {
+                "commands": ["get_state", "set_config"],
+                "config_path": "rov_config.py",
+                "references": {},
+                "runtime": {"armed": True},
+                "config": {
+                    "GRIPPER_PITCH_INVERT": 1.0,
+                    "GRIPPER_YAW_INVERT": 1.0,
+                    "GRIPPER_ARM_PITCH": 1.0,
+                    "GRIPPER_ARM_YAW": 1.0,
+                    "GRIPPER_PITCH_MIN": -0.50,
+                    "GRIPPER_PITCH_MAX": 0.25,
+                    "GRIPPER_YAW_MIN": -0.25,
+                    "GRIPPER_YAW_MAX": 0.50,
+                },
+            }
+        )
+
+        assert pilot.park_positions[-1] == pytest.approx((0.25, 0.50))
+        assert page._send_arm_park_pose() is True
+        assert pilot.positions[-1] == pytest.approx((0.25, 0.50))
     finally:
         page.shutdown()
         page.close()

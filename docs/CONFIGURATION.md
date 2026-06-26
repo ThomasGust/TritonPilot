@@ -272,7 +272,9 @@ ROV's `GRIPPER_ARM_*` / `GRIPPER_DISARM_*` config when connected.
 Pilot-side arm target. Keyboard `W`/`S`/`D` are not bound to manipulator motion.
 Geometry knobs such as servo range, pitch span, and pitch neutral are onboard
 TritonOS settings; the Vehicle Setup page can stream and save those values while
-tuning.
+tuning. The same page also streams and saves normalized pitch and wrist-roll
+limits (`GRIPPER_PITCH_MIN/MAX`, `GRIPPER_YAW_MIN/MAX`) so the ROV clamps arm
+position commands before differential mixing.
 
 The live gain values are transmitted in `PilotFrame.modes`. TritonOS decides how
 they map to actuator output.
