@@ -2021,6 +2021,17 @@ class MainWindow(QMainWindow):
             3000,
         )
 
+    def _snap_arm_control_to_park(self) -> None:
+        try:
+            if hasattr(self.pilot_svc, "snap_arm_to_park"):
+                self.pilot_svc.snap_arm_to_park()
+                return
+            if hasattr(self.pilot_svc, "arm_park_position") and hasattr(self.pilot_svc, "set_arm_position"):
+                pitch, wrist = self.pilot_svc.arm_park_position()
+                self.pilot_svc.set_arm_position(pitch, wrist)
+        except Exception:
+            pass
+
     def _release_keyboard_vehicle_controls(self) -> None:
         """Neutralize keyboard-only vehicle controls when focus belongs to text input."""
         if not self._servo_wrist_keys_down:
@@ -2522,7 +2533,10 @@ class MainWindow(QMainWindow):
             self._last_hb = msg
             if "armed" in msg:
                 try:
-                    self.pilot_svc.set_arm_inputs_enabled(bool(msg.get("armed", False)))
+                    armed = bool(msg.get("armed", False))
+                    self.pilot_svc.set_arm_inputs_enabled(armed)
+                    if not armed:
+                        self._snap_arm_control_to_park()
                 except Exception:
                     pass
             self._refresh_arm_disarm_button()

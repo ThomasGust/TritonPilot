@@ -269,7 +269,10 @@ unchanged. Keyboard `A` commands the Pilot-side park target. `TRITON_ARM_PARK_*`
 sets the startup fallback for that shortcut; Vehicle Setup refreshes it from the
 ROV's `GRIPPER_ARM_*` / `GRIPPER_DISARM_*` config when connected.
 `TRITON_ARM_PARK_RATE` controls how slowly that explicit park command walks the
-Pilot-side arm target. Keyboard `W`/`S`/`D` are not bound to manipulator motion.
+Pilot-side arm target. Arm/disarm edge frames immediately report that same park
+pose as the held arm command, while TritonOS performs the slow physical park
+move, so re-arming does not snap back to the previous target. Keyboard
+`W`/`S`/`D` are not bound to manipulator motion.
 Geometry knobs such as servo range, pitch span, and pitch neutral are onboard
 TritonOS settings; the Vehicle Setup page can stream and save those values while
 tuning. The same page also streams and saves normalized pitch and wrist-roll

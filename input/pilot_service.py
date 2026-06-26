@@ -92,6 +92,7 @@ class PilotPublisherService:
         # --- modes / toggles ----------------------------------------------
         from config import (
             ARM_AIM_MODIFIER_BUTTON,
+            ARM_DISARM_TOGGLE_EDGE,
             ARM_GAIN_DEFAULT,
             ARM_GAIN_MAX,
             ARM_GAIN_MIN,
@@ -136,6 +137,7 @@ class PilotPublisherService:
         self._yaw_hold_toggle_button = str(YAW_HOLD_TOGGLE_BUTTON or "").strip().lower()
         self._lights_toggle_button = str(LIGHTS_TOGGLE_BUTTON or "").strip().lower()
         self._lights_toggle_edge = str(LIGHTS_TOGGLE_EDGE or "lights").strip().lower() or "lights"
+        self._arm_disarm_edge = str(ARM_DISARM_TOGGLE_EDGE or "menu").strip().lower() or "menu"
         self._reverse_toggle_button = str(REVERSE_TOGGLE_BUTTON or "").strip().lower()
         self._mode_lock = threading.Lock()
 
@@ -479,6 +481,16 @@ class PilotPublisherService:
             self._arm_kb_wrist_dir = 0.0
             return float(self._arm_park_pitch), float(self._arm_park_wrist)
 
+    def snap_arm_to_park(self) -> tuple[float, float]:
+        """Set the held arm command to park without walking the pilot target."""
+        with self._arm_lock:
+            self._arm_pitch = self._clamp_unit(self._arm_park_pitch)
+            self._arm_wrist = self._clamp_unit(self._arm_park_wrist)
+            self._arm_kb_pitch_dir = 0.0
+            self._arm_kb_wrist_dir = 0.0
+            self._arm_park_active = False
+            return float(self._arm_pitch), float(self._arm_wrist)
+
     def set_arm_inputs_enabled(self, enabled: bool) -> None:
         """Enable/disable live arm inputs such as the modifier-held controller stick."""
         with self._arm_lock:
@@ -521,8 +533,18 @@ class PilotPublisherService:
             return tgt
         return cur + step if tgt > cur else cur - step
 
-    def _integrate_arm(self, snap: ControllerSnapshot, modifier_held: bool, dt: float) -> tuple[float, float]:
+    def _integrate_arm(
+        self,
+        snap: ControllerSnapshot,
+        modifier_held: bool,
+        dt: float,
+        *,
+        force_park: bool = False,
+    ) -> tuple[float, float]:
         """Advance the arm position from modifier-gated stick intent."""
+        if force_park:
+            return self.snap_arm_to_park()
+
         dt_s = max(0.0, min(0.1, float(dt)))
         with self._arm_lock:
             park_active = bool(self._arm_park_active)
@@ -571,6 +593,12 @@ class PilotPublisherService:
             self._arm_pitch = self._clamp_unit(self._arm_pitch + pitch_intent * step)
             self._arm_wrist = self._clamp_unit(self._arm_wrist + wrist_intent * step)
             return float(self._arm_pitch), float(self._arm_wrist)
+
+    def _arm_disarm_edge_requests_park(self, edges: dict | None) -> bool:
+        try:
+            return bool(self._arm_disarm_edge and (edges or {}).get(self._arm_disarm_edge) == "down")
+        except Exception:
+            return False
 
     def queue_edge(self, name: str, state: str = "down") -> None:
         key = str(name or "").strip().lower()
@@ -1251,7 +1279,13 @@ class PilotPublisherService:
                     if self._arm_modifier_button
                     else False
                 )
-                arm_pitch, arm_wrist = self._integrate_arm(snap, modifier_held, dt_arm)
+                force_arm_park = self._arm_disarm_edge_requests_park(edges)
+                arm_pitch, arm_wrist = self._integrate_arm(
+                    snap,
+                    modifier_held,
+                    dt_arm,
+                    force_park=force_arm_park,
+                )
                 frame.aux = {**(frame.aux or {}), "gripper_pitch": arm_pitch, "gripper_yaw": arm_wrist}
                 if modifier_held:
                     # While aiming the arm, suppress yaw/heave so the ROV holds station.

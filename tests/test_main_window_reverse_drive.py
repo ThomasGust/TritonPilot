@@ -52,6 +52,7 @@ class _FakePilotService:
         self.arm_park_pitch = -1.0
         self.arm_park_wrist = 1.0
         self.arm_position_calls = []
+        self.arm_snap_to_park_calls = []
         self.arm_pitch = -1.0
         self.arm_wrist = 0.0
 
@@ -144,6 +145,9 @@ class _FakePilotService:
     def arm_position(self):
         return (self.arm_pitch, self.arm_wrist)
 
+    def arm_park_position(self):
+        return (self.arm_park_pitch, self.arm_park_wrist)
+
     def set_arm_position(self, pitch, wrist):
         self.arm_pitch = float(pitch)
         self.arm_wrist = float(wrist)
@@ -156,6 +160,10 @@ class _FakePilotService:
         return self.arm_park_pitch, self.arm_park_wrist
 
     def park_arm(self):
+        return self.set_arm_position(self.arm_park_pitch, self.arm_park_wrist)
+
+    def snap_arm_to_park(self):
+        self.arm_snap_to_park_calls.append((self.arm_park_pitch, self.arm_park_wrist))
         return self.set_arm_position(self.arm_park_pitch, self.arm_park_wrist)
 
     def t200_wrist_gain_step(self):
@@ -1390,9 +1398,12 @@ def test_arm_disarm_backup_controls_queue_menu_edge(monkeypatch, tmp_path):
         win._handle_sensor_msg_on_ui({"type": "heartbeat", "sensor": "heartbeat", "armed": False})
         assert win._arm_disarm_btn.text() == "Arm (O)"
         assert win.pilot_svc.arm_inputs_enabled_calls[-1] is False
+        assert win.pilot_svc.arm_snap_to_park_calls[-1] == pytest.approx((-1.0, 1.0))
+        snap_count = len(win.pilot_svc.arm_snap_to_park_calls)
         win._handle_sensor_msg_on_ui({"type": "heartbeat", "sensor": "heartbeat", "armed": True})
         assert win._arm_disarm_btn.text() == "Disarm (O)"
         assert win.pilot_svc.arm_inputs_enabled_calls[-1] is True
+        assert len(win.pilot_svc.arm_snap_to_park_calls) == snap_count
     finally:
         win.close()
         app.processEvents()

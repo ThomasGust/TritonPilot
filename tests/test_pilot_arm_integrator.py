@@ -134,6 +134,36 @@ def test_park_arm_commands_configured_park_target():
     assert w == pytest.approx(-1.0 + ARM_PARK_RATE * 0.1)
 
 
+def test_snap_arm_to_park_updates_held_target_immediately():
+    svc = _svc("arm_snap_park")
+    svc.set_arm_position(1.0, -1.0)
+    svc.set_arm_park_position(-0.25, 0.75)
+
+    assert svc.snap_arm_to_park() == pytest.approx((-0.25, 0.75))
+    assert svc.arm_position() == pytest.approx((-0.25, 0.75))
+
+    p, w = svc._integrate_arm(SimpleNamespace(rx=0.0, ry=0.0), modifier_held=False, dt=0.1)
+    assert p == pytest.approx(-0.25)
+    assert w == pytest.approx(0.75)
+
+
+def test_arm_disarm_edge_forces_park_target_in_outgoing_frame():
+    svc = _svc("arm_edge_park")
+    svc.set_arm_inputs_enabled(True)
+    svc.set_arm_position(1.0, -1.0)
+    svc.set_arm_park_position(-0.25, 0.75)
+
+    assert svc._arm_disarm_edge_requests_park({"menu": "down"}) is True
+    p, w = svc._integrate_arm(
+        SimpleNamespace(rx=1.0, ry=-1.0),
+        modifier_held=True,
+        dt=0.1,
+        force_park=svc._arm_disarm_edge_requests_park({"menu": "down"}),
+    )
+
+    assert (p, w) == pytest.approx((-0.25, 0.75))
+
+
 def test_arm_inputs_can_be_disabled_while_disarmed():
     svc = _svc("arm_disabled")
     svc.set_arm_position(0.0, 0.0)
