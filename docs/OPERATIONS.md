@@ -55,7 +55,7 @@ Default controls include:
 - Xbox `X` captures a still image in standard capture mode.
 - Keyboard `C` toggles between standard still capture and stereo still capture.
 - Keyboard `N` starts a new stereo still session in the active app session folder.
-- `W`, `S`, `A`, and `D` provide trigger-like keyboard backup manipulator controls.
+- `W`, `S`, `A`, and `D` are not bound to manipulator motion.
 
 The pilot-side telemetry column shows three live gain indicators: `BACK`,
 `ROV`, and `ARM`.

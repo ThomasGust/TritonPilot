@@ -257,13 +257,13 @@ $env:TRITON_ARM_STICK_PITCH_INVERT="-1.0"
 $env:TRITON_ARM_STICK_WRIST_INVERT="1.0"
 ```
 
-`TRITON_ARM_RATE` controls how quickly WASD and the modifier-held right stick walk
-the arm target, in normalized command units per second at 100% ARM gain.
+`TRITON_ARM_RATE` controls how quickly the modifier-held right stick walks the arm
+target, in normalized command units per second at 100% ARM gain.
 `TRITON_ARM_STICK_PITCH_INVERT` and `TRITON_ARM_STICK_WRIST_INVERT` affect only
-the modifier-held controller stick path; keyboard direction and TritonOS absolute
-pitch geometry are unchanged. Geometry knobs such as servo range, pitch span, and
-pitch neutral are onboard TritonOS settings; the Vehicle Setup page can stream
-and save those values while tuning.
+the modifier-held controller stick path; TritonOS absolute pitch geometry is
+unchanged. Keyboard WASD is not bound to manipulator motion. Geometry knobs such
+as servo range, pitch span, and pitch neutral are onboard TritonOS settings; the
+Vehicle Setup page can stream and save those values while tuning.
 
 The live gain values are transmitted in `PilotFrame.modes`. TritonOS decides how
 they map to actuator output.

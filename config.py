@@ -384,16 +384,11 @@ T200_WRIST_GAIN_MIN = BACK_GRIPPER_GAIN_MIN
 T200_WRIST_GAIN_MAX = BACK_GRIPPER_GAIN_MAX
 T200_WRIST_GAIN_STEP = BACK_GRIPPER_GAIN_STEP
 
-# Pilot-adjustable gain for the keyboard-driven arm/gripper-head movement.
+# Pilot-adjustable gain for controller-driven arm/gripper-head movement.
 ARM_GAIN_DEFAULT = float(os.environ.get("TRITON_ARM_GAIN_DEFAULT", "0.50"))
 ARM_GAIN_MIN = float(os.environ.get("TRITON_ARM_GAIN_MIN", "0.10"))
 ARM_GAIN_MAX = float(os.environ.get("TRITON_ARM_GAIN_MAX", "1.0"))
 ARM_GAIN_STEP = float(os.environ.get("TRITON_ARM_GAIN_STEP", "0.05"))
-
-# Keyboard WASD arm motion rate in normalized command units per second at 100%
-# ARM gain. Lower values make the servo target walk more slowly while a key is
-# held. (Legacy name; the live default is now ARM_RATE below.)
-ARM_KEYBOARD_RAMP_RATE = float(os.environ.get("TRITON_ARM_KEYBOARD_RAMP_RATE", "0.35"))
 
 # --- Differential arm (servo wrist) input ----------------------------------
 # Publish rate for the pilot control stream (Hz). Match the ROV control loop
@@ -401,11 +396,9 @@ ARM_KEYBOARD_RAMP_RATE = float(os.environ.get("TRITON_ARM_KEYBOARD_RAMP_RATE", "
 PILOT_PUBLISH_RATE_HZ = float(os.environ.get("TRITON_PILOT_PUBLISH_RATE_HZ", "50.0"))
 
 # The differential arm is driven by a centralized POSITION integrator in
-# PilotPublisherService. Two input paths feed it:
-#   - keyboard W/A/S/D (always available), and
-#   - the right stick while the modifier button is held (so it does not fight
-#     driving). While the modifier is held, the yaw/heave stick axes are zeroed
-#     so the ROV holds station while you aim the arm.
+# PilotPublisherService. The right stick feeds it while the modifier button is
+# held, so it does not fight driving. While the modifier is held, the yaw/heave
+# stick axes are zeroed so the ROV holds station while you aim the arm.
 ARM_AIM_MODIFIER_BUTTON = os.environ.get("TRITON_ARM_AIM_MODIFIER", "rb").strip().lower()
 ARM_STICK_PITCH_AXIS = os.environ.get("TRITON_ARM_STICK_PITCH_AXIS", "ry").strip().lower()
 ARM_STICK_WRIST_AXIS = os.environ.get("TRITON_ARM_STICK_WRIST_AXIS", "rx").strip().lower()
@@ -413,9 +406,9 @@ ARM_STICK_DEADZONE = float(os.environ.get("TRITON_ARM_STICK_DEADZONE", "0.12"))
 ARM_STICK_PITCH_INVERT = float(os.environ.get("TRITON_ARM_STICK_PITCH_INVERT", "-1.0"))
 ARM_STICK_WRIST_INVERT = float(os.environ.get("TRITON_ARM_STICK_WRIST_INVERT", "1.0"))
 
-# Arm motion rate in normalized position units/sec at 100% ARM gain. Both the
-# keyboard (full rate while held) and the stick (deflection scales the rate)
-# feed this. 2.5 crosses the full -1..+1 range in ~0.8 s at 100% gain.
+# Arm motion rate in normalized position units/sec at 100% ARM gain. Stick
+# deflection scales this rate. 2.5 crosses the full -1..+1 range in ~0.8 s at
+# 100% gain.
 ARM_RATE = float(os.environ.get("TRITON_ARM_RATE", "2.5"))
 
 # Startup arm position (normalized): pitch -1 = flat/folded, wrist +1 = 90 deg.

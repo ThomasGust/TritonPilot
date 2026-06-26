@@ -12,7 +12,7 @@ def _svc(name: str) -> PilotPublisherService:
     return PilotPublisherService(endpoint=f"inproc://{name}", rate_hz=50.0, deadzone=0.0, debug=False)
 
 
-def test_keyboard_intent_integrates_pitch_position():
+def test_legacy_keyboard_intent_is_ignored():
     svc = _svc("arm_kb")
     p0, w0 = svc.arm_position()
     assert p0 == pytest.approx(ARM_INIT_PITCH)
@@ -21,9 +21,8 @@ def test_keyboard_intent_integrates_pitch_position():
     svc.set_arm_keyboard_intent(1.0, 0.0)
     p, w = svc._integrate_arm(SimpleNamespace(rx=0.0, ry=0.0), modifier_held=False, dt=0.1)
 
-    gain = svc.current_arm_gain()
-    assert p == pytest.approx(min(1.0, p0 + ARM_RATE * gain * 0.1))
-    assert w == pytest.approx(w0)  # wrist untouched
+    assert p == pytest.approx(p0)
+    assert w == pytest.approx(w0)
 
 
 def test_stick_requires_modifier_and_drives_pitch():
@@ -54,13 +53,11 @@ def test_stick_deadzone_blocks_small_input():
 def test_arm_gain_scales_speed():
     fast = _svc("arm_fast")
     fast._arm_gain = 1.0
-    fast.set_arm_keyboard_intent(1.0, 0.0)
-    p_fast, _ = fast._integrate_arm(SimpleNamespace(rx=0.0, ry=0.0), modifier_held=False, dt=0.05)
+    p_fast, _ = fast._integrate_arm(SimpleNamespace(rx=0.0, ry=-1.0), modifier_held=True, dt=0.05)
 
     slow = _svc("arm_slow")
     slow._arm_gain = 0.5
-    slow.set_arm_keyboard_intent(1.0, 0.0)
-    p_slow, _ = slow._integrate_arm(SimpleNamespace(rx=0.0, ry=0.0), modifier_held=False, dt=0.05)
+    p_slow, _ = slow._integrate_arm(SimpleNamespace(rx=0.0, ry=-1.0), modifier_held=True, dt=0.05)
 
     moved_fast = p_fast - ARM_INIT_PITCH
     moved_slow = p_slow - ARM_INIT_PITCH

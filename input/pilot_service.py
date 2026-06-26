@@ -204,18 +204,17 @@ class PilotPublisherService:
         }
         self._prev_buttons: Optional[PilotButtons] = None
 
-        # External/GUI-provided auxiliary controls (e.g. keyboard-controlled manipulator axes).
+        # External/GUI-provided auxiliary controls.
         self._aux_lock = threading.Lock()
         self._aux_axes: dict[str, float] = {}
         self._edge_lock = threading.Lock()
         self._pending_edges: list[tuple[str, str]] = []
 
         # --- Differential arm (servo wrist) position integrator ---------------
-        # Single source of truth for the arm pose. Keyboard W/A/S/D supplies a
-        # direction intent (set_arm_keyboard_intent); the right stick supplies a
+        # Single source of truth for the arm pose. The right stick supplies a
         # proportional intent while ARM_AIM_MODIFIER_BUTTON is held. The publish
-        # loop integrates position from those intents at ARM_RATE * arm_gain and
-        # publishes the absolute pose as PilotFrame.aux gripper_pitch/gripper_yaw.
+        # loop integrates that intent at ARM_RATE * arm_gain and publishes the
+        # absolute pose as PilotFrame.aux gripper_pitch/gripper_yaw.
         self._arm_lock = threading.Lock()
         self._arm_pitch = self._clamp_unit(ARM_INIT_PITCH)
         self._arm_wrist = self._clamp_unit(ARM_INIT_WRIST)
@@ -434,17 +433,13 @@ class PilotPublisherService:
 
     # --- differential arm position integrator -----------------------------
     def set_arm_keyboard_intent(self, pitch_dir: float, wrist_dir: float) -> None:
-        """Set the keyboard direction intent for the differential arm.
-
-        Each value is -1, 0, or +1 (A/D -> pitch, W/S -> wrist). The publish loop
-        integrates these into the absolute arm position at ARM_RATE * arm_gain.
-        """
+        """Compatibility no-op: WASD no longer drives the differential arm."""
         with self._arm_lock:
-            self._arm_kb_pitch_dir = self._clamp_unit(pitch_dir)
-            self._arm_kb_wrist_dir = self._clamp_unit(wrist_dir)
+            self._arm_kb_pitch_dir = 0.0
+            self._arm_kb_wrist_dir = 0.0
 
     def clear_arm_keyboard_intent(self) -> None:
-        """Drop any held keyboard arm intent (e.g. on focus loss)."""
+        """Drop any legacy keyboard arm intent (e.g. on focus loss)."""
         with self._arm_lock:
             self._arm_kb_pitch_dir = 0.0
             self._arm_kb_wrist_dir = 0.0
@@ -458,7 +453,7 @@ class PilotPublisherService:
         """Set the absolute differential-arm target in [-1, 1].
 
         Used by setup/alignment actions that need to command a known pose directly
-        instead of walking there through keyboard or stick intent.
+        instead of walking there through controller stick intent.
         """
         with self._arm_lock:
             self._arm_pitch = self._clamp_unit(pitch)
@@ -479,11 +474,7 @@ class PilotPublisherService:
         return sign * min(1.0, (abs(x) - dz) / span)
 
     def _integrate_arm(self, snap: ControllerSnapshot, modifier_held: bool, dt: float) -> tuple[float, float]:
-        """Advance the arm position from keyboard + (modifier-gated) stick intent."""
-        with self._arm_lock:
-            kp = self._arm_kb_pitch_dir
-            kw = self._arm_kb_wrist_dir
-
+        """Advance the arm position from modifier-gated stick intent."""
         sp = sw = 0.0
         if modifier_held:
             try:
@@ -497,9 +488,8 @@ class PilotPublisherService:
             sp = self._stick_axis(pv, self._arm_stick_deadzone) * self._arm_stick_pitch_invert
             sw = self._stick_axis(wv, self._arm_stick_deadzone) * self._arm_stick_wrist_invert
 
-        # Stick takes priority when deflected; otherwise hold the keyboard intent.
-        pitch_intent = sp if abs(sp) > 1e-6 else kp
-        wrist_intent = sw if abs(sw) > 1e-6 else kw
+        pitch_intent = sp
+        wrist_intent = sw
 
         try:
             gain = float(self.current_arm_gain())
@@ -1183,8 +1173,8 @@ class PilotPublisherService:
                     self._apply_reverse_axes(frame)
                 self._prev_buttons = frame.buttons
 
-                # Differential arm: integrate position from keyboard + the
-                # modifier-gated right stick, and publish the absolute pose.
+                # Differential arm: integrate position from the modifier-gated
+                # right stick, and publish the absolute pose.
                 dt_arm = self.period if self._arm_last_t is None else (t0 - self._arm_last_t)
                 self._arm_last_t = t0
                 modifier_held = (

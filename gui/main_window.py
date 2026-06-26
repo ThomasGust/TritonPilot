@@ -1564,16 +1564,10 @@ class MainWindow(QMainWindow):
         self._last_pilot_msg: dict = {}
 
         # 1) pilot publisher (xbox -> ROV)
-        # These keyboard controls feed a direction intent (A/D -> pitch,
-        # W/S -> wrist) to the arm position integrator that lives in
-        # PilotPublisherService; the integrator publishes the absolute pose.
+        # WASD is intentionally not bound to manipulator motion. Keep the
+        # legacy state set only so page/focus changes can neutralize stale
+        # keyboard arm intent if the app is upgraded while keys were latched.
         self._servo_wrist_keys_down: set[str] = set()
-        self._servo_wrist_keymap = {
-            Qt.Key.Key_W: ("gripper_yaw", +1.0, "W"),
-            Qt.Key.Key_S: ("gripper_yaw", -1.0, "S"),
-            Qt.Key.Key_D: ("gripper_pitch", +1.0, "D"),
-            Qt.Key.Key_A: ("gripper_pitch", -1.0, "A"),
-        }
         self._back_gripper_gain_shortcuts = {
             Qt.Key.Key_1: -1.0,
             Qt.Key.Key_2: +1.0,
@@ -1594,10 +1588,6 @@ class MainWindow(QMainWindow):
         self._lights_toggle_edge = str(LIGHTS_TOGGLE_EDGE or "lights").strip().lower() or "lights"
         self._arm_disarm_shortcut_text = str(ARM_DISARM_TOGGLE_SHORTCUT or "O").strip() or "O"
         self._arm_disarm_edge = str(ARM_DISARM_TOGGLE_EDGE or "menu").strip().lower() or "menu"
-        self._servo_wrist_timer = QTimer(self)
-        self._servo_wrist_timer.setInterval(33)
-        self._servo_wrist_timer.timeout.connect(self._push_servo_wrist_keyboard_intent)
-        self._servo_wrist_timer.start()
 
         self.pilot_svc = PilotPublisherService(
             endpoint=PILOT_PUB_ENDPOINT,
@@ -1899,29 +1889,6 @@ class MainWindow(QMainWindow):
 
         resize_to_available_screen(self, 1440, 860, min_width=980, min_height=620, height_ratio=0.96)
 
-
-    def _servo_wrist_keyboard_targets(self) -> tuple[float, float]:
-        # A/D -> arm pitch direction, W/S -> wrist direction. A held key sets a
-        # direction intent; the pilot-side integrator turns that into motion.
-        pitch_dir = 0.0
-        yaw_dir = 0.0
-        if "D" in self._servo_wrist_keys_down and "A" not in self._servo_wrist_keys_down:
-            pitch_dir = 1.0
-        elif "A" in self._servo_wrist_keys_down and "D" not in self._servo_wrist_keys_down:
-            pitch_dir = -1.0
-        if "W" in self._servo_wrist_keys_down and "S" not in self._servo_wrist_keys_down:
-            yaw_dir = 1.0
-        elif "S" in self._servo_wrist_keys_down and "W" not in self._servo_wrist_keys_down:
-            yaw_dir = -1.0
-        return pitch_dir, yaw_dir
-
-    def _push_servo_wrist_keyboard_intent(self) -> None:
-        pitch_dir, wrist_dir = self._servo_wrist_keyboard_targets()
-        try:
-            self.pilot_svc.set_arm_keyboard_intent(pitch_dir, wrist_dir)
-        except Exception:
-            pass
-
     def _refresh_gain_indicators_from_modes(self, modes: dict) -> None:
         column = getattr(self, "pilot_telemetry_column", None)
         if column is None:
@@ -2136,15 +2103,6 @@ class MainWindow(QMainWindow):
                     if event.key() == Qt.Key.Key_R:
                         self._reset_transect_stopwatch_from_keyboard()
                         return True
-                entry = self._servo_wrist_keymap.get(event.key())
-                if entry is not None:
-                    _axis_name, _axis_value, label = entry
-                    if et == QEvent.Type.KeyPress:
-                        self._servo_wrist_keys_down.add(label)
-                    else:
-                        self._servo_wrist_keys_down.discard(label)
-                    self._push_servo_wrist_keyboard_intent()
-                    return True
                 if et == QEvent.Type.KeyPress:
                     if event.key() == Qt.Key.Key_R:
                         self._toggle_reverse_mode()

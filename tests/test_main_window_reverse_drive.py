@@ -47,6 +47,7 @@ class _FakePilotService:
         self.arm_gain = 0.5
         self.arm_kb_pitch_dir = 0.0
         self.arm_kb_wrist_dir = 0.0
+        self.arm_kb_intent_calls = []
         self.arm_pitch = -1.0
         self.arm_wrist = 0.0
 
@@ -122,6 +123,7 @@ class _FakePilotService:
         return self.arm_gain
 
     def set_arm_keyboard_intent(self, pitch_dir, wrist_dir):
+        self.arm_kb_intent_calls.append((float(pitch_dir), float(wrist_dir)))
         self.arm_kb_pitch_dir = float(pitch_dir)
         self.arm_kb_wrist_dir = float(wrist_dir)
         return None
@@ -434,8 +436,8 @@ def test_transect_page_applies_square_single_camera_layout(monkeypatch, tmp_path
         before_calls = len(panel.apply_temporary_layout_calls)
         win._transect_page.camera_combo.setFocus()
         key_event = QKeyEvent(QEvent.Type.KeyPress, Qt.Key.Key_A, Qt.KeyboardModifier.NoModifier, "a")
-        assert win.eventFilter(win._transect_page.camera_combo, key_event) is True
-        assert win._servo_wrist_keys_down == {"A"}
+        assert win.eventFilter(win._transect_page.camera_combo, key_event) is False
+        assert win._servo_wrist_keys_down == set()
         assert len(panel.apply_temporary_layout_calls) == before_calls
         assert win._transect_page.current_stream_name() == "Aux Camera"
 
@@ -1442,7 +1444,7 @@ def test_switching_to_ssh_releases_keyboard_wrist_controls(monkeypatch, tmp_path
         app.processEvents()
 
 
-def test_keyboard_wrist_controls_swap_ws_and_ad_axes(monkeypatch, tmp_path):
+def test_wasd_keys_do_not_command_arm_keyboard_intent(monkeypatch, tmp_path):
     app = _app()
     streams_path = tmp_path / "streams.json"
     streams_path.write_text("{}", encoding="utf-8")
@@ -1459,28 +1461,21 @@ def test_keyboard_wrist_controls_swap_ws_and_ad_axes(monkeypatch, tmp_path):
     win = main_window.MainWindow(str(streams_path))
     try:
         app.processEvents()
-        assert win._servo_wrist_keymap[Qt.Key.Key_W][0] == "gripper_yaw"
-        assert win._servo_wrist_keymap[Qt.Key.Key_S][0] == "gripper_yaw"
-        assert win._servo_wrist_keymap[Qt.Key.Key_D][0] == "gripper_pitch"
-        assert win._servo_wrist_keymap[Qt.Key.Key_A][0] == "gripper_pitch"
 
-        # W/S drive the wrist intent; A/D drive the pitch intent.
-        win._servo_wrist_keys_down = {"W"}
-        win._push_servo_wrist_keyboard_intent()
-        assert win.pilot_svc.arm_kb_pitch_dir == pytest.approx(0.0)
-        assert win.pilot_svc.arm_kb_wrist_dir == pytest.approx(1.0)
+        for key, text in (
+            (Qt.Key.Key_W, "w"),
+            (Qt.Key.Key_A, "a"),
+            (Qt.Key.Key_S, "s"),
+            (Qt.Key.Key_D, "d"),
+        ):
+            handled = win.eventFilter(
+                win,
+                QKeyEvent(QEvent.Type.KeyPress, key, Qt.KeyboardModifier.NoModifier, text),
+            )
+            assert handled is False
 
-        win._servo_wrist_keys_down = {"D"}
-        win._push_servo_wrist_keyboard_intent()
-        assert win.pilot_svc.arm_kb_pitch_dir == pytest.approx(1.0)
-        assert win.pilot_svc.arm_kb_wrist_dir == pytest.approx(0.0)
-
-        win._servo_wrist_keys_down = {"S"}
-        assert win._servo_wrist_keyboard_targets()[1] == pytest.approx(-1.0)
-        win._servo_wrist_keys_down = {"A"}
-        assert win._servo_wrist_keyboard_targets()[0] == pytest.approx(-1.0)
-        win._servo_wrist_keys_down = set()
-        win._push_servo_wrist_keyboard_intent()
+        assert win._servo_wrist_keys_down == set()
+        assert win.pilot_svc.arm_kb_intent_calls == []
         assert win.pilot_svc.arm_kb_pitch_dir == pytest.approx(0.0)
         assert win.pilot_svc.arm_kb_wrist_dir == pytest.approx(0.0)
     finally:
