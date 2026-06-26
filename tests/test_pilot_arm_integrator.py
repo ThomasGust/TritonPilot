@@ -109,3 +109,12 @@ def test_set_arm_position_sets_target_and_clears_keyboard_intent():
     p2, w2 = svc._integrate_arm(SimpleNamespace(rx=0.0, ry=0.0), modifier_held=False, dt=0.1)
     assert p2 == pytest.approx(-1.0)
     assert w2 == pytest.approx(0.25)
+
+
+def test_park_arm_commands_configured_park_target():
+    svc = _svc("arm_park")
+
+    assert svc.arm_park_position() == pytest.approx((-1.0, 1.0))
+    assert svc.set_arm_park_position(2.0, -0.5) == pytest.approx((1.0, -0.5))
+    assert svc.park_arm() == pytest.approx((1.0, -0.5))
+    assert svc.arm_position() == pytest.approx((1.0, -0.5))

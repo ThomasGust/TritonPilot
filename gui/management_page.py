@@ -133,6 +133,7 @@ class ManagementPage(QWidget):
         self._status_labels: dict[str, QLabel] = {}
         self._arm_tune_checks: dict[str, QCheckBox] = {}
         self._arm_tune_spins: dict[str, QDoubleSpinBox] = {}
+        self._arm_park_spins: dict[str, QDoubleSpinBox] = {}
         self._arm_alignment_buttons: dict[str, QPushButton] = {}
         self._arm_tune_config_defaults = {
             "left_invert": 1.0,
@@ -146,6 +147,8 @@ class ManagementPage(QWidget):
             "wrist_neutral_deg": 45.0,
             "servo_center_us": 1500.0,
             "servo_pulse_halfspan_us": 800.0,
+            "park_pitch": -1.0,
+            "park_wrist": 1.0,
         }
 
         self._build_ui()
@@ -401,6 +404,31 @@ class ManagementPage(QWidget):
         align_buttons.addStretch(1)
         card.body.addLayout(align_buttons)
 
+        park_form = QFormLayout()
+        park_form.setContentsMargins(0, 8, 0, 0)
+        park_form.setSpacing(8)
+        for key, label, default in (
+            ("park_pitch", "Park pitch", -1.0),
+            ("park_wrist", "Park wrist", 1.0),
+        ):
+            spin = self._make_spinbox(-1.0, 1.0, 0.05, 2)
+            self._set_spin_value(spin, default)
+            spin.valueChanged.connect(lambda _v, k=key: self._on_arm_park_value(k))
+            self._arm_park_spins[key] = spin
+            park_form.addRow(label, spin)
+        card.body.addLayout(park_form)
+
+        park_buttons = QHBoxLayout()
+        park_buttons.setSpacing(8)
+        self.arm_park_command_btn = QPushButton("Command Park Pose")
+        self.arm_park_command_btn.clicked.connect(self._confirm_arm_park_pose)
+        self.arm_park_save_btn = QPushButton("Save Park Pose")
+        self.arm_park_save_btn.clicked.connect(self._save_arm_park_config)
+        park_buttons.addWidget(self.arm_park_command_btn)
+        park_buttons.addWidget(self.arm_park_save_btn)
+        park_buttons.addStretch(1)
+        card.body.addLayout(park_buttons)
+
         self.arm_alignment_status_label = QLabel("-")
         self.arm_alignment_status_label.setWordWrap(True)
         self.arm_alignment_status_label.setObjectName("managementMetaValue")
@@ -412,7 +440,10 @@ class ManagementPage(QWidget):
                 cb.setEnabled(False)
             for spin in self._arm_tune_spins.values():
                 spin.setEnabled(False)
+            for spin in self._arm_park_spins.values():
+                spin.setEnabled(False)
             self.arm_tune_reset_btn.setEnabled(False)
+            self.arm_park_command_btn.setEnabled(False)
             for btn in self._arm_alignment_buttons.values():
                 btn.setEnabled(False)
         return card
@@ -433,6 +464,9 @@ class ManagementPage(QWidget):
         except Exception:
             pass
 
+    def _on_arm_park_value(self, _key: str) -> None:
+        self._sync_pilot_arm_park_pose()
+
     def _reset_arm_tune(self) -> None:
         if self._pilot_svc is not None:
             try:
@@ -451,6 +485,81 @@ class ManagementPage(QWidget):
             "GRIPPER_SERVO_RANGE_DEG": float(self._arm_tune_spins["servo_range_deg"].value()),
             "GRIPPER_PITCH_SPAN_DEG": float(self._arm_tune_spins["pitch_span_deg"].value()),
             "GRIPPER_PITCH_NEUTRAL_DEG": float(self._arm_tune_spins["pitch_neutral_deg"].value()),
+        }
+        self._queue_request("set_config", {"updates": updates}, request_meta={"refresh_after_success": True})
+
+    def _current_arm_park_norm(self) -> tuple[float, float]:
+        defaults = dict(self._arm_tune_config_defaults)
+        pitch_spin = self._arm_park_spins.get("park_pitch")
+        wrist_spin = self._arm_park_spins.get("park_wrist")
+        pitch = float(pitch_spin.value()) if pitch_spin is not None else float(defaults["park_pitch"])
+        wrist = float(wrist_spin.value()) if wrist_spin is not None else float(defaults["park_wrist"])
+        return max(-1.0, min(1.0, pitch)), max(-1.0, min(1.0, wrist))
+
+    def _arm_park_command_values(self) -> tuple[float, float, float, float]:
+        park_pitch, park_wrist = self._current_arm_park_norm()
+        geom = self._current_arm_geometry()
+        pitch_cmd = self._axis_command_for_invert(park_pitch, geom["pitch_invert"])
+        wrist_cmd = self._axis_command_for_invert(park_wrist, geom["yaw_invert"])
+        return park_pitch, park_wrist, pitch_cmd, wrist_cmd
+
+    def _sync_pilot_arm_park_pose(self) -> tuple[float, float] | None:
+        if self._pilot_svc is None or not hasattr(self._pilot_svc, "set_arm_park_position"):
+            return None
+        _park_pitch, _park_wrist, pitch_cmd, wrist_cmd = self._arm_park_command_values()
+        try:
+            return self._pilot_svc.set_arm_park_position(pitch_cmd, wrist_cmd)
+        except Exception:
+            return None
+
+    def _confirm_arm_park_pose(self) -> None:
+        park_pitch, park_wrist, pitch_cmd, wrist_cmd = self._arm_park_command_values()
+        answer = QMessageBox.question(
+            self,
+            "Arm Park Pose",
+            (
+                "Command the arm park pose now?\n\n"
+                f"Config target: pitch {park_pitch:+.2f}, wrist {park_wrist:+.2f}.\n"
+                f"Pilot target: pitch {pitch_cmd:+.2f}, wrist {wrist_cmd:+.2f}.\n"
+                "Keep the arm clear and only arm the ROV when it is safe for the servos to move."
+            ),
+        )
+        if answer != QMessageBox.StandardButton.Yes:
+            return
+        self._send_arm_park_pose()
+
+    def _send_arm_park_pose(self) -> bool:
+        if self._pilot_svc is None or not hasattr(self._pilot_svc, "set_arm_position"):
+            self._set_feedback("Arm park pose needs the live pilot publisher.", tone="error")
+            return False
+
+        park_pitch, park_wrist, pitch_cmd, wrist_cmd = self._arm_park_command_values()
+        self._sync_pilot_arm_park_pose()
+        try:
+            if hasattr(self._pilot_svc, "park_arm"):
+                sent_pitch, sent_wrist = self._pilot_svc.park_arm()
+            else:
+                sent_pitch, sent_wrist = self._pilot_svc.set_arm_position(pitch_cmd, wrist_cmd)
+        except Exception as exc:
+            self._set_feedback(f"Could not set arm park target: {exc}", tone="error")
+            return False
+
+        status = (
+            f"Park Pose: config pitch {park_pitch:+.2f}, wrist {park_wrist:+.2f} | "
+            f"pilot target {float(sent_pitch):+.2f}, {float(sent_wrist):+.2f}"
+        )
+        self.arm_alignment_status_label.setText(status)
+        self._set_feedback(status, tone="info")
+        return True
+
+    def _save_arm_park_config(self) -> None:
+        park_pitch, park_wrist = self._current_arm_park_norm()
+        self._sync_pilot_arm_park_pose()
+        updates = {
+            "GRIPPER_DISARM_PITCH": float(park_pitch),
+            "GRIPPER_DISARM_YAW": float(park_wrist),
+            "GRIPPER_ARM_PITCH": float(park_pitch),
+            "GRIPPER_ARM_YAW": float(park_wrist),
         }
         self._queue_request("set_config", {"updates": updates}, request_meta={"refresh_after_success": True})
 
@@ -754,6 +863,10 @@ class ManagementPage(QWidget):
         self.save_config_btn.setEnabled((not busy) and can_set_config and has_enabled_config_field)
         if hasattr(self, "arm_tune_save_btn"):
             self.arm_tune_save_btn.setEnabled((not busy) and can_set_config)
+        if hasattr(self, "arm_park_save_btn"):
+            self.arm_park_save_btn.setEnabled((not busy) and can_set_config)
+        if hasattr(self, "arm_park_command_btn"):
+            self.arm_park_command_btn.setEnabled((not busy) and self._pilot_svc is not None)
 
         if not has_state:
             self.save_sensor_offset_btn.setEnabled(False)
@@ -766,6 +879,8 @@ class ManagementPage(QWidget):
             self.save_config_btn.setEnabled(False)
             if hasattr(self, "arm_tune_save_btn"):
                 self.arm_tune_save_btn.setEnabled(False)
+            if hasattr(self, "arm_park_save_btn"):
+                self.arm_park_save_btn.setEnabled(False)
 
     def _save_sensor_offset(self) -> None:
         self._queue_request(
@@ -911,6 +1026,20 @@ class ManagementPage(QWidget):
                 continue
             value = self._float_or_default(cfg.get(cfg_key), defaults[tune_key])
             self._set_spin_value(spin, value)
+
+        park_pitch = self._float_or_default(
+            cfg.get("GRIPPER_ARM_PITCH", cfg.get("GRIPPER_DISARM_PITCH")),
+            defaults["park_pitch"],
+        )
+        park_wrist = self._float_or_default(
+            cfg.get("GRIPPER_ARM_YAW", cfg.get("GRIPPER_DISARM_YAW")),
+            defaults["park_wrist"],
+        )
+        if "park_pitch" in self._arm_park_spins:
+            self._set_spin_value(self._arm_park_spins["park_pitch"], park_pitch)
+        if "park_wrist" in self._arm_park_spins:
+            self._set_spin_value(self._arm_park_spins["park_wrist"], park_wrist)
+        self._sync_pilot_arm_park_pose()
 
     @staticmethod
     def _set_spin_value(spin: QDoubleSpinBox, value) -> None:

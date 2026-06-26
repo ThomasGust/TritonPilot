@@ -46,6 +46,7 @@ from PyQt6.QtWidgets import (
 from config import (
     ARM_DISARM_TOGGLE_EDGE,
     ARM_DISARM_TOGGLE_SHORTCUT,
+    ARM_PARK_SHORTCUT,
     PILOT_PUB_ENDPOINT,
     SENSOR_SUB_ENDPOINT,
     MANAGEMENT_RPC_ENDPOINT,
@@ -1588,6 +1589,7 @@ class MainWindow(QMainWindow):
         self._lights_toggle_edge = str(LIGHTS_TOGGLE_EDGE or "lights").strip().lower() or "lights"
         self._arm_disarm_shortcut_text = str(ARM_DISARM_TOGGLE_SHORTCUT or "O").strip() or "O"
         self._arm_disarm_edge = str(ARM_DISARM_TOGGLE_EDGE or "menu").strip().lower() or "menu"
+        self._arm_park_shortcut_text = str(ARM_PARK_SHORTCUT or "A").strip() or "A"
 
         self.pilot_svc = PilotPublisherService(
             endpoint=PILOT_PUB_ENDPOINT,
@@ -2003,6 +2005,18 @@ class MainWindow(QMainWindow):
             3000,
         )
 
+    def _park_arm_from_keyboard(self) -> None:
+        try:
+            pitch, wrist = self.pilot_svc.park_arm()
+        except Exception as exc:
+            self.statusBar().showMessage(f"Could not command arm park pose: {exc}", 5000)
+            return
+        shortcut_text = str(self._arm_park_shortcut_text or "A").upper()
+        self.statusBar().showMessage(
+            f"Arm park pose sent: pitch {float(pitch):+.2f}, wrist {float(wrist):+.2f}  |  key: {shortcut_text}",
+            3000,
+        )
+
     def _release_keyboard_vehicle_controls(self) -> None:
         """Neutralize keyboard-only vehicle controls when focus belongs to text input."""
         if not self._servo_wrist_keys_down:
@@ -2115,8 +2129,15 @@ class MainWindow(QMainWindow):
                         arm_shortcut_text = self._arm_disarm_shortcut_text.upper()
                     except Exception:
                         arm_shortcut_text = "O"
+                    try:
+                        park_shortcut_text = self._arm_park_shortcut_text.upper()
+                    except Exception:
+                        park_shortcut_text = "A"
                     if event.text().upper() == arm_shortcut_text:
                         self._toggle_arm_disarm_from_ui()
+                        return True
+                    if event.text().upper() == park_shortcut_text:
+                        self._park_arm_from_keyboard()
                         return True
                     if event.text().upper() == shortcut_text:
                         self._toggle_lights_from_keyboard()

@@ -98,6 +98,8 @@ class PilotPublisherService:
             ARM_GAIN_STEP,
             ARM_INIT_PITCH,
             ARM_INIT_WRIST,
+            ARM_PARK_PITCH,
+            ARM_PARK_WRIST,
             ARM_RATE,
             ARM_STICK_DEADZONE,
             ARM_STICK_PITCH_AXIS,
@@ -218,6 +220,8 @@ class PilotPublisherService:
         self._arm_lock = threading.Lock()
         self._arm_pitch = self._clamp_unit(ARM_INIT_PITCH)
         self._arm_wrist = self._clamp_unit(ARM_INIT_WRIST)
+        self._arm_park_pitch = self._clamp_unit(ARM_PARK_PITCH)
+        self._arm_park_wrist = self._clamp_unit(ARM_PARK_WRIST)
         self._arm_kb_pitch_dir = 0.0
         self._arm_kb_wrist_dir = 0.0
         self._arm_last_t: Optional[float] = None
@@ -448,6 +452,25 @@ class PilotPublisherService:
         """Return the current integrated (pitch, wrist) arm position in [-1, 1]."""
         with self._arm_lock:
             return float(self._arm_pitch), float(self._arm_wrist)
+
+    def arm_park_position(self) -> tuple[float, float]:
+        """Return the current pilot-side park target in command space."""
+        with self._arm_lock:
+            return float(self._arm_park_pitch), float(self._arm_park_wrist)
+
+    def set_arm_park_position(self, pitch: float, wrist: float) -> tuple[float, float]:
+        """Set the pilot-side park target in command space."""
+        with self._arm_lock:
+            self._arm_park_pitch = self._clamp_unit(pitch)
+            self._arm_park_wrist = self._clamp_unit(wrist)
+            return float(self._arm_park_pitch), float(self._arm_park_wrist)
+
+    def park_arm(self) -> tuple[float, float]:
+        """Command the differential arm to the configured park target."""
+        with self._arm_lock:
+            pitch = float(self._arm_park_pitch)
+            wrist = float(self._arm_park_wrist)
+        return self.set_arm_position(pitch, wrist)
 
     def set_arm_position(self, pitch: float, wrist: float) -> tuple[float, float]:
         """Set the absolute differential-arm target in [-1, 1].

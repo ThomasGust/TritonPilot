@@ -2,6 +2,7 @@ import os
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
+import pytest
 from PyQt6.QtWidgets import QApplication
 
 from gui import management_page
@@ -30,6 +31,9 @@ class _FakePilotService:
         self.tune_calls = []
         self.clear_calls = 0
         self.positions = []
+        self.park_positions = []
+        self.park_pitch = -1.0
+        self.park_wrist = 1.0
 
     def set_arm_tune(self, key, value):
         self.tune_calls.append((key, value))
@@ -40,6 +44,15 @@ class _FakePilotService:
     def set_arm_position(self, pitch, wrist):
         self.positions.append((float(pitch), float(wrist)))
         return float(pitch), float(wrist)
+
+    def set_arm_park_position(self, pitch, wrist):
+        self.park_pitch = float(pitch)
+        self.park_wrist = float(wrist)
+        self.park_positions.append((self.park_pitch, self.park_wrist))
+        return self.park_pitch, self.park_wrist
+
+    def park_arm(self):
+        return self.set_arm_position(self.park_pitch, self.park_wrist)
 
 
 def _app():
@@ -159,6 +172,53 @@ def test_arm_alignment_pose_compensates_axis_inverts(monkeypatch):
         assert page._send_arm_alignment_pose("flat_wrist_0") is True
 
         assert pilot.positions[-1] == (1.0, 1.0)
+    finally:
+        page.shutdown()
+        page.close()
+        app.processEvents()
+
+
+def test_arm_park_pose_loads_commands_and_saves_rov_config(monkeypatch):
+    app = _app()
+    monkeypatch.setattr(management_page, "ManagementRpcService", _FakeManagementRpcService)
+
+    pilot = _FakePilotService()
+    page = management_page.ManagementPage(endpoint="inproc://arm-park-test", pilot_svc=pilot)
+    try:
+        page._apply_state(
+            {
+                "commands": ["get_state", "set_config"],
+                "config_path": "rov_config.py",
+                "references": {},
+                "config": {
+                    "GRIPPER_PITCH_INVERT": -1.0,
+                    "GRIPPER_YAW_INVERT": 1.0,
+                    "GRIPPER_ARM_PITCH": -0.50,
+                    "GRIPPER_ARM_YAW": 0.75,
+                    "GRIPPER_DISARM_PITCH": -1.0,
+                    "GRIPPER_DISARM_YAW": 1.0,
+                },
+            }
+        )
+
+        assert page._arm_park_spins["park_pitch"].value() == pytest.approx(-0.50)
+        assert page._arm_park_spins["park_wrist"].value() == pytest.approx(0.75)
+        assert pilot.park_positions[-1] == pytest.approx((0.50, 0.75))
+
+        assert page._send_arm_park_pose() is True
+        assert pilot.positions[-1] == pytest.approx((0.50, 0.75))
+
+        page._arm_park_spins["park_pitch"].setValue(-0.25)
+        page._arm_park_spins["park_wrist"].setValue(1.0)
+        page._save_arm_park_config()
+        cmd, args = page._svc.requests[-1]
+        assert cmd == "set_config"
+        assert args["updates"] == {
+            "GRIPPER_DISARM_PITCH": -0.25,
+            "GRIPPER_DISARM_YAW": 1.0,
+            "GRIPPER_ARM_PITCH": -0.25,
+            "GRIPPER_ARM_YAW": 1.0,
+        }
     finally:
         page.shutdown()
         page.close()

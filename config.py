@@ -415,6 +415,12 @@ ARM_RATE = float(os.environ.get("TRITON_ARM_RATE", "2.5"))
 ARM_INIT_PITCH = float(os.environ.get("TRITON_ARM_INIT_PITCH", "-1.0"))
 ARM_INIT_WRIST = float(os.environ.get("TRITON_ARM_INIT_WRIST", "1.0"))
 
+# Keyboard A commands this pilot-side park target. Vehicle Setup refreshes this
+# target from the ROV's GRIPPER_ARM_* / GRIPPER_DISARM_* config when available.
+ARM_PARK_SHORTCUT = os.environ.get("TRITON_ARM_PARK_SHORTCUT", "A").strip() or "A"
+ARM_PARK_PITCH = float(os.environ.get("TRITON_ARM_PARK_PITCH", "-1.0"))
+ARM_PARK_WRIST = float(os.environ.get("TRITON_ARM_PARK_WRIST", "1.0"))
+
 
 # Legacy topside walk-target display settings. Current depth-hold manual
 # override/latching behavior is owned by TritonOS; keep these only for older

@@ -52,10 +52,11 @@ Default controls include:
 - `Y`/`A` on the controller and keyboard `+`/`-` adjust the main ROV motion gain.
 - Keyboard `1`/`2` adjust the back rotating gripper gain.
 - Keyboard `6`/`7` adjust the arm gain.
+- Keyboard `A` commands the differential arm to the configured park pose.
 - Xbox `X` captures a still image in standard capture mode.
 - Keyboard `C` toggles between standard still capture and stereo still capture.
 - Keyboard `N` starts a new stereo still session in the active app session folder.
-- `W`, `S`, `A`, and `D` are not bound to manipulator motion.
+- Keyboard `W`, `S`, and `D` are not bound to manipulator motion.
 
 The pilot-side telemetry column shows three live gain indicators: `BACK`,
 `ROV`, and `ARM`.
@@ -117,8 +118,9 @@ ROV-side configuration. Treat it as a live vehicle tool:
   Center` is the existing neutral mount pose; `Flat / Wrist 90` and `Flat /
   Wrist 0` command easier flat-pitch physical references through the normal
   pilot stream.
-- The pilot starts the differential arm at flat pitch with 90-degree wrist roll,
-  matching the TritonOS arm/disarm park pose.
+- The park-pose controls edit the normalized TritonOS `GRIPPER_ARM_*` and
+  `GRIPPER_DISARM_*` pose. Keyboard `A` commands the same pose through the normal
+  pilot stream.
 
 ## Raw Sensor Logging
 

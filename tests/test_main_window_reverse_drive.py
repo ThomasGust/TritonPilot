@@ -48,6 +48,9 @@ class _FakePilotService:
         self.arm_kb_pitch_dir = 0.0
         self.arm_kb_wrist_dir = 0.0
         self.arm_kb_intent_calls = []
+        self.arm_park_pitch = -1.0
+        self.arm_park_wrist = 1.0
+        self.arm_position_calls = []
         self.arm_pitch = -1.0
         self.arm_wrist = 0.0
 
@@ -135,6 +138,20 @@ class _FakePilotService:
 
     def arm_position(self):
         return (self.arm_pitch, self.arm_wrist)
+
+    def set_arm_position(self, pitch, wrist):
+        self.arm_pitch = float(pitch)
+        self.arm_wrist = float(wrist)
+        self.arm_position_calls.append((self.arm_pitch, self.arm_wrist))
+        return self.arm_pitch, self.arm_wrist
+
+    def set_arm_park_position(self, pitch, wrist):
+        self.arm_park_pitch = float(pitch)
+        self.arm_park_wrist = float(wrist)
+        return self.arm_park_pitch, self.arm_park_wrist
+
+    def park_arm(self):
+        return self.set_arm_position(self.arm_park_pitch, self.arm_park_wrist)
 
     def t200_wrist_gain_step(self):
         return self.back_gripper_gain_step()
@@ -436,8 +453,9 @@ def test_transect_page_applies_square_single_camera_layout(monkeypatch, tmp_path
         before_calls = len(panel.apply_temporary_layout_calls)
         win._transect_page.camera_combo.setFocus()
         key_event = QKeyEvent(QEvent.Type.KeyPress, Qt.Key.Key_A, Qt.KeyboardModifier.NoModifier, "a")
-        assert win.eventFilter(win._transect_page.camera_combo, key_event) is False
+        assert win.eventFilter(win._transect_page.camera_combo, key_event) is True
         assert win._servo_wrist_keys_down == set()
+        assert win.pilot_svc.arm_position_calls[-1] == pytest.approx((-1.0, 1.0))
         assert len(panel.apply_temporary_layout_calls) == before_calls
         assert win._transect_page.current_stream_name() == "Aux Camera"
 
@@ -1444,7 +1462,7 @@ def test_switching_to_ssh_releases_keyboard_wrist_controls(monkeypatch, tmp_path
         app.processEvents()
 
 
-def test_wasd_keys_do_not_command_arm_keyboard_intent(monkeypatch, tmp_path):
+def test_a_key_parks_arm_without_reenabling_wasd_jog(monkeypatch, tmp_path):
     app = _app()
     streams_path = tmp_path / "streams.json"
     streams_path.write_text("{}", encoding="utf-8")
@@ -1464,7 +1482,6 @@ def test_wasd_keys_do_not_command_arm_keyboard_intent(monkeypatch, tmp_path):
 
         for key, text in (
             (Qt.Key.Key_W, "w"),
-            (Qt.Key.Key_A, "a"),
             (Qt.Key.Key_S, "s"),
             (Qt.Key.Key_D, "d"),
         ):
@@ -1474,10 +1491,18 @@ def test_wasd_keys_do_not_command_arm_keyboard_intent(monkeypatch, tmp_path):
             )
             assert handled is False
 
+        win.pilot_svc.set_arm_park_position(-0.25, 0.75)
+        handled = win.eventFilter(
+            win,
+            QKeyEvent(QEvent.Type.KeyPress, Qt.Key.Key_A, Qt.KeyboardModifier.NoModifier, "a"),
+        )
+        assert handled is True
+
         assert win._servo_wrist_keys_down == set()
         assert win.pilot_svc.arm_kb_intent_calls == []
         assert win.pilot_svc.arm_kb_pitch_dir == pytest.approx(0.0)
         assert win.pilot_svc.arm_kb_wrist_dir == pytest.approx(0.0)
+        assert win.pilot_svc.arm_position_calls[-1] == pytest.approx((-0.25, 0.75))
     finally:
         win.close()
         app.processEvents()
