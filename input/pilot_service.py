@@ -263,6 +263,25 @@ class PilotPublisherService:
                 edges[k] = "up"
         return edges
 
+    def _set_max_gain_locked(self, value: float) -> bool:
+        """Set pilot max gain cap while holding _mode_lock."""
+        try:
+            new_val = float(value)
+        except Exception:
+            return False
+        prev = float(self._max_gain)
+        new_val = max(float(self._max_gain_min), min(float(self._max_gain_max), new_val))
+        # Snap to 1% granularity for stable UI text / wire representation.
+        new_val = round(new_val, 2)
+        changed = abs(new_val - prev) > 1e-9
+        self._max_gain = float(new_val)
+        self._modes["max_gain"] = float(self._max_gain)
+        return changed
+
+    def _set_max_gain(self, value: float) -> bool:
+        with self._mode_lock:
+            return self._set_max_gain_locked(value)
+
     def _adjust_max_gain(self, delta: float) -> bool:
         """Adjust pilot max gain cap. Returns True if the value changed."""
         try:
@@ -272,22 +291,26 @@ class PilotPublisherService:
         if step == 0.0:
             return False
         with self._mode_lock:
-            prev = float(self._max_gain)
-            new_val = prev + step
-            new_val = max(float(self._max_gain_min), min(float(self._max_gain_max), float(new_val)))
-            # Snap to 1% granularity for stable UI text / wire representation.
-            new_val = round(new_val, 2)
-            changed = abs(new_val - prev) > 1e-9
-            self._max_gain = float(new_val)
-            self._modes["max_gain"] = float(self._max_gain)
-        return changed
+            return self._set_max_gain_locked(float(self._max_gain) + step)
 
     def current_max_gain(self) -> float:
         with self._mode_lock:
             return float(self._max_gain)
 
+    def max_gain_min(self) -> float:
+        return float(self._max_gain_min)
+
+    def max_gain_max(self) -> float:
+        return float(self._max_gain_max)
+
     def max_gain_step(self) -> float:
         return float(self._max_gain_step)
+
+    def set_max_gain(self, value: float) -> bool:
+        changed = self._set_max_gain(value)
+        if changed:
+            self._emit_status(self._status_payload(controller="connected"))
+        return changed
 
     def adjust_max_gain(self, delta: float) -> bool:
         changed = self._adjust_max_gain(delta)

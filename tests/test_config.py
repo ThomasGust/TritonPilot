@@ -79,3 +79,11 @@ def test_transect_defaults_enable_yaw_er_and_50_percent_blue_target(monkeypatch)
 
     assert cfg.TRANSECT_ROTATION_SERVO_DEFAULT is True
     assert cfg.TRANSECT_TARGET_BLUE_WIDTH_PERCENT_DEFAULT == 50.0
+
+
+def test_pilot_max_gain_defaults_to_40_percent(monkeypatch):
+    monkeypatch.delenv("TRITON_PILOT_MAX_GAIN_DEFAULT", raising=False)
+
+    cfg = _reload_config(monkeypatch)
+
+    assert cfg.PILOT_MAX_GAIN_DEFAULT == 0.4

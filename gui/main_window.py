@@ -42,6 +42,10 @@ from PyQt6.QtWidgets import (
     QStackedWidget,
     QTabBar,
     QTextEdit,
+    QMenu,
+    QSpinBox,
+    QToolButton,
+    QWidgetAction,
 )
 from config import (
     ARM_DISARM_TOGGLE_EDGE,
@@ -1757,6 +1761,8 @@ class MainWindow(QMainWindow):
         top_bar_lay.setSpacing(6)
         top_bar_lay.addWidget(self._page_tabs, 0)
         top_bar_lay.addStretch(1)
+        self._max_gain_btn = self._make_max_gain_control()
+        top_bar_lay.addWidget(self._max_gain_btn, 0)
         self._competition_clock = CompetitionClock()
         top_bar_lay.addWidget(self._competition_clock, 0)
         cb_cap, cb_cap_min, cb_cap_max = self._initial_current_budget_cap()
@@ -1908,6 +1914,131 @@ class MainWindow(QMainWindow):
         except Exception:
             pass
 
+    @staticmethod
+    def _gain_percent(gain) -> int:
+        try:
+            value = float(gain)
+        except Exception:
+            value = 0.0
+        return int(round(max(0.0, min(1.0, value)) * 100.0))
+
+    def _max_gain_percent_bounds(self) -> tuple[int, int, int]:
+        def _svc_value(name: str, fallback: float) -> float:
+            try:
+                fn = getattr(self.pilot_svc, name, None)
+                if callable(fn):
+                    return float(fn())
+            except Exception:
+                pass
+            return float(fallback)
+
+        lo = self._gain_percent(_svc_value("max_gain_min", 0.05))
+        hi = self._gain_percent(_svc_value("max_gain_max", 1.0))
+        if hi < lo:
+            lo, hi = hi, lo
+        step = max(1, self._gain_percent(_svc_value("max_gain_step", 0.05)))
+        return lo, hi, step
+
+    def _make_max_gain_control(self) -> QToolButton:
+        btn = QToolButton()
+        self._max_gain_btn = btn
+        btn.setObjectName("maxGainButton")
+        btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        btn.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
+        btn.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextOnly)
+
+        menu = QMenu(btn)
+        gain_widget = QWidget(menu)
+        gain_lay = QHBoxLayout(gain_widget)
+        gain_lay.setContentsMargins(8, 4, 8, 4)
+        gain_lay.setSpacing(6)
+        gain_label = QLabel("Max")
+        gain_label.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+
+        self._max_gain_spin = QSpinBox()
+        self._max_gain_spin.setObjectName("maxGainSpin")
+        self._max_gain_spin.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        lo, hi, step = self._max_gain_percent_bounds()
+        self._max_gain_spin.setRange(lo, hi)
+        self._max_gain_spin.setSingleStep(step)
+        self._max_gain_spin.setSuffix("%")
+        self._max_gain_spin.setAccelerated(True)
+        self._max_gain_spin.setKeyboardTracking(False)
+        self._max_gain_spin.valueChanged.connect(self._set_rov_gain_from_ui_percent)
+
+        gain_lay.addWidget(gain_label, 0)
+        gain_lay.addWidget(self._max_gain_spin, 0)
+        gain_action = QWidgetAction(menu)
+        gain_action.setDefaultWidget(gain_widget)
+        menu.addAction(gain_action)
+        menu.addSeparator()
+
+        lo, hi, _step = self._max_gain_percent_bounds()
+        for pct in (20, 30, 40, 50, 60, 70, 80, 100):
+            if lo <= pct <= hi:
+                act = menu.addAction(f"{pct}%")
+                act.triggered.connect(lambda _checked=False, p=pct: self._set_rov_gain_from_ui_percent(p))
+
+        menu.aboutToShow.connect(self._sync_rov_gain_ui)
+        btn.setMenu(menu)
+        self._sync_rov_gain_ui()
+        return btn
+
+    def _sync_rov_gain_ui(self, gain=None) -> None:
+        if gain is None:
+            try:
+                gain = self.pilot_svc.current_max_gain()
+            except Exception:
+                gain = None
+        if gain is None:
+            return
+
+        pct = self._gain_percent(gain)
+        btn = getattr(self, "_max_gain_btn", None)
+        if btn is not None:
+            text = f"Gain {pct}%"
+            btn.setText(text)
+            btn.setToolTip(f"ROV max gain: {pct}%")
+
+        spin = getattr(self, "_max_gain_spin", None)
+        if spin is not None:
+            lo, hi, step = self._max_gain_percent_bounds()
+            if spin.minimum() != lo or spin.maximum() != hi:
+                spin.setRange(lo, hi)
+            if spin.singleStep() != step:
+                spin.setSingleStep(step)
+            previous = spin.blockSignals(True)
+            try:
+                spin.setValue(max(lo, min(hi, pct)))
+            finally:
+                spin.blockSignals(previous)
+
+        lbl = getattr(self, "_gain_lbl", None)
+        if lbl is not None:
+            self._set_status(lbl, f"Max Gain: {pct}%")
+
+    def _set_rov_gain_from_ui_percent(self, percent: int) -> None:
+        lo, hi, _step = self._max_gain_percent_bounds()
+        pct = max(lo, min(hi, int(round(float(percent)))))
+        value = float(pct) / 100.0
+        try:
+            setter = getattr(self.pilot_svc, "set_max_gain", None)
+            if callable(setter):
+                setter(value)
+            else:
+                current = float(self.pilot_svc.current_max_gain())
+                self.pilot_svc.adjust_max_gain(value - current)
+            gain = float(self.pilot_svc.current_max_gain())
+        except Exception:
+            gain = value
+        self._sync_rov_gain_ui(gain)
+        try:
+            self._refresh_gain_indicators_from_modes(self.pilot_svc.current_modes())
+        except Exception:
+            pass
+        pct = self._gain_percent(gain)
+        self.statusBar().showMessage(f"ROV motion gain: {pct}%", 3000)
+
     def _adjust_back_gripper_gain_from_keyboard(self, direction: float) -> None:
         try:
             step = float(self.pilot_svc.back_gripper_gain_step()) * float(direction)
@@ -1957,7 +2088,7 @@ class MainWindow(QMainWindow):
         if changed:
             pct = int(round(max(0.0, min(1.0, gain)) * 100.0))
             self._refresh_gain_indicators_from_modes(self.pilot_svc.current_modes())
-            self._set_status(self._gain_lbl, f"Max Gain: {pct}%")
+            self._sync_rov_gain_ui(gain)
             self.statusBar().showMessage(f"ROV motion gain: {pct}%  |  keys: - / +", 3000)
 
     def _toggle_lights_from_keyboard(self) -> None:
@@ -2382,8 +2513,7 @@ class MainWindow(QMainWindow):
             try:
                 mg = modes.get("max_gain", None)
                 if mg is not None:
-                    pct = int(round(max(0.0, min(1.0, float(mg))) * 100.0))
-                    self._set_status(self._gain_lbl, f"Max Gain: {pct}%")
+                    self._sync_rov_gain_ui(float(mg))
             except Exception:
                 pass
             self._refresh_gain_indicators_from_modes(modes)

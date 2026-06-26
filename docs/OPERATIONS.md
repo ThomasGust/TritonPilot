@@ -37,7 +37,7 @@ Before arming:
 
 - Confirm the controller is detected.
 - Confirm neutral sticks send near-zero command values.
-- Confirm the displayed max gain is appropriate.
+- Confirm the top-bar max gain is appropriate.
 - Confirm reverse drive is off unless intentionally being used.
 - Confirm arm/disarm backup controls are understood by the pilot.
 
@@ -49,7 +49,7 @@ Default controls include:
 - Keyboard `R` toggles reverse drive.
 - Keyboard `L` sends the lights edge.
 - Keyboard `O` sends the arm/disarm edge.
-- `Y`/`A` on the controller and keyboard `+`/`-` adjust the main ROV motion gain.
+- Top-bar `Gain`, controller `Y`/`A`, and keyboard `+`/`-` adjust the main ROV motion gain.
 - Keyboard `1`/`2` adjust the back rotating gripper gain.
 - Keyboard `6`/`7` adjust the arm gain.
 - Keyboard `A` walks the differential arm to the configured park pose.

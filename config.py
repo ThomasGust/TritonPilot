@@ -344,7 +344,7 @@ FORWARD_CAMERA_KEYWORDS = _parse_str_list_env(
 # Y = +5%, A = -5% by default (handled in input/pilot_service.py).
 # Values are normalized fractions (0.0..1.0) and interpreted on the ROV side as
 # a multiplier of the configured POWER_SCALE baseline.
-PILOT_MAX_GAIN_DEFAULT = float(os.environ.get("TRITON_PILOT_MAX_GAIN_DEFAULT", "0.8"))
+PILOT_MAX_GAIN_DEFAULT = float(os.environ.get("TRITON_PILOT_MAX_GAIN_DEFAULT", "0.4"))
 PILOT_MAX_GAIN_MIN = float(os.environ.get("TRITON_PILOT_MAX_GAIN_MIN", "0.05"))
 PILOT_MAX_GAIN_MAX = float(os.environ.get("TRITON_PILOT_MAX_GAIN_MAX", "0.8"))
 PILOT_MAX_GAIN_STEP = float(os.environ.get("TRITON_PILOT_MAX_GAIN_STEP", "0.05"))

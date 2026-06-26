@@ -42,7 +42,7 @@ class _FakePilotService:
         self.axis_target_calls = []
         self.aux_axis_calls = []
         self.aux_axes = {}
-        self.max_gain = 1.0
+        self.max_gain = 0.4
         self.back_gripper_gain = 0.5
         self.arm_gain = 0.5
         self.arm_kb_pitch_dir = 0.0
@@ -97,9 +97,20 @@ class _FakePilotService:
     def max_gain_step(self):
         return 0.05
 
+    def max_gain_min(self):
+        return 0.05
+
+    def max_gain_max(self):
+        return 0.8
+
+    def set_max_gain(self, value):
+        prev = self.max_gain
+        self.max_gain = max(0.05, min(0.8, round(float(value), 2)))
+        return self.max_gain != prev
+
     def adjust_max_gain(self, delta):
         prev = self.max_gain
-        self.max_gain = max(0.05, min(1.0, round(self.max_gain + float(delta), 2)))
+        self.max_gain = max(0.05, min(0.8, round(self.max_gain + float(delta), 2)))
         return self.max_gain != prev
 
     def current_max_gain(self):
@@ -1555,9 +1566,43 @@ def test_keyboard_gain_shortcuts_update_pilot_modes_and_indicators(monkeypatch, 
         assert win.pilot_telemetry_column.arm_gain_indicator.value == pytest.approx(0.45)
 
         win.eventFilter(win, QKeyEvent(QEvent.Type.KeyPress, Qt.Key.Key_Minus, Qt.KeyboardModifier.NoModifier, "-"))
-        assert win.pilot_svc.max_gain == pytest.approx(0.95)
-        assert 1.0 - win.pilot_svc.max_gain == pytest.approx(0.05)
-        assert win.pilot_telemetry_column.rov_gain_indicator.value == pytest.approx(0.95)
+        assert win.pilot_svc.max_gain == pytest.approx(0.35)
+        assert 0.40 - win.pilot_svc.max_gain == pytest.approx(0.05)
+        assert win.pilot_telemetry_column.rov_gain_indicator.value == pytest.approx(0.35)
+    finally:
+        win.close()
+        app.processEvents()
+
+
+def test_top_bar_gain_button_sets_pilot_max_gain(monkeypatch, tmp_path):
+    app = _app()
+    streams_path = tmp_path / "streams.json"
+    streams_path.write_text("{}", encoding="utf-8")
+
+    monkeypatch.setattr(main_window, "QSettings", lambda *args, **kwargs: _FakeSettings())
+    monkeypatch.setattr(main_window, "PilotPublisherService", _FakePilotService)
+    monkeypatch.setattr(main_window, "SensorSubscriberService", _FakeSensorService)
+    monkeypatch.setattr(main_window, "RemoteCameraManager", _FakeRemoteCameraManager)
+    monkeypatch.setattr(main_window, "VideoTabs", _FakeVideoPanel)
+    monkeypatch.setattr(main_window, "HoldTestPanel", _SimplePage)
+    monkeypatch.setattr(main_window, "ManagementPage", _SimplePage)
+    monkeypatch.setattr(main_window.threading, "Thread", _NoopThread)
+
+    win = main_window.MainWindow(str(streams_path))
+    try:
+        app.processEvents()
+
+        assert win._max_gain_btn.text() == "Gain 40%"
+        assert win._max_gain_spin.value() == 40
+
+        win._max_gain_spin.setValue(55)
+        app.processEvents()
+
+        assert win.pilot_svc.max_gain == pytest.approx(0.55)
+        assert win.pilot_svc.current_modes()["max_gain"] == pytest.approx(0.55)
+        assert win.pilot_telemetry_column.rov_gain_indicator.value == pytest.approx(0.55)
+        assert win._max_gain_btn.text() == "Gain 55%"
+        assert win._gain_lbl.text() == "Max Gain: 55%"
     finally:
         win.close()
         app.processEvents()

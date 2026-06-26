@@ -208,8 +208,12 @@ def test_arm_and_max_gains_are_exposed_in_modes(monkeypatch):
 
     assert "arm_gain" in svc.current_modes()
     assert "max_gain" in svc.current_modes()
+    target_max = 0.55 if abs(float(start_max) - 0.55) > 1e-9 else 0.50
+    assert svc.set_max_gain(target_max) is True
+    assert svc.current_modes()["max_gain"] == pytest.approx(target_max)
     assert svc.adjust_arm_gain(-svc.arm_gain_step()) is True
     assert svc.current_arm_gain() < start_arm
+    start_max = svc.current_max_gain()
     assert svc.adjust_max_gain(-svc.max_gain_step()) is True
     assert svc.current_max_gain() < start_max
 

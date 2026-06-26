@@ -148,6 +148,28 @@ def apply_modern_style(app: QApplication) -> None:
         background: #1d2028;
         border: 1px solid #303541;
     }
+    QToolButton#maxGainButton {
+        min-width: 78px;
+        padding: 3px 8px;
+        border-radius: 6px;
+        border: 1px solid #4b755d;
+        background: #213128;
+        color: #ecfff5;
+        font-weight: 800;
+    }
+    QToolButton#maxGainButton:hover {
+        border: 1px solid #78a98b;
+        background: #2a3d32;
+    }
+    QSpinBox#maxGainSpin {
+        min-width: 68px;
+        padding: 2px 4px;
+        border: 1px solid #414a5c;
+        border-radius: 6px;
+        background: #15161d;
+        color: #edf3ff;
+        font-weight: 700;
+    }
     QLabel#tetherStatusPill {
         padding: 5px 10px;
         border-radius: 8px;
