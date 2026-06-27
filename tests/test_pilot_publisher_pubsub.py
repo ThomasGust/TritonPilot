@@ -211,6 +211,7 @@ def test_arm_and_max_gains_are_exposed_in_modes(monkeypatch):
     target_max = 0.55 if abs(float(start_max) - 0.55) > 1e-9 else 0.50
     assert svc.set_max_gain(target_max) is True
     assert svc.current_modes()["max_gain"] == pytest.approx(target_max)
+    assert svc.current_modes()["max_gain_cap"] == pytest.approx(target_max)
     assert svc.adjust_arm_gain(-svc.arm_gain_step()) is True
     assert svc.current_arm_gain() < start_arm
     start_max = svc.current_max_gain()
@@ -226,10 +227,19 @@ def test_max_gain_is_clamped_before_publish(monkeypatch):
 
     assert svc.set_max_gain(max_gain + 1.0) is True
     assert svc.current_max_gain() == pytest.approx(max_gain)
+    assert svc.current_max_gain_cap() == pytest.approx(max_gain)
     assert svc.current_modes()["max_gain"] == pytest.approx(max_gain)
+    assert svc.current_modes()["max_gain_cap"] == pytest.approx(max_gain)
 
     assert svc.adjust_max_gain(+svc.max_gain_step()) is False
     assert svc.current_max_gain() == pytest.approx(max_gain)
+
+    assert svc.set_max_gain(0.4) is True
+    assert svc.current_max_gain() == pytest.approx(0.4)
+    assert svc.current_max_gain_cap() == pytest.approx(0.4)
+    assert svc.adjust_max_gain(+svc.max_gain_step()) is False
+    svc._handle_mode_edges({"y": "down"})
+    assert svc.current_max_gain() == pytest.approx(0.4)
 
     frame = svc._build_frame(
         0.0,
@@ -258,7 +268,8 @@ def test_max_gain_is_clamped_before_publish(monkeypatch):
     svc._handle_mode_edges(edges)
     frame.edges = dict(edges)
     frame.modes = svc.current_modes()
-    assert frame.modes["max_gain"] == pytest.approx(max_gain)
+    assert frame.modes["max_gain"] == pytest.approx(0.4)
+    assert frame.modes["max_gain_cap"] == pytest.approx(0.4)
 
 
 def test_hold_modes_are_exposed_and_toggleable(monkeypatch):

@@ -141,15 +141,15 @@ class PilotPublisherService:
         self._reverse_toggle_button = str(REVERSE_TOGGLE_BUTTON or "").strip().lower()
         self._mode_lock = threading.Lock()
 
-        # Pilot-adjustable gain cap (Y +5%, A -5%). This is transmitted in
-        # PilotFrame.modes["max_gain"] and interpreted on the ROV side as a
-        # multiplier of the configured POWER_SCALE baseline.
+        # Pilot-adjustable ROV cap. The GUI dropdown sets the live ceiling;
+        # Y/A and +/- can only move the effective value within that ceiling.
         self._max_gain_min = float(PILOT_MAX_GAIN_MIN)
         self._max_gain_max = float(PILOT_MAX_GAIN_MAX)
         if self._max_gain_max < self._max_gain_min:
             self._max_gain_min, self._max_gain_max = self._max_gain_max, self._max_gain_min
         self._max_gain_step = max(0.0, float(PILOT_MAX_GAIN_STEP))
-        self._max_gain = max(self._max_gain_min, min(self._max_gain_max, float(PILOT_MAX_GAIN_DEFAULT)))
+        self._max_gain_cap = max(self._max_gain_min, min(self._max_gain_max, float(PILOT_MAX_GAIN_DEFAULT)))
+        self._max_gain = float(self._max_gain_cap)
 
         self._back_gripper_gain_min = float(BACK_GRIPPER_GAIN_MIN)
         self._back_gripper_gain_max = float(BACK_GRIPPER_GAIN_MAX)
@@ -186,6 +186,7 @@ class PilotPublisherService:
         self._modes = {
             "depth_hold": bool(DEPTH_HOLD_DEFAULT),
             "max_gain": float(self._max_gain),
+            "max_gain_cap": float(self._max_gain_cap),
             "current_budget": bool(CURRENT_BUDGET_DEFAULT),
             "current_budget_max_a": float(self._current_budget_max_a),
             "reverse": bool(REVERSE_MODE_DEFAULT),
@@ -263,27 +264,30 @@ class PilotPublisherService:
                 edges[k] = "up"
         return edges
 
-    def _set_max_gain_locked(self, value: float) -> bool:
-        """Set pilot max gain cap while holding _mode_lock."""
+    def _set_max_gain_cap_locked(self, value: float) -> bool:
+        """Set the live ROV gain/thruster cap while holding _mode_lock."""
         try:
             new_val = float(value)
         except Exception:
             return False
-        prev = float(self._max_gain)
+        prev_gain = float(self._max_gain)
+        prev_cap = float(self._max_gain_cap)
         new_val = max(float(self._max_gain_min), min(float(self._max_gain_max), new_val))
         # Snap to 1% granularity for stable UI text / wire representation.
         new_val = round(new_val, 2)
-        changed = abs(new_val - prev) > 1e-9
+        changed = abs(new_val - prev_cap) > 1e-9 or abs(new_val - prev_gain) > 1e-9
+        self._max_gain_cap = float(new_val)
         self._max_gain = float(new_val)
         self._modes["max_gain"] = float(self._max_gain)
+        self._modes["max_gain_cap"] = float(self._max_gain_cap)
         return changed
 
-    def _set_max_gain(self, value: float) -> bool:
+    def _set_max_gain_cap(self, value: float) -> bool:
         with self._mode_lock:
-            return self._set_max_gain_locked(value)
+            return self._set_max_gain_cap_locked(value)
 
     def _adjust_max_gain(self, delta: float) -> bool:
-        """Adjust pilot max gain cap. Returns True if the value changed."""
+        """Adjust effective ROV gain within the live cap. Returns True if changed."""
         try:
             step = float(delta)
         except Exception:
@@ -291,11 +295,22 @@ class PilotPublisherService:
         if step == 0.0:
             return False
         with self._mode_lock:
-            return self._set_max_gain_locked(float(self._max_gain) + step)
+            prev = float(self._max_gain)
+            new_val = max(float(self._max_gain_min), min(float(self._max_gain_cap), prev + step))
+            new_val = round(new_val, 2)
+            changed = abs(new_val - prev) > 1e-9
+            self._max_gain = float(new_val)
+            self._modes["max_gain"] = float(self._max_gain)
+            self._modes["max_gain_cap"] = float(self._max_gain_cap)
+        return changed
 
     def current_max_gain(self) -> float:
         with self._mode_lock:
             return float(self._max_gain)
+
+    def current_max_gain_cap(self) -> float:
+        with self._mode_lock:
+            return float(self._max_gain_cap)
 
     def max_gain_min(self) -> float:
         return float(self._max_gain_min)
@@ -307,7 +322,7 @@ class PilotPublisherService:
         return float(self._max_gain_step)
 
     def set_max_gain(self, value: float) -> bool:
-        changed = self._set_max_gain(value)
+        changed = self._set_max_gain_cap(value)
         if changed:
             self._emit_status(self._status_payload(controller="connected"))
         return changed
@@ -1041,6 +1056,7 @@ class PilotPublisherService:
                 payload["error"] = prev_err
         payload.update(self.current_modes())
         payload["max_gain"] = float(self._max_gain)
+        payload["max_gain_cap"] = float(self._max_gain_cap)
         return payload
 
     def start(self, threaded: bool = True):

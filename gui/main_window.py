@@ -1406,7 +1406,7 @@ class MainWindow(QMainWindow):
         self._depth_lbl = QLabel("Depth: -", self)
         self._depth_lbl.hide()
 
-        self._gain_lbl = QLabel("Max Gain: 100%")
+        self._gain_lbl = QLabel("ROV Cap: 100%")
         self.statusBar().addPermanentWidget(self._gain_lbl)
 
         self._mode_lbl = QLabel("Mode: FORWARD | Depth Hold: OFF")
@@ -1942,12 +1942,33 @@ class MainWindow(QMainWindow):
         step = max(1, self._gain_percent(_svc_value("max_gain_step", 0.05)))
         return lo, hi, step
 
+    def _current_rov_gain_cap(self):
+        try:
+            fn = getattr(self.pilot_svc, "current_max_gain_cap", None)
+            if callable(fn):
+                return float(fn())
+        except Exception:
+            pass
+        try:
+            modes = self.pilot_svc.current_modes()
+            if isinstance(modes, dict) and modes.get("max_gain_cap") is not None:
+                return float(modes.get("max_gain_cap"))
+        except Exception:
+            pass
+        try:
+            return float(self.pilot_svc.current_max_gain())
+        except Exception:
+            return None
+
     def _clamp_rov_gain(self, gain):
         try:
             value = float(gain)
         except Exception:
             return None
-        lo, hi, _step = self._max_gain_percent_bounds()
+        lo, absolute_hi, _step = self._max_gain_percent_bounds()
+        cap = self._current_rov_gain_cap()
+        hi = self._gain_percent(cap) if cap is not None else absolute_hi
+        hi = max(lo, min(absolute_hi, int(hi)))
         return max(float(lo) / 100.0, min(float(hi) / 100.0, value))
 
     def _make_max_gain_control(self) -> QToolButton:
@@ -1997,22 +2018,16 @@ class MainWindow(QMainWindow):
 
     def _sync_rov_gain_ui(self, gain=None) -> None:
         if gain is None:
-            try:
-                gain = self.pilot_svc.current_max_gain()
-            except Exception:
-                gain = None
-        if gain is None:
-            return
-        gain = self._clamp_rov_gain(gain)
+            gain = self._current_rov_gain_cap()
         if gain is None:
             return
 
         pct = self._gain_percent(gain)
         btn = getattr(self, "_max_gain_btn", None)
         if btn is not None:
-            text = f"Gain {pct}%"
+            text = f"Cap {pct}%"
             btn.setText(text)
-            btn.setToolTip(f"ROV max gain: {pct}%")
+            btn.setToolTip(f"ROV max gain / thruster cap: {pct}%")
 
         spin = getattr(self, "_max_gain_spin", None)
         if spin is not None:
@@ -2029,7 +2044,7 @@ class MainWindow(QMainWindow):
 
         lbl = getattr(self, "_gain_lbl", None)
         if lbl is not None:
-            self._set_status(lbl, f"Max Gain: {pct}%")
+            self._set_status(lbl, f"ROV Cap: {pct}%")
 
     def _set_rov_gain_from_ui_percent(self, percent: int) -> None:
         lo, hi, _step = self._max_gain_percent_bounds()
@@ -2050,8 +2065,8 @@ class MainWindow(QMainWindow):
             self._refresh_gain_indicators_from_modes(self.pilot_svc.current_modes())
         except Exception:
             pass
-        pct = self._gain_percent(gain)
-        self.statusBar().showMessage(f"ROV motion gain: {pct}%", 3000)
+        pct = self._gain_percent(self._current_rov_gain_cap() if self._current_rov_gain_cap() is not None else gain)
+        self.statusBar().showMessage(f"ROV max gain / thruster cap: {pct}%", 3000)
 
     def _adjust_back_gripper_gain_from_keyboard(self, direction: float) -> None:
         try:
@@ -2102,8 +2117,12 @@ class MainWindow(QMainWindow):
         if changed:
             pct = int(round(max(0.0, min(1.0, gain)) * 100.0))
             self._refresh_gain_indicators_from_modes(self.pilot_svc.current_modes())
-            self._sync_rov_gain_ui(gain)
-            self.statusBar().showMessage(f"ROV motion gain: {pct}%  |  keys: - / +", 3000)
+            self._sync_rov_gain_ui()
+            cap_pct = self._gain_percent(self._current_rov_gain_cap())
+            self.statusBar().showMessage(f"ROV motion gain: {pct}%  |  cap {cap_pct}%  |  keys: - / +", 3000)
+        elif direction > 0:
+            cap_pct = self._gain_percent(self._current_rov_gain_cap())
+            self.statusBar().showMessage(f"ROV gain capped at {cap_pct}%  |  dropdown sets cap", 2500)
 
     def _toggle_lights_from_keyboard(self) -> None:
         try:
@@ -2527,7 +2546,8 @@ class MainWindow(QMainWindow):
             try:
                 mg = modes.get("max_gain", None)
                 if mg is not None:
-                    self._sync_rov_gain_ui(float(mg))
+                    cap = modes.get("max_gain_cap", mg)
+                    self._sync_rov_gain_ui(float(cap))
             except Exception:
                 pass
             self._refresh_gain_indicators_from_modes(modes)

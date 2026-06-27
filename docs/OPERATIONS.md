@@ -49,7 +49,8 @@ Default controls include:
 - Keyboard `R` toggles reverse drive.
 - Keyboard `L` sends the lights edge.
 - Keyboard `O` sends the arm/disarm edge.
-- Top-bar `Gain`, controller `Y`/`A`, and keyboard `+`/`-` adjust the main ROV motion gain and final thruster-output cap.
+- Top-bar `Cap` sets the main ROV max gain / final thruster-output cap.
+- Controller `Y`/`A` and keyboard `+`/`-` adjust the effective ROV gain within that cap.
 - Keyboard `1`/`2` adjust the back rotating gripper gain.
 - Keyboard `6`/`7` adjust the arm gain.
 - Keyboard `A` walks the differential arm to the configured park pose.
@@ -59,8 +60,8 @@ Default controls include:
 - Keyboard `W`, `S`, and `D` are not bound to manipulator motion.
 
 The pilot-side telemetry column shows three live gain indicators: `BACK`,
-`ROV`, and `ARM`; `ROV` is the live cap TritonOS uses on final mixed thruster
-outputs.
+`ROV`, and `ARM`; `ROV` cannot exceed the top-bar cap TritonOS uses for final
+mixed thruster outputs.
 
 Controller mappings can vary by operating system and driver. Use
 `tools/controller_probe.py` when the observed behavior does not match the

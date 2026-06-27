@@ -43,6 +43,7 @@ class _FakePilotService:
         self.aux_axis_calls = []
         self.aux_axes = {}
         self.max_gain = 0.4
+        self.max_gain_cap = 0.4
         self.back_gripper_gain = 0.5
         self.arm_gain = 0.5
         self.arm_kb_pitch_dir = 0.0
@@ -88,6 +89,7 @@ class _FakePilotService:
     def current_modes(self):
         return {
             "max_gain": self.max_gain,
+            "max_gain_cap": self.max_gain_cap,
             "back_gripper_gain": self.back_gripper_gain,
             "t200_wrist_gain": self.back_gripper_gain,
             "arm_gain": self.arm_gain,
@@ -103,14 +105,18 @@ class _FakePilotService:
     def max_gain_max(self):
         return 0.8
 
+    def current_max_gain_cap(self):
+        return self.max_gain_cap
+
     def set_max_gain(self, value):
-        prev = self.max_gain
-        self.max_gain = max(0.05, min(0.8, round(float(value), 2)))
-        return self.max_gain != prev
+        prev = (self.max_gain, self.max_gain_cap)
+        self.max_gain_cap = max(0.05, min(0.8, round(float(value), 2)))
+        self.max_gain = self.max_gain_cap
+        return (self.max_gain, self.max_gain_cap) != prev
 
     def adjust_max_gain(self, delta):
         prev = self.max_gain
-        self.max_gain = max(0.05, min(0.8, round(self.max_gain + float(delta), 2)))
+        self.max_gain = max(0.05, min(self.max_gain_cap, round(self.max_gain + float(delta), 2)))
         return self.max_gain != prev
 
     def current_max_gain(self):
@@ -1592,26 +1598,41 @@ def test_top_bar_gain_button_sets_pilot_max_gain(monkeypatch, tmp_path):
     try:
         app.processEvents()
 
-        assert win._max_gain_btn.text() == "Gain 40%"
+        assert win._max_gain_btn.text() == "Cap 40%"
         assert win._max_gain_spin.value() == 40
+
+        for _ in range(10):
+            win.eventFilter(win, QKeyEvent(QEvent.Type.KeyPress, Qt.Key.Key_Plus, Qt.KeyboardModifier.NoModifier, "+"))
+            win.eventFilter(win, QKeyEvent(QEvent.Type.KeyRelease, Qt.Key.Key_Plus, Qt.KeyboardModifier.NoModifier, "+"))
+        app.processEvents()
+
+        assert win.pilot_svc.max_gain == pytest.approx(0.4)
+        assert win.pilot_svc.current_modes()["max_gain"] == pytest.approx(0.4)
+        assert win.pilot_svc.current_modes()["max_gain_cap"] == pytest.approx(0.4)
+        assert win.pilot_telemetry_column.rov_gain_indicator.value == pytest.approx(0.4)
+        assert win._max_gain_btn.text() == "Cap 40%"
 
         win._max_gain_spin.setValue(55)
         app.processEvents()
 
         assert win.pilot_svc.max_gain == pytest.approx(0.55)
+        assert win.pilot_svc.max_gain_cap == pytest.approx(0.55)
         assert win.pilot_svc.current_modes()["max_gain"] == pytest.approx(0.55)
+        assert win.pilot_svc.current_modes()["max_gain_cap"] == pytest.approx(0.55)
         assert win.pilot_telemetry_column.rov_gain_indicator.value == pytest.approx(0.55)
-        assert win._max_gain_btn.text() == "Gain 55%"
-        assert win._gain_lbl.text() == "Max Gain: 55%"
+        assert win._max_gain_btn.text() == "Cap 55%"
+        assert win._gain_lbl.text() == "ROV Cap: 55%"
 
         win._max_gain_spin.setValue(100)
         app.processEvents()
 
         assert win._max_gain_spin.value() == 80
         assert win.pilot_svc.max_gain == pytest.approx(0.8)
+        assert win.pilot_svc.max_gain_cap == pytest.approx(0.8)
         assert win.pilot_svc.current_modes()["max_gain"] == pytest.approx(0.8)
+        assert win.pilot_svc.current_modes()["max_gain_cap"] == pytest.approx(0.8)
         assert win.pilot_telemetry_column.rov_gain_indicator.value == pytest.approx(0.8)
-        assert win._max_gain_btn.text() == "Gain 80%"
+        assert win._max_gain_btn.text() == "Cap 80%"
 
         for _ in range(10):
             win.eventFilter(win, QKeyEvent(QEvent.Type.KeyPress, Qt.Key.Key_Plus, Qt.KeyboardModifier.NoModifier, "+"))
@@ -1620,10 +1641,15 @@ def test_top_bar_gain_button_sets_pilot_max_gain(monkeypatch, tmp_path):
 
         assert win.pilot_svc.max_gain == pytest.approx(0.8)
         assert win.pilot_telemetry_column.rov_gain_indicator.value == pytest.approx(0.8)
-        assert win._max_gain_btn.text() == "Gain 80%"
+        assert win._max_gain_btn.text() == "Cap 80%"
 
         win._refresh_gain_indicators_from_modes({"max_gain": 1.0})
         assert win.pilot_telemetry_column.rov_gain_indicator.value == pytest.approx(0.8)
+
+        win._max_gain_spin.setValue(40)
+        app.processEvents()
+        win._refresh_gain_indicators_from_modes({"max_gain": 1.0})
+        assert win.pilot_telemetry_column.rov_gain_indicator.value == pytest.approx(0.4)
     finally:
         win.close()
         app.processEvents()
